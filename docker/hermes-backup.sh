@@ -58,6 +58,15 @@ cd "$HERMES_HOME"
 # never touches these live; excluding them from backup avoids committing a
 # torn/inconsistent snapshot of an in-progress write) and generic
 # *secret*/*credentials* catch-alls per the plan's baseline requirement.
+#
+# [decision] (Task 9 fix) also excludes hermes-agent/ and bin/: found via
+# actual volume-mount end-to-end testing that the Hermes installer places its
+# own application checkout + private venv (hermes-agent/, ~1.6GB) and private
+# uv/uvx copies (bin/) INSIDE $HERMES_HOME alongside genuine state. Backing
+# those up would commit gigabytes of installed app code/venv/node_modules
+# (plus a nested .git inside hermes-agent/) to the backup repo on every run
+# for no benefit — they're reproducible build artifacts, reseeded from the
+# image at container start instead (see entrypoint.sh).
 ensure_gitignore() {
     local f="$HERMES_HOME/.gitignore"
     [ -f "$f" ] && return 0
@@ -77,6 +86,8 @@ webhook_subscriptions.json
 **/webhook_subscriptions.json
 *.db-wal
 *.db-shm
+hermes-agent/
+bin/
 EOF
 }
 ensure_gitignore

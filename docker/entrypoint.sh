@@ -23,6 +23,10 @@ warn() { echo "entrypoint: WARNING: $*" >&2; }
 # gracefully if ever run outside that image (e.g. local testing).
 : "${HERMES_HOME:=$HOME/.hermes}"
 export HERMES_HOME
+# Baked-in seed of the installed app (see Task 9 fix below + Dockerfile);
+# defaulted defensively here too, same rationale as HERMES_HOME above.
+: "${HERMES_HOME_SEED:=$HOME/.hermes-seed}"
+export HERMES_HOME_SEED
 
 # ---------------------------------------------------------------------------
 # First-run / restore-from-backup check
@@ -93,6 +97,39 @@ if [ -n "${HERMES_BACKUP_REPO:-}" ] && { [ ! -d "$HERMES_HOME" ] || [ -z "$(ls -
         warn "clone of HERMES_BACKUP_REPO ($HERMES_BACKUP_REPO) failed (repo may not exist yet) — falling back to fresh init"
         mkdir -p "$HERMES_HOME"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# [decision] (Task 9 fix) reseed the baked-in Hermes application if missing
+# ---------------------------------------------------------------------------
+# Discovered via actual volume-mount end-to-end testing (Task 9), not
+# anticipated when Tasks 4/6 were written: the Hermes installer places its
+# OWN application checkout + private venv (hermes-agent/, ~1.6GB) and private
+# uv/uvx copies (bin/) INSIDE $HERMES_HOME itself, alongside genuine mutable
+# state (config.yaml, sessions/, memories/, cron/, ...). Every branch above
+# (already-populated / restored-from-backup / fresh-init) can legitimately
+# leave $HERMES_HOME without those two subtrees — a fresh or
+# restored-from-backup volume never had them; the backup repo deliberately
+# never stores them (see hermes-backup.sh's .gitignore — multi-GB of
+# installed app code has no business in a state backup). Without this step,
+# `hermes` itself fails to run whenever $HERMES_HOME is a genuinely fresh or
+# restored volume, which is exactly the intended production case for this
+# directory. Reseed is additive-only (never overwrites an existing subtree),
+# so a volume that already carries a prior real install (e.g. same volume
+# across a `docker restart`) is left untouched.
+if [ -d "$HERMES_HOME_SEED" ]; then
+    if [ ! -d "$HERMES_HOME/hermes-agent" ]; then
+        log "\$HERMES_HOME/hermes-agent missing — reseeding from $HERMES_HOME_SEED"
+        mkdir -p "$HERMES_HOME"
+        cp -a "$HERMES_HOME_SEED/hermes-agent" "$HERMES_HOME/hermes-agent"
+    fi
+    if [ ! -d "$HERMES_HOME/bin" ]; then
+        log "\$HERMES_HOME/bin missing — reseeding from $HERMES_HOME_SEED"
+        mkdir -p "$HERMES_HOME"
+        cp -a "$HERMES_HOME_SEED/bin" "$HERMES_HOME/bin"
+    fi
+else
+    warn "\$HERMES_HOME_SEED ($HERMES_HOME_SEED) not found — cannot reseed the Hermes application if \$HERMES_HOME is missing it; hermes commands will fail if this is a fresh/restored volume"
 fi
 
 # NOTE: mnemosyne's *.db-wal / *.db-shm files (SQLite WAL-mode sidecar files)
@@ -242,6 +279,26 @@ ensure_backup_cron_registered() {
         log "HERMES_BACKUP_REPO not set, skipping backup cron registration"
         return 0
     fi
+    # [decision] (Task 9 fix) confirmed by actually running `hermes cron
+    # create` against the real binary (not assumed from docs), in two
+    # steps: (1) it rejects absolute/home-relative script paths outright
+    # ("Script path must be relative to ~/.hermes/scripts/ ... use just
+    # the filename"), so the plan's original Task 7 syntax
+    # (--script /usr/local/bin/hermes-backup.sh) never actually registered
+    # the job; (2) a symlink under $HERMES_HOME/scripts/ pointing back at
+    # the real file also fails ("Script path escapes the scripts directory
+    # via traversal") — hermes resolves the real path and requires it to
+    # physically live inside ~/.hermes/scripts/. So: copy (not symlink) the
+    # real script — baked read-only into the image at
+    # /usr/local/bin/hermes-backup.sh — into $HERMES_HOME/scripts/ under
+    # the plain filename `--script` expects. Refreshed every start
+    # (idempotent overwrite), before the already-registered check below, so
+    # a future image update to the canonical script stays in sync even
+    # after the cron job itself is already registered on a persistent
+    # volume.
+    mkdir -p "$HERMES_HOME/scripts"
+    cp /usr/local/bin/hermes-backup.sh "$HERMES_HOME/scripts/hermes-backup.sh"
+    chmod +x "$HERMES_HOME/scripts/hermes-backup.sh"
     if hermes cron list 2>/dev/null | grep -qF "$job_name"; then
         log "backup cron job '$job_name' already registered, skipping"
         return 0
@@ -249,7 +306,7 @@ ensure_backup_cron_registered() {
     log "registering backup cron job '$job_name'"
     if ! hermes cron create "${HERMES_BACKUP_CRON_SCHEDULE:-0 3 * * *}" \
         --no-agent \
-        --script "/usr/local/bin/hermes-backup.sh" \
+        --script "hermes-backup.sh" \
         --name "$job_name" \
         --workdir "$HERMES_HOME"; then
         warn "failed to register backup cron job '$job_name' (non-fatal; hermes-backup.sh may not exist yet, or 'hermes cron create' flag syntax may have changed upstream)"
@@ -258,7 +315,7 @@ ensure_backup_cron_registered() {
 ensure_backup_cron_registered
 
 # ---------------------------------------------------------------------------
-# exec gateway as PID 1
+# exec gateway as PID 1 (or the operator-supplied command, if any)
 # ---------------------------------------------------------------------------
 # `hermes gateway` (bare, no subcommand) runs the gateway in the foreground
 # per docs/user-guide/messaging ("hermes gateway — Run in foreground"),
@@ -266,5 +323,19 @@ ensure_backup_cron_registered
 # launches the interactive TUI, and this deployment is messaging/gateway-only
 # (see plan header). Foreground, replaces this shell as PID 1, no
 # supervisord/process manager of our own.
+#
+# [decision] (Task 9 fix) `docker run <image> <cmd...>` args used to be
+# appended onto `hermes gateway`, e.g. `docker run <image> hermes doctor`
+# actually ran `hermes gateway hermes doctor` and failed argparse — breaking
+# exactly the diagnostic/version-check one-off invocations the plan's own
+# Validation Commands rely on (`hermes doctor`, `bash -lc '...version...'`).
+# Standard ENTRYPOINT+CMD convention: if the container is invoked with extra
+# args, exec THOSE as the command; only fall back to the gateway when invoked
+# bare. All of the init above (restore, git identity, gh auth, hermes config,
+# ralphex profile, cron registration) still always runs first either way.
+if [ "$#" -gt 0 ]; then
+    log "args supplied ($*) — exec'ing them directly instead of the gateway"
+    exec "$@"
+fi
 log "starting hermes gateway"
-exec hermes gateway "$@"
+exec hermes gateway

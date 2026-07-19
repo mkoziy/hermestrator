@@ -94,6 +94,26 @@ WORKDIR /home/app
 # wizard (it requires API keys), that runs from entrypoint.sh at container start
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive
 
+# [decision] (Task 9 fix, found via actual volume-mount end-to-end testing —
+# not anticipated when Tasks 4/6 were written): the Hermes installer puts its
+# OWN application checkout + private venv (~/.hermes/hermes-agent/, ~220MB
+# venv + ~1.4GB node_modules) and private uv/uvx copies (~/.hermes/bin/)
+# INSIDE the very directory ($HOME/.hermes == $HERMES_HOME) that this project
+# treats as pure mutable state and expects to live on an external persistent
+# volume across restarts (see Task 6 / entrypoint.sh). Mounting any volume at
+# $HERMES_HOME — including the intended empty-first-run or
+# restored-from-backup case — therefore shadows/deletes the baked-in
+# installation, and `hermes` fails outright. Fix: snapshot the as-installed
+# app here, at build time, so entrypoint.sh can reseed just those two
+# subtrees into $HERMES_HOME at container start if they're missing, without
+# touching genuine state (config.yaml, sessions/, memories/, cron/, etc).
+# Only the two installed-app subtrees are snapshotted (not the whole
+# directory) to avoid needlessly doubling image size with a copy of
+# never-reseeded state dirs (audio_cache/, image_cache/, etc).
+RUN mkdir -p "$HOME/.hermes-seed" \
+    && cp -a "$HOME/.hermes/hermes-agent" "$HOME/.hermes-seed/hermes-agent" \
+    && cp -a "$HOME/.hermes/bin" "$HOME/.hermes-seed/bin"
+
 # Mnemosyne memory layer as an isolated uv tool (exposes `mnemosyne` on PATH via ~/.local/bin).
 # Deviates from the plan's literal `[all]` extra: `all` also pulls in the `llm`
 # extra (ctransformers + llama-cpp-python), which has no prebuilt wheel here and
@@ -131,6 +151,10 @@ COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profil
 # restart policy); entrypoint.sh restores it from HERMES_BACKUP_REPO or
 # initializes it fresh on first run when empty.
 ENV HERMES_HOME=/home/app/.hermes
+# HERMES_HOME_SEED: baked-in copy of the installed app subtrees (hermes-agent/,
+# bin/ — see the RUN cp -a above) entrypoint.sh reseeds into $HERMES_HOME on
+# every start if they're missing there (Task 9 fix, see that RUN's comment).
+ENV HERMES_HOME_SEED=/home/app/.hermes-seed
 
 # self-backup script + the cron job entrypoint.sh registers to run it daily
 # (Task 7): see docker/hermes-backup.sh's own header for the manual-trigger
