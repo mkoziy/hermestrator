@@ -3,7 +3,7 @@
 A Docker image that runs [Hermes Agent](https://hermes-agent.nousresearch.com) as a
 headless, messaging-driven coding agent. The container installs `git`, `gh`, `fzf`,
 `jq`, `ripgrep`, a Go toolchain, Node.js, `uv`/Python, Hermes Agent itself, the
-[Mnemosyne](https://github.com) memory layer, the `codex` and `pi` coding-agent CLIs,
+[Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory layer, the `codex` and `pi` coding-agent CLIs,
 and the [`ralphex`](https://github.com/umputun/ralphex) orchestrator binary, together
 with the three `ralphex` profiles from this repo's `ralphex/` directory
 (`codex`, `pi`, `claude`).
@@ -43,6 +43,26 @@ docker build -f docker/Dockerfile \
   --build-arg GO_VERSION=1.26.5 \
   --build-arg NODE_MAJOR=24 \
   -t hermes-coding-agent:local .
+```
+
+Optional BuildKit secret: `github_token` authenticates the build's
+`api.github.com` lookup of the latest `ralphex` release so it isn't subject to
+GitHub's low unauthenticated rate limit (60 requests/hour/IP). Anonymous
+lookup is the default and works fine on an occasional/local build. Passed as a
+`--secret` (not `--build-arg`) specifically so the token value never lands in
+the image's build history/layer metadata:
+
+```sh
+docker build -f docker/Dockerfile \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  -t hermes-coding-agent:local .
+```
+
+To lint the `Dockerfile` (used during Task 9's validation; no local `hadolint`
+binary required):
+
+```sh
+docker run --rm -i hadolint/hadolint < docker/Dockerfile
 ```
 
 ## Push to GHCR
@@ -96,7 +116,7 @@ or written to disk by `entrypoint.sh`) — put them in a `.env` file used with
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `HERMES_BACKUP_REPO` | for backup/restore | Git remote URL (e.g. a private GitHub repo) that `$HERMES_HOME` is restored from on an empty first start and pushed to by the backup cron. If unset, no restore is attempted and the backup cron is not registered. |
+| `HERMES_BACKUP_REPO` | for backup/restore | Git remote URL (e.g. a private GitHub repo) that `$HERMES_HOME` is restored from on an empty first start and pushed to by the backup cron. Must already exist (even if empty) — nothing here creates the remote repo. If unset, no restore is attempted and the backup cron is not registered; unsetting it and restarting an already-configured deployment disables future backups (`entrypoint.sh` persists the decision to `$HERMES_HOME/.hermes-backup.conf` on every start, which `hermes-backup.sh` treats as authoritative). The previously-registered cron job itself stays registered but becomes a no-op — there is no `hermes cron delete` call. |
 | `HERMES_BACKUP_BRANCH` | optional | Branch used for the backup repo. Default `main`. |
 | `HERMES_BACKUP_CRON_SCHEDULE` | optional | Cron expression for the backup job `entrypoint.sh` registers via `hermes cron create`. Default `0 3 * * *` (daily 03:00 UTC, container has no `TZ` set so this is UTC). |
 
@@ -135,8 +155,9 @@ full rationale):
 | `HERMES_CRON_APPROVAL_MODE` | optional | Applied via `hermes config set approvals.cron_mode`. Default `deny` — fail-closed for any future agent-driven (non-script) cron job, since nobody is watching to approve a cron-triggered prompt. The backup cron itself is registered `--no-agent` and is unaffected. |
 | `HERMES_UNAUTHORIZED_DM_BEHAVIOR` | optional | Applied via `hermes config set unauthorized_dm_behavior`. Default `pair` (Hermes' DM Pairing System) — unknown users must pair before reaching the agent. |
 | `HERMES_YOLO_MODE` | optional | If `1`, bypasses all dangerous-command approval checks (hardline blocklist still applies). Read directly by Hermes; off by default. Opt-in, operator-accepted risk — read `docs/user-guide/security` before enabling. |
-| `HERMES_TERMINAL_BACKEND` | optional | Applied via `hermes config set terminal.backend`. Default `local`, forced explicitly because this container has no `docker.sock`/DinD — the `docker` terminal backend (Hermes' tool-sandboxing feature, unrelated to this container) would break on first use otherwise. |
+| `HERMES_TERMINAL_BACKEND` | optional | Always `local` — this image only supports `local` (no `docker.sock`/DinD, no ssh/singularity/modal/daytona provisioning). Setting it to anything other than `local`/unset makes the entrypoint refuse to start, rather than silently accepting a backend that would break on the first sandboxed tool call. |
 | `HERMES_GATEWAY_NO_SUPERVISE` | optional | Exported as `1` by default (env equivalent of `hermes gateway run --no-supervise`) so Hermes' own internal restart-loop stays off and the external container runtime (`docker restart`, a future k8s restart policy) is the single supervisor of restarts. Override only if you understand the double-supervision risk this avoids. |
+| `HERMES_FORCE_RESEED` | optional | If `1`, deletes the existing `hermes-agent/`/`bin/` subtrees under `$HERMES_HOME` before reseeding them from the image on this start. See "Known limitations" — reseeding is otherwise existence-checked, not version-checked, so a persistent volume keeps running whatever Hermes app version it was first seeded with even after you rebuild/redeploy a newer image, until you set this. |
 
 ### ralphex
 
@@ -156,6 +177,14 @@ note it does **not** persist across a container restart unless `~/.config` is
 itself on a volume — `entrypoint.sh` re-applies `RALPHEX_DEFAULT_PROFILE` (or
 `claude`) on every start.
 
+For the `pi` profile specifically, `ralphex-use-profile.sh` also rewrites the
+`claude_command` line inside the copied `config` file to point at the actual
+on-disk path of `scripts/pi-opencode-go.sh` under `~/.config/ralphex` — the
+checked-in profile carries an absolute path from the original author's
+machine, which does not exist inside this container. If you diff the config
+after switching to `pi`, this is the one line you should expect to see
+mutated relative to the source repo.
+
 ## Backups: view logs / trigger manually
 
 The backup cron job (`hermes-home-backup`) runs `/usr/local/bin/hermes-backup.sh`
@@ -168,11 +197,17 @@ docker exec hermes-coding-agent hermes cron run hermes-home-backup
 ```
 
 `hermes-backup.sh` logs to stdout/stderr (visible via `docker logs`), commits only
-when `$HERMES_HOME` has staged changes, never force-pushes, and creates a
-`.gitignore` inside `$HERMES_HOME` on first run that excludes `.env`,
+when `$HERMES_HOME` has new changes (and always retries the push even when
+there's nothing new to commit, in case a prior push failed), never
+force-pushes, and rewrites a `.gitignore` inside `$HERMES_HOME` on every run
+(so newer exclusion patterns reach volumes backed up by an older image, too)
+that excludes `.env`, `config.yaml` (excluded entirely rather than relied on
+as a name-matched "secret" — see the script's own comments for why),
 `auth-profiles.json`, `pairing/`, `webhook_subscriptions.json`, generic
 `*secret*`/`*credentials*` patterns, and Mnemosyne's `*.db-wal`/`*.db-shm` SQLite
-sidecar files.
+sidecar files. A `flock`-based lock file prevents two concurrent runs (e.g. the
+daily cron firing at the same moment as a manual trigger) from racing on the
+same `.git`.
 
 ```sh
 docker logs hermes-coding-agent | grep hermes-backup
@@ -191,4 +226,40 @@ docker logs hermes-coding-agent | grep hermes-backup
   `$HERMES_HOME` is expected to be a durable volume.
 - The backup mechanism assumes a single container instance; there is no
   distributed-lock or multi-writer protection if you run more than one replica
-  against the same `HERMES_BACKUP_REPO`.
+  against the same `HERMES_BACKUP_REPO` (within a single instance, `hermes-backup.sh`
+  does take a local `flock` so its own daily-cron and manual-trigger paths can't
+  race each other).
+- **`config.yaml` is excluded from the backup entirely, not just secret-shaped
+  keys inside it.** `hermes-backup.sh`'s `.gitignore` drops the whole file
+  rather than relying on a filename-based `*secret*`/`*credentials*` pattern,
+  since a future Hermes version could write a credential value inside it and
+  a name-based pattern would never catch that. `entrypoint.sh` re-applies the
+  handful of settings it manages (`model.provider`, `model.default`,
+  `approvals.mode`, `approvals.cron_mode`, `unauthorized_dm_behavior`,
+  `terminal.backend`) on every start regardless of restore, but any other
+  Hermes setting an operator configured by hand directly in `config.yaml` is
+  **not** restored on a disaster-recovery restore and must be reapplied
+  manually.
+- **Image size.** Because the Hermes installer places its own application checkout
+  (`hermes-agent/`, ~1.6GB of venv + node_modules) and private `uv`/`uvx` copies
+  (`bin/`) inside `$HERMES_HOME` — the same directory this image treats as a pure
+  persistent-state volume — a baked-in seed of those two subtrees is snapshotted
+  at build time and reseeded into `$HERMES_HOME` at container start if missing
+  (see `docker/entrypoint.sh` / `docker/Dockerfile`). This is a deliberate
+  correctness tradeoff (a volume-mounted `$HERMES_HOME` would otherwise shadow the
+  installed app and `hermes` would fail outright) that roughly doubles the image
+  size (~5.45GB → ~7.13GB measured during Task 9).
+- **Reseeding is existence-checked, not version-checked.** Once a persistent
+  volume has `hermes-agent/`/`bin/` populated, rebuilding/redeploying this image
+  with a newer base has no effect on that volume's already-seeded app code —
+  `hermes update` exists but is never invoked automatically. Set
+  `HERMES_FORCE_RESEED=1` for one start to force those two subtrees to be
+  re-copied from the (new) image.
+- **Startup time.** Measured during Task 9 on local Docker Desktop (macOS): a
+  cold start on an empty/freshly-restored volume (dominated by the one-time
+  ~1.6GB app reseed) took ~46.7s from `docker run` to the
+  `entrypoint: starting hermes gateway` log line; a restart on an
+  already-populated volume (`docker kill` + `docker run` with the same volume)
+  took ~1.2s. Use these as a starting point (not a guarantee — re-measure on your
+  actual target hardware/network) when setting container health/readiness-probe
+  timeouts.

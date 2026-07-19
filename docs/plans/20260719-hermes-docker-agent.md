@@ -6,9 +6,9 @@ k3s-деплой (StatefulSet/Deployment, manifests, Secret) вынесен из
 
 Все архитектурные решения (base image, non-root user, entrypoint idempotency rules, backup flow, env-var-only secrets) уже приняты в брейнсторм-сессии — не переоткрывать их. Версии (Go, Node LTS, ralphex release) проверять заново на момент выполнения задачи, не брать как константы из этого файла.
 
-**Предположения (TODO, при необходимости скорректировать перед/во время выполнения):**
-- Имя образа: `ghcr.io/mkoziy/hermes-coding-agent` (registry — GHCR, т.к. `gh`/GitHub уже в центре стека). Скорректировать, если нужен другой registry.
-- Расписание cron-бэкапа: ежедневно в 03:00 UTC, плюс возможность ручного триггера командой пользователю в чате. Скорректировать по факту.
+**Предположения (подтверждены по факту реализации — не TODO, оба значения финализированы и используются по всему деплою; при необходимости другого значения — задать через `--build-arg`/env, см. README):**
+- Имя образа: `ghcr.io/mkoziy/hermes-coding-agent` (registry — GHCR, т.к. `gh`/GitHub уже в центре стека). Зафиксировано в README (build/push-секции).
+- Расписание cron-бэкапа: ежедневно в 03:00 UTC (`0 3 * * *`, дефолт `HERMES_BACKUP_CRON_SCHEDULE` в `entrypoint.sh`), плюс ручной триггер (`hermes-backup.sh` напрямую или `hermes cron run hermes-home-backup`, задокументировано в README).
 
 **Подтверждено сверкой с реальным репозиторием/докой Hermes (`github.com/NousResearch/hermes-agent`, `hermes-agent.nousresearch.com/docs`) на 2026-07-19 — не перепроверять существование этих команд/страниц заново, но версии/синтаксис флагов сверять по месту:**
 - `hermes config set|get`, `hermes doctor`, `hermes cron add|edit|runs`, `hermes gateway install|setup|start|status|stop` — реальные подкоманды, подтверждены в README и `docs/reference/cli-commands`.
@@ -18,10 +18,10 @@ k3s-деплой (StatefulSet/Deployment, manifests, Secret) вынесен из
 - Установщик управляет собственным Node.js/Python 3.11 через `uv`, если системные версии отсутствуют/устарели (переписывает npm global prefix под себя). Дублирующая установка Node/Python в Task 3 — реальный риск коллизии PATH/npm-prefix, не только гипотетический.
 
 ## Validation Commands
-- `docker build -t hermes-coding-agent:local .`
+- `docker build -f docker/Dockerfile -t hermes-coding-agent:local .` (Dockerfile lives under `docker/`, build context is the repo root — see Task 9/README)
 - `docker run --rm hermes-coding-agent:local hermes doctor` (ожидаем осмысленный вывод диагностики, не краш)
 - `docker run --rm hermes-coding-agent:local bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'`
-- `hadolint Dockerfile` (если доступен локально; иначе пропустить и отметить в progress)
+- `docker run --rm -i hadolint/hadolint < docker/Dockerfile` (нет локального бинаря `hadolint` — используется его официальный Docker-образ, как и в Task 9)
 
 ### Task 1: Инициализировать git-репозиторий и базовую структуру
 - [x] Репозиторий `/Users/michael/github.com/mkoziy/coding` сейчас не git-репозиторий — выполнить `git init`, создать `.gitignore` (как минимум: `.env`, `*.env`, `**/*secret*`, `**/credentials*`, `progress/`, `worktrees/` — последние два уже есть в `ralphex/ralphex-pi/.gitignore`, унифицировать на верхнем уровне)

@@ -3,8 +3,12 @@ FROM debian:bookworm-slim
 
 ARG GO_VERSION=1.26.5
 ARG NODE_MAJOR=24
+# Build-time only (ARG, not ENV): keeps apt-get non-interactive during the
+# build without leaking DEBIAN_FRONTEND=noninteractive into the running
+# container's environment (an ENV instruction here would persist into every
+# container started from this image).
+ARG DEBIAN_FRONTEND=noninteractive
 
-ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # base system packages + gh CLI (official apt repo)
@@ -37,9 +41,8 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
-ENV PATH=/usr/local/go/bin:$PATH
-ENV GOPATH=/home/app/go
-ENV PATH=/home/app/go/bin:$PATH
+ENV GOPATH=/home/app/go \
+    PATH=/usr/local/go/bin:/home/app/go/bin:$PATH
 
 # Node.js LTS (NodeSource). Confirmed against the real Hermes installer
 # (install.sh): it only installs its own managed Node under $HERMES_HOME/node
@@ -62,9 +65,21 @@ RUN export UV_INSTALL_DIR=/usr/local/bin && curl -LsSf https://astral.sh/uv/inst
 # make Go/uv-installed binaries available to the app user too
 RUN mkdir -p /home/app/go && chown -R app:app /home/app/go
 
-# ralphex binary (root, before switching to the app user — installs to /usr/local/bin)
-RUN ARCH="$(dpkg --print-architecture)" \
-    && REL_URL="$(curl -fsSL https://api.github.com/repos/umputun/ralphex/releases/latest \
+# ralphex binary (root, before switching to the app user — installs to /usr/local/bin).
+# Optional BuildKit secret "github_token" authenticates the api.github.com
+# lookup to avoid GitHub's low (60/hour/IP) unauthenticated rate limit;
+# anonymous lookup still works fine (and is what happens by default) when no
+# secret is supplied. Deliberately a --mount=type=secret, not an ARG: ARG
+# values are recorded in the image's build history/layer metadata (visible
+# via `docker history --no-trunc`) even when never turned into an ENV, so a
+# real GitHub token passed via ARG would leak there. A secret mount is only
+# ever exposed to this one RUN's filesystem (at /run/secrets/github_token,
+# tmpfs-backed) and is never written into any image layer.
+RUN --mount=type=secret,id=github_token \
+    ARCH="$(dpkg --print-architecture)" \
+    && AUTH_HEADER=() \
+    && if [ -s /run/secrets/github_token ]; then AUTH_HEADER=(-H "Authorization: Bearer $(cat /run/secrets/github_token)"); fi \
+    && REL_URL="$(curl -fsSL "${AUTH_HEADER[@]}" https://api.github.com/repos/umputun/ralphex/releases/latest \
         | grep -oE "https://github.com/umputun/ralphex/releases/download/[^\"]*linux_${ARCH}\.tar\.gz")" \
     && curl -fsSL "$REL_URL" -o /tmp/ralphex.tar.gz \
     && tar -xzf /tmp/ralphex.tar.gz -C /tmp ralphex \
