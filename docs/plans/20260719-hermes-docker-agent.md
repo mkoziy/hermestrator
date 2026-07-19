@@ -35,11 +35,11 @@ k3s-деплой (StatefulSet/Deployment, manifests, Secret) вынесен из
 - [x] Установить `gh` CLI через официальный apt-репозиторий (`cli.github.com`)
 
 ### Task 3: Установить Go, Node.js, Python/uv тулчейны
-- [ ] Скачать и распаковать Go tarball (`https://go.dev/dl/go${GO_VERSION}.linux-<arch>.tar.gz`) в `/usr/local/go`, добавить `/usr/local/go/bin` в `PATH`, задать `GOPATH=/home/app/go` для пользователя `app`
-- [ ] Установить Node.js LTS через NodeSource setup-скрипт
-- [ ] Установить `uv` (astral) явно (`curl -LsSf https://astral.sh/uv/install.sh | sh`), Python 3.11 через uv или system python3.11 — сверить, что реально требует Hermes installer, и не дублировать лишний Python
-- [ ] Проверить, что все три рантайма доступны в `PATH` для пользователя `app` (не только root)
-- [ ] Подтверждённый риск (не гипотетический): Hermes installer сам ставит управляемый Node.js в `$HERMES_HOME/node` и переписывает npm global prefix (`$HERMES_HOME/node/etc/npmrc`), если найденный системный Node не проходит `node_satisfies_build` (`^20.19 || >=22.12`). Явно решить: либо системный Node ставим версией, которую installer примет как достаточную (и тогда он не трогает Node вообще), либо сознательно позволяем installer поставить свой Node и устанавливаем codex/pi CLI (Task 4) уже после установки Hermes, через Hermes-managed npm — не ставить их раньше через системный npm вслепую
+- [x] Скачать и распаковать Go tarball (`https://go.dev/dl/go${GO_VERSION}.linux-<arch>.tar.gz`) в `/usr/local/go`, добавить `/usr/local/go/bin` в `PATH`, задать `GOPATH=/home/app/go` для пользователя `app`
+- [x] Установить Node.js LTS через NodeSource setup-скрипт
+- [x] Установить `uv` (astral) явно (`curl -LsSf https://astral.sh/uv/install.sh | sh`), Python 3.11 через uv или system python3.11 — сверено с реальным install.sh: Hermes ВСЕГДА ставит собственный Python 3.11 через `uv python install`/`uv venv`, независимо от системного python3 — конфликта с system python3 нет (в отличие от Node). System `python3`/`python3-venv` установлены через apt для общей доступности и валидационных команд плана
+- [x] Проверить, что все три рантайма доступны в `PATH` для пользователя `app` (не только root) — `PATH`/`GOPATH` заданы через `ENV` (действуют для всех пользователей образа), `/home/app/go` создан и `chown`-нут на `app`
+- [x] Подтверждённый риск (не гипотетический): Hermes installer сам ставит управляемый Node.js в `$HERMES_HOME/node` и переписывает npm global prefix (`$HERMES_HOME/node/etc/npmrc`), если найденный системный Node не проходит `node_satisfies_build` (`^20.19 || >=22.12`). Решено: системный Node ставится версией NODE_MAJOR=24 (>=22.12) через NodeSource — сверено напрямую по коду install.sh (`node_satisfies_build`), installer обнаружит этот Node как достаточный и не будет трогать Node вообще
 
 ### Task 4: Установить Hermes Agent, Mnemosyne, codex, pi, ralphex
 - [ ] Переключиться на `USER app`, `WORKDIR /home/app`
