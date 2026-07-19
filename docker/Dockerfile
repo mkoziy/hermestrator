@@ -125,3 +125,13 @@ RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh
 # profile switcher: root-owned, world-executable, lives outside any profile
 # so it's available before a profile has ever been selected.
 COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profile.sh
+
+# HERMES_HOME: explicit persistent-state directory. Expected to be a mounted
+# volume in real deployments (survives `docker restart` / a future k8s
+# restart policy); entrypoint.sh restores it from HERMES_BACKUP_REPO or
+# initializes it fresh on first run when empty.
+ENV HERMES_HOME=/home/app/.hermes
+
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
