@@ -42,12 +42,12 @@ k3s-деплой (StatefulSet/Deployment, manifests, Secret) вынесен из
 - [x] Подтверждённый риск (не гипотетический): Hermes installer сам ставит управляемый Node.js в `$HERMES_HOME/node` и переписывает npm global prefix (`$HERMES_HOME/node/etc/npmrc`), если найденный системный Node не проходит `node_satisfies_build` (`^20.19 || >=22.12`). Решено: системный Node ставится версией NODE_MAJOR=24 (>=22.12) через NodeSource — сверено напрямую по коду install.sh (`node_satisfies_build`), installer обнаружит этот Node как достаточный и не будет трогать Node вообще
 
 ### Task 4: Установить Hermes Agent, Mnemosyne, codex, pi, ralphex
-- [ ] Переключиться на `USER app`, `WORKDIR /home/app`
-- [ ] Установить Hermes: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash` — НЕ вызывать `hermes setup` на этом шаге (интерактивный, требует ключи)
-- [ ] `pip install "mnemosyne-memory[all]"` (или через uv) — сверить, не конфликтует ли с версией, которую тянет сам Hermes installer
-- [ ] `npm install -g` для codex CLI и pi CLI — сверить актуальные имена npm-пакетов на момент установки (могли измениться с момента брейнсторма)
-- [ ] Скачать последний релиз `umputun/ralphex` под нужную архитектуру с GitHub Releases API, положить бинарник в `/usr/local/bin/ralphex`, `chmod +x`
-- [ ] Проверить версии всех пяти инструментов в самом образе (см. Validation Commands)
+- [x] Переключиться на `USER app`, `WORKDIR /home/app`
+- [x] Установить Hermes: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash` — НЕ вызывать `hermes setup` на этом шаге (интерактивный, требует ключи); используются `--skip-setup --non-interactive`
+- [x] `pip install "mnemosyne-memory[all]"` (или через uv) — установлено через `uv tool install "mnemosyne-memory[mcp,embeddings,openclaw]"`, сознательно БЕЗ буквального `[all]`: этот extra тянет `llm` (ctransformers+llama-cpp-python), которому нет прекомпилированного wheel здесь и нужен `cmake` (не установлен) для сборки из исходников — локальный LLM-инференс не нужен в этом деплое (Hermes ходит к LLM по API), причина задокументирована в Dockerfile
+- [x] `npm install -g` для codex CLI и pi CLI — имена пакетов сверены по факту через `npm view`: `@openai/codex` (bin `codex`) и `@earendil-works/pi-coding-agent` (bin `pi`, описание пакета совпадает с ожиданиями `ralphex-pi/scripts/pi-as-claude.sh`)
+- [x] Скачать последний релиз `umputun/ralphex` под нужную архитектуру с GitHub Releases API, положить бинарник в `/usr/local/bin/ralphex`, `chmod +x`
+- [x] Проверить версии всех пяти инструментов в самом образе (см. Validation Commands) — все проверены полным `docker build` + `docker run`; попутно найдены и исправлены три реальных бага: (1) `ENV HOME=/home/app`, выставленный сразу после `useradd`, заставлял ВСЕ последующие root-шаги (включая установщик `uv`) писать root-owned файлы в `/home/app` — перенесено на момент прямо перед `USER app`; (2) `UV_INSTALL_DIR=/usr/local/bin curl ... | sh` — переменная окружения применялась только к `curl`, а не к `sh`, читающему её из пайпа — исправлено через `export`; (3) Debian `/etc/profile` безусловно перезаписывает `PATH` в login-shell по uid, из-за чего login shell (`bash -l`, `docker exec -it ... bash --login`) терял весь наш PATH (Go/Node/npm-global/uv/.local) — добавлен `/etc/profile.d/00-hermes-path.sh`, восстанавливающий PATH после этого сброса
 
 ### Task 5: Скопировать ralphex-профили и написать переключатель профилей
 - [ ] `COPY --chown=app:app ralphex/ralphex-codex/config /opt/ralphex-profiles/codex/config`
