@@ -29,10 +29,10 @@ k3s-деплой (StatefulSet/Deployment, manifests, Secret) вынесен из
 - [x] Сделать первый коммит с текущим состоянием (`ralphex/` конфиги как есть)
 
 ### Task 2: Собрать Dockerfile — базовый слой и системные пакеты
-- [ ] `FROM debian:bookworm-slim`, `ARG GO_VERSION`, `ARG NODE_MAJOR` как build args с дефолтами (значения подставить актуальные на момент сборки — проверить `curl -s https://go.dev/VERSION?m=text` для Go и текущий Node LTS major)
-- [ ] Создать непривилегированного пользователя `app` (`useradd -m -s /bin/bash app`), `HOME=/home/app`
-- [ ] Установить system packages: `git curl ca-certificates jq ripgrep build-essential ffmpeg unzip fzf` через `apt-get install --no-install-recommends`, почистить apt-кэш в том же слое
-- [ ] Установить `gh` CLI через официальный apt-репозиторий (`cli.github.com`)
+- [x] `FROM debian:bookworm-slim`, `ARG GO_VERSION`, `ARG NODE_MAJOR` как build args с дефолтами (значения подставить актуальные на момент сборки — проверить `curl -s https://go.dev/VERSION?m=text` для Go и текущий Node LTS major)
+- [x] Создать непривилегированного пользователя `app` (`useradd -m -s /bin/bash app`), `HOME=/home/app`
+- [x] Установить system packages: `git curl ca-certificates jq ripgrep build-essential ffmpeg unzip fzf` через `apt-get install --no-install-recommends`, почистить apt-кэш в том же слое
+- [x] Установить `gh` CLI через официальный apt-репозиторий (`cli.github.com`)
 
 ### Task 3: Установить Go, Node.js, Python/uv тулчейны
 - [ ] Скачать и распаковать Go tarball (`https://go.dev/dl/go${GO_VERSION}.linux-<arch>.tar.gz`) в `/usr/local/go`, добавить `/usr/local/go/bin` в `PATH`, задать `GOPATH=/home/app/go` для пользователя `app`
