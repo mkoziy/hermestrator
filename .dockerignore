@@ -1,0 +1,23 @@
+# Docker build context exclusions. Keep in sync with the repo-root
+# .gitignore where the two overlap (local secrets, VCS/OS cruft) — this file
+# additionally excludes VCS history and completed-plan docs, which are fine
+# to keep tracked in git but have no reason to enter the build context.
+
+# VCS metadata — never needed inside a build context
+.git
+.gitignore
+
+# completed plan docs — historical record, not build input
+docs/plans/completed
+
+# local secrets — never bake these into an image layer. Deliberately does
+# NOT match `.env.example`/`*.env.example` templates (those are meant to be
+# copied/committed, not excluded).
+.env
+*.env
+**/*secret*
+**/credentials*
+
+# OS/editor cruft
+.DS_Store
+**/.DS_Store
