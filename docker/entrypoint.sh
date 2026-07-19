@@ -82,7 +82,18 @@ if [ -n "${GH_TOKEN:-}" ]; then
         log "gh already authenticated, skipping gh auth login"
     else
         log "authenticating gh via GH_TOKEN"
-        echo "$GH_TOKEN" | gh auth login --with-token
+        # [decision] (Task 9 fix) confirmed by actually running the
+        # container with an invalid GH_TOKEN (the exact "fake/test value"
+        # scenario Task 9 validation calls for): `gh auth login --with-token`
+        # exits non-zero for a bad/expired token, and under `set -euo
+        # pipefail` that used to abort the ENTIRE entrypoint before it ever
+        # reached the gateway — a single bad token took the whole container
+        # down at startup instead of degrading gracefully like the missing
+        # GIT_USER_NAME/EMAIL case just above already does. Now warns and
+        # continues instead, consistent with that existing pattern.
+        if ! echo "$GH_TOKEN" | gh auth login --with-token; then
+            warn "gh auth login --with-token failed (invalid/expired GH_TOKEN?) — continuing without gh auth; backup push/restore and any gh-based tooling will fail until GH_TOKEN is corrected and the container restarted"
+        fi
     fi
 else
     warn "GH_TOKEN not set — gh auth login skipped; backup push/restore and any gh-based tooling will fail"
