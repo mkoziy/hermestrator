@@ -1,0 +1,11 @@
+# ralphex config: claude executor (default)
+# usage: ralphex --config-dir ~/.config/ralphex-claude docs/plans/feature.md
+
+# task execution model
+task_model = sonnet
+
+# use a stronger model for review phases than for task execution
+review_model = opus
+
+# no external (codex) review pass for this profile
+external_review_tool = none
