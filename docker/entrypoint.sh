@@ -223,14 +223,19 @@ ralphex-use-profile.sh "${RALPHEX_DEFAULT_PROFILE:-claude}"
 # ---------------------------------------------------------------------------
 # backup cron registration (idempotent)
 # ---------------------------------------------------------------------------
-# hermes-backup.sh itself, and the exact `hermes cron create` schedule-string
-# syntax, are Task 7's responsibility (the plan explicitly assigns flag-
-# syntax verification for cron there). This registration is wired against
-# the `hermes cron create`/`hermes cron list` syntax already confirmed via
-# docs/user-guide/features/cron at Task 6 time; it targets a script path
-# Task 7 is expected to create at /usr/local/bin/hermes-backup.sh. Kept
-# non-fatal (warn, don't exit) so a container that reaches Task 6's
-# entrypoint before Task 7 lands still starts cleanly.
+# hermes-backup.sh (Task 7, /usr/local/bin/hermes-backup.sh) provides the
+# actual backup logic; this just registers it as a script-only (--no-agent,
+# no LLM/approval path involved) daily cron job named "hermes-home-backup".
+# Exact flag syntax confirmed via docs/user-guide/features/cron at Task 7
+# time: script-only jobs use `--no-agent --script <path>` (no positional
+# prompt argument — that's only for agent-driven jobs), and cron-expression
+# schedule strings ("0 3 * * *") are documented as a supported format
+# alongside the relative "every Nh"/natural-language forms used elsewhere in
+# the docs' examples. "0 3 * * *" = daily at 03:00 (container-local time,
+# which is UTC per the plan header's daily-03:00-UTC assumption, since this
+# image sets no TZ and debian:bookworm-slim defaults to UTC).
+# Kept non-fatal (warn, don't exit) so a container that reaches this step
+# before hermes-backup.sh exists on disk for any reason still starts cleanly.
 ensure_backup_cron_registered() {
     local job_name="hermes-home-backup"
     if [ -z "${HERMES_BACKUP_REPO:-}" ]; then
@@ -242,17 +247,12 @@ ensure_backup_cron_registered() {
         return 0
     fi
     log "registering backup cron job '$job_name'"
-    # HERMES_BACKUP_CRON_SCHEDULE default is a best-effort placeholder (a
-    # daily wall-clock time) matching the plan header's assumption of daily
-    # 03:00 UTC; confirmed `hermes cron create` examples in the docs only
-    # show relative-interval schedules ("every 2h") — whether an absolute
-    # time-of-day string like this is accepted as-is needs Task 7's sverka.
-    if ! hermes cron create "${HERMES_BACKUP_CRON_SCHEDULE:-daily at 03:00 UTC}" \
-        "/usr/local/bin/hermes-backup.sh" \
-        --name "$job_name" \
+    if ! hermes cron create "${HERMES_BACKUP_CRON_SCHEDULE:-0 3 * * *}" \
         --no-agent \
+        --script "/usr/local/bin/hermes-backup.sh" \
+        --name "$job_name" \
         --workdir "$HERMES_HOME"; then
-        warn "failed to register backup cron job '$job_name' (non-fatal; hermes-backup.sh may not exist yet — see Task 7)"
+        warn "failed to register backup cron job '$job_name' (non-fatal; hermes-backup.sh may not exist yet, or 'hermes cron create' flag syntax may have changed upstream)"
     fi
 }
 ensure_backup_cron_registered

@@ -132,6 +132,11 @@ COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profil
 # initializes it fresh on first run when empty.
 ENV HERMES_HOME=/home/app/.hermes
 
+# self-backup script + the cron job entrypoint.sh registers to run it daily
+# (Task 7): see docker/hermes-backup.sh's own header for the manual-trigger
+# command.
+COPY --chmod=755 docker/hermes-backup.sh /usr/local/bin/hermes-backup.sh
+
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
