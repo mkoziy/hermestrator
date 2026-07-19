@@ -108,3 +108,20 @@ RUN uv tool install "mnemosyne-memory[mcp,embeddings,openclaw]"
 # registry at implementation time: @openai/codex (bin `codex`) and
 # @earendil-works/pi-coding-agent (bin `pi`, matches ralphex-pi/scripts/pi-as-claude.sh)
 RUN npm install -g @openai/codex @earendil-works/pi-coding-agent
+
+# ralphex profiles: baked into the read-only image layer under
+# /opt/ralphex-profiles/<name>/; ralphex-use-profile.sh (below) copies the
+# selected one into ~/.config/ralphex at runtime. COPY runs with the
+# builder's own privileges regardless of the current USER, so --chown=app:app
+# is still honored here even though we already switched to `USER app` above.
+COPY --chown=app:app ralphex/ralphex-codex/config /opt/ralphex-profiles/codex/config
+COPY --chown=app:app ralphex/ralphex-pi/config /opt/ralphex-profiles/pi/config
+COPY --chown=app:app ralphex/ralphex-pi/agents/ /opt/ralphex-profiles/pi/agents/
+COPY --chown=app:app ralphex/ralphex-pi/prompts/ /opt/ralphex-profiles/pi/prompts/
+COPY --chown=app:app ralphex/ralphex-pi/scripts/ /opt/ralphex-profiles/pi/scripts/
+COPY --chown=app:app ralphex/ralphex-claude/config /opt/ralphex-profiles/claude/config
+RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh
+
+# profile switcher: root-owned, world-executable, lives outside any profile
+# so it's available before a profile has ever been selected.
+COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profile.sh
