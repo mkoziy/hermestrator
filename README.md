@@ -62,8 +62,13 @@ To lint the `Dockerfile` (used during Task 9's validation; no local `hadolint`
 binary required):
 
 ```sh
-docker run --rm -i hadolint/hadolint < docker/Dockerfile
+docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL3016 --ignore DL3059 --ignore SC2016 - < docker/Dockerfile
 ```
+
+The ignored rules are deliberate (unpinned apt/npm versions to track latest
+security patches, intentionally split `RUN` layers, and an intentionally
+single-quoted `$PATH` that must expand later, not at build time) — see
+`CLAUDE.md` for the per-rule rationale.
 
 ## Push to GHCR
 

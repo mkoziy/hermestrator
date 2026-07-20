@@ -16,8 +16,27 @@ The `Dockerfile` lives at `docker/Dockerfile`; build context is the repo root
 docker build -f docker/Dockerfile -t hermes-coding-agent:local .
 docker run --rm hermes-coding-agent:local hermes doctor
 docker run --rm hermes-coding-agent:local bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
-docker run --rm -i hadolint/hadolint < docker/Dockerfile   # no local hadolint binary needed
+docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL3016 --ignore DL3059 --ignore SC2016 - < docker/Dockerfile   # no local hadolint binary needed
 ```
+
+The `hadolint/hadolint` image has no `ENTRYPOINT` and a bare `CMD ["/bin/hadolint", "-"]`,
+so any args after the image name in `docker run` *replace* that CMD instead
+of appending to it — the command above must spell out `hadolint ... -`
+explicitly (binary name + trailing `-` for stdin) or the container tries to
+exec `--ignore` itself and fails with exit 127.
+
+The `--ignore` flags match CI (`.github/workflows/build-and-push.yml`) and are
+deliberate, not laziness: DL3008/DL3016 (pin apt/npm package versions) are
+skipped because this image intentionally floats to latest for security
+patches and current tool releases; DL3059 (consolidate consecutive `RUN`s) is
+skipped because the `RUN` boundaries are deliberately split for layer-cache
+and build-secret scoping reasons documented inline in the Dockerfile; SC2016
+(single-quoted string won't expand `$PATH`) is skipped because that's the
+intended behavior — the `$PATH` reference must stay unexpanded at build time
+so it's written literally into the generated `/etc/profile.d` script and only
+expands when that script runs later. hadolint reads the Dockerfile over
+stdin in both CI and here, so a `.hadolint.yaml` config file would not be
+picked up — the ignores must stay on the command line.
 
 Full env-var reference, run/profile-switch instructions, and known
 limitations are in `README.md` — read that before changing runtime behavior.
