@@ -300,6 +300,69 @@ export HERMES_GATEWAY_NO_SUPERVISE="${HERMES_GATEWAY_NO_SUPERVISE:-1}"
 ralphex-use-profile.sh "${RALPHEX_DEFAULT_PROFILE:-claude}"
 
 # ---------------------------------------------------------------------------
+# hermes dashboard (+ Kanban) — optional sidecar, off by default
+# ---------------------------------------------------------------------------
+# [decision] HERMES_DASHBOARD_ENABLED=1 opts in to running `hermes dashboard`
+# as a second long-running process alongside the gateway. Kanban is a plugin
+# served by this same dashboard process (/kanban, /api/plugins/kanban/*,
+# confirmed via manual docker-exec testing), backed by a sqlite file already
+# inside $HERMES_HOME — nothing extra to start or persist for it.
+#
+# Default host is loopback-only (127.0.0.1), matching this image's existing
+# "no ports EXPOSEd / publish what you need yourself" posture (see README).
+# Hermes itself refuses to bind a non-loopback host without a configured
+# auth provider (confirmed via manual testing: exit 52, explicit refusal
+# message) — we don't duplicate that enforcement, just configure basic auth
+# when a password is supplied and warn otherwise so the failure isn't a
+# silent surprise.
+dashboard_pid=""
+
+start_hermes_dashboard() {
+    local host="${HERMES_DASHBOARD_HOST:-127.0.0.1}"
+    local port="${HERMES_DASHBOARD_PORT:-9119}"
+
+    if [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ]; then
+        local username="${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-admin}"
+        local password_hash
+        # Password is read from the environment *inside* the python process
+        # (not interpolated into the -c string) so it never appears in
+        # `ps`/argv. Invocation mirrors the one confirmed working manually:
+        # `cd $HERMES_HOME/hermes-agent && python3 -c '...hash_password...'`.
+        password_hash="$(cd "$HERMES_HOME/hermes-agent" && python3 -c "import os; from plugins.dashboard_auth.basic import hash_password; print(hash_password(os.environ['HERMES_DASHBOARD_BASIC_AUTH_PASSWORD']))" 2>/dev/null || true)"
+        if [ -n "$password_hash" ]; then
+            log "configuring dashboard basic auth for user '$username'"
+            if ! hermes config set dashboard.basic_auth.username "$username"; then
+                warn "hermes config set dashboard.basic_auth.username failed — dashboard auth may not be configured correctly"
+            fi
+            if ! hermes config set dashboard.basic_auth.password_hash "$password_hash"; then
+                warn "hermes config set dashboard.basic_auth.password_hash failed — dashboard auth may not be configured correctly"
+            fi
+        else
+            warn "failed to compute dashboard basic-auth password hash (hermes-agent missing/broken?) — dashboard auth was not configured; a non-loopback HERMES_DASHBOARD_HOST will refuse to start"
+        fi
+    elif [ "$host" != "127.0.0.1" ] && [ "$host" != "localhost" ]; then
+        warn "HERMES_DASHBOARD_HOST=$host is non-loopback but HERMES_DASHBOARD_BASIC_AUTH_PASSWORD is not set — the dashboard will refuse to bind without a configured auth provider"
+    fi
+
+    # Skip the ~4.4s vite build on restarts against an already-populated
+    # volume (mirrors the existence-check idiom used for reseeding above).
+    local skip_build_flag=()
+    if [ -d "$HERMES_HOME/hermes-agent/hermes_cli/web_dist" ]; then
+        skip_build_flag=(--skip-build)
+    fi
+
+    log "starting hermes dashboard on $host:$port"
+    hermes dashboard --host "$host" --port "$port" --no-open "${skip_build_flag[@]}" &
+    dashboard_pid=$!
+
+    sleep 2
+    if ! kill -0 "$dashboard_pid" 2>/dev/null; then
+        warn "hermes dashboard exited immediately after starting — dashboard is unavailable, continuing without it (see logs above for the reason)"
+        dashboard_pid=""
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # exec gateway as PID 1 (or the operator-supplied command, if any)
 # ---------------------------------------------------------------------------
 # `hermes gateway` (bare, no subcommand) runs the gateway in the foreground
@@ -307,7 +370,10 @@ ralphex-use-profile.sh "${RALPHEX_DEFAULT_PROFILE:-claude}"
 # equivalent to `hermes gateway run`. Deliberately not bare `hermes` — that
 # launches the interactive TUI, and this deployment is messaging/gateway-only
 # (see plan header). Foreground, replaces this shell as PID 1, no
-# supervisord/process manager of our own.
+# supervisord/process manager of our own — *unless* the dashboard sidecar is
+# enabled, in which case this shell stays alive (background + wait instead of
+# exec) so it can supervise both children and forward signals; see the
+# HERMES_DASHBOARD_ENABLED branch below.
 #
 # [decision] (Task 9 fix) `docker run <image> <cmd...>` args used to be
 # appended onto `hermes gateway`, e.g. `docker run <image> hermes doctor`
@@ -317,10 +383,47 @@ ralphex-use-profile.sh "${RALPHEX_DEFAULT_PROFILE:-claude}"
 # Standard ENTRYPOINT+CMD convention: if the container is invoked with extra
 # args, exec THOSE as the command; only fall back to the gateway when invoked
 # bare. All of the init above (git identity, gh auth, hermes config, ralphex
-# profile) still always runs first either way.
+# profile) still always runs first either way. This passthrough branch never
+# starts the dashboard — one-off diagnostic commands shouldn't spawn a
+# second long-running process.
 if [ "$#" -gt 0 ]; then
     log "args supplied ($*) — exec'ing them directly instead of the gateway"
     exec "$@"
 fi
+
+if [ "${HERMES_DASHBOARD_ENABLED:-0}" = "1" ]; then
+    start_hermes_dashboard
+
+    cleanup() {
+        trap - TERM INT
+        log "shutting down"
+        if [ -n "$dashboard_pid" ]; then
+            kill -TERM "$dashboard_pid" 2>/dev/null || true
+        fi
+        if [ -n "${gateway_pid:-}" ]; then
+            kill -TERM "$gateway_pid" 2>/dev/null || true
+        fi
+        if [ -n "${gateway_pid:-}" ]; then
+            wait "$gateway_pid" 2>/dev/null || true
+        fi
+        if [ -n "$dashboard_pid" ]; then
+            wait "$dashboard_pid" 2>/dev/null || true
+        fi
+    }
+    trap cleanup TERM INT
+
+    log "starting hermes gateway"
+    hermes gateway &
+    gateway_pid=$!
+    gateway_exit=0
+    wait "$gateway_pid" || gateway_exit=$?
+    trap - TERM INT
+    if [ -n "$dashboard_pid" ]; then
+        kill -TERM "$dashboard_pid" 2>/dev/null || true
+        wait "$dashboard_pid" 2>/dev/null || true
+    fi
+    exit "$gateway_exit"
+fi
+
 log "starting hermes gateway"
 exec hermes gateway

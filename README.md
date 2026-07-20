@@ -108,8 +108,9 @@ docker run -d \
 
 No ports are `EXPOSE`d by the image — the gateway talks outbound to messaging
 platforms rather than serving inbound HTTP by default. If you configure a
-messaging integration that requires an inbound webhook, publish the relevant port
-yourself (`-p host:container`) per Hermes' own messaging-platform docs.
+messaging integration that requires an inbound webhook, or opt into the
+`hermes dashboard` sidecar (see "dashboard / Kanban" below), publish the
+relevant port yourself (`-p host:container`) per Hermes' own docs.
 
 ## Environment variables
 
@@ -171,6 +172,42 @@ full rationale):
 | --- | --- | --- |
 | `RALPHEX_DEFAULT_PROFILE` | optional | Profile applied by `ralphex-use-profile.sh` on every container start. One of `codex`, `pi`, `claude`. Default `claude`. Profile selection is re-applied from the read-only image layer on every start — it is not itself persisted across restarts (only `$HERMES_HOME` is). |
 
+### dashboard / Kanban (optional sidecar)
+
+Off by default. When enabled, `entrypoint.sh` runs `hermes dashboard` as a
+second long-running process alongside `hermes gateway` (hand-rolled
+background-job + `trap`/`wait` supervision in the entrypoint script itself —
+no tini/s6/supervisord). Kanban is a plugin served by this same process at
+`/kanban`, backed by a sqlite file already inside `$HERMES_HOME` — nothing
+extra to configure for it. A dashboard startup failure never brings down the
+container; the gateway keeps running regardless.
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `HERMES_DASHBOARD_ENABLED` | optional | If `1`, starts `hermes dashboard` alongside the gateway. Default off. |
+| `HERMES_DASHBOARD_HOST` | optional | Bind host for the dashboard. Default `127.0.0.1` (loopback-only). Hermes itself refuses to bind a non-loopback host without a configured auth provider — set `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` first. |
+| `HERMES_DASHBOARD_PORT` | optional | Bind port. Default `9119` (Hermes' own default). |
+| `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` | optional | Dashboard login username. Default `admin`. Only applied if `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` is also set. |
+| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | optional | Dashboard login password (plaintext in, hashed by the entrypoint before being written to `dashboard.basic_auth.password_hash` — never stored in plaintext or passed on any command line). Required to bind a non-loopback host. |
+
+To reach the dashboard from the host, publish its port explicitly (it is not
+`EXPOSE`d by the image):
+
+```sh
+docker run -d \
+  --name hermes-coding-agent \
+  --env-file .env \
+  -e HERMES_DASHBOARD_ENABLED=1 \
+  -e HERMES_DASHBOARD_HOST=0.0.0.0 \
+  -v hermes_home:/home/app/.hermes \
+  -p 127.0.0.1:9119:9119 \
+  ghcr.io/mkoziy/hermes-coding-agent:local
+```
+
+`-p 127.0.0.1:9119:9119` restricts reachability to host loopback only (not
+LAN-exposed); widen it, or tunnel in via SSH/Tailscale to a loopback bind
+instead, depending on your deployment's trust model.
+
 ## Switch the ralphex profile manually
 
 ```sh
@@ -198,8 +235,10 @@ mutated relative to the source repo.
   `Secret`s for the env vars above, health/readiness probes, and any k3s-specific
   wiring are explicitly out of scope here and are planned as a **separate, future
   plan**.
-- No image is `EXPOSE`d for inbound HTTP; if a messaging integration needs a
-  webhook endpoint, that port must be published manually.
+- No port is `EXPOSE`d for inbound HTTP by default; if a messaging integration
+  needs a webhook endpoint, or you opt into the `hermes dashboard` sidecar
+  (`HERMES_DASHBOARD_ENABLED=1`, see "dashboard / Kanban" above), that port
+  must be published manually.
 - `ralphex` profile selection is not itself persisted across restarts — only
   `$HERMES_HOME` is expected to be a durable volume.
 - **No self-backup/restore.** `$HERMES_HOME` (sessions, config, Mnemosyne
