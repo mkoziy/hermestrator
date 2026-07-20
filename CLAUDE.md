@@ -13,9 +13,9 @@ The `Dockerfile` lives at `docker/Dockerfile`; build context is the repo root
 (it `COPY`s `ralphex/` and `docker/*.sh`):
 
 ```sh
-docker build -f docker/Dockerfile -t hermes-coding-agent:local .
-docker run --rm hermes-coding-agent:local hermes doctor
-docker run --rm hermes-coding-agent:local bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
+docker build -f docker/Dockerfile -t hermestrator:local .
+docker run --rm hermestrator:local hermes doctor
+docker run --rm hermestrator:local bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
 docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL3016 --ignore DL3059 --ignore SC2016 - < docker/Dockerfile   # no local hadolint binary needed
 ```
 
@@ -106,7 +106,7 @@ Validation Commands) work as one-off diagnostic invocations.
 `.github/workflows/build-and-push.yml` triggers on any tag push: lints the
 Dockerfile (hadolint), builds the image, runs the plan's own Validation
 Commands (`hermes doctor` + the tool-version one-liner) against the built
-image, and only then pushes `ghcr.io/<owner>/hermes-coding-agent:<tag>` +
+image, and only then pushes `ghcr.io/<owner>/hermestrator:<tag>` +
 `:latest` to GHCR — using the built-in `GITHUB_TOKEN` (`packages: write`
 permission), no PAT needed. Validation runs strictly before the push step,
 so a broken image never reaches the registry. There is still no CI on plain

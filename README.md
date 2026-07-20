@@ -1,4 +1,4 @@
-# hermes-coding-agent
+# hermestrator
 
 A Docker image that runs [Hermes Agent](https://hermes-agent.nousresearch.com) as a
 headless, messaging-driven coding agent. The container installs `git`, `gh`, `fzf`,
@@ -29,7 +29,7 @@ The `Dockerfile` lives at `docker/Dockerfile`; the build context is the repo roo
 build with an explicit `-f`:
 
 ```sh
-docker build -f docker/Dockerfile -t hermes-coding-agent:local .
+docker build -f docker/Dockerfile -t hermestrator:local .
 ```
 
 Optional build args (see the top of `docker/Dockerfile` for current defaults):
@@ -42,7 +42,7 @@ Optional build args (see the top of `docker/Dockerfile` for current defaults):
 docker build -f docker/Dockerfile \
   --build-arg GO_VERSION=1.26.5 \
   --build-arg NODE_MAJOR=24 \
-  -t hermes-coding-agent:local .
+  -t hermestrator:local .
 ```
 
 Optional BuildKit secret: `github_token` authenticates the build's
@@ -55,7 +55,7 @@ the image's build history/layer metadata:
 ```sh
 docker build -f docker/Dockerfile \
   --secret id=github_token,env=GITHUB_TOKEN \
-  -t hermes-coding-agent:local .
+  -t hermestrator:local .
 ```
 
 To lint the `Dockerfile` (used during Task 9's validation; no local `hadolint`
@@ -82,18 +82,18 @@ git push origin v0.1.0
 
 The workflow lints the Dockerfile, builds the image, runs the Validation
 Commands above against it, and only pushes to
-`ghcr.io/mkoziy/hermes-coding-agent:<tag>` (plus `:latest`) if they pass. Uses
+`ghcr.io/mkoziy/hermestrator:<tag>` (plus `:latest`) if they pass. Uses
 the repo's built-in `GITHUB_TOKEN` — no extra secrets to configure.
 
 **Manual:**
 
 ```sh
 docker login ghcr.io -u <your-github-username>
-docker tag hermes-coding-agent:local ghcr.io/mkoziy/hermes-coding-agent:<tag>
-docker push ghcr.io/mkoziy/hermes-coding-agent:<tag>
+docker tag hermestrator:local ghcr.io/mkoziy/hermestrator:<tag>
+docker push ghcr.io/mkoziy/hermestrator:<tag>
 ```
 
-`<tag>` is up to you (`latest`, a date, a git sha, ...); `ghcr.io/mkoziy/hermes-coding-agent`
+`<tag>` is up to you (`latest`, a date, a git sha, ...); `ghcr.io/mkoziy/hermestrator`
 is the image name assumed by the plan this image was built from.
 
 ## Run the container locally
@@ -105,10 +105,10 @@ first start:
 
 ```sh
 docker run -d \
-  --name hermes-coding-agent \
+  --name hermestrator \
   --env-file .env \
   -v hermes_home:/home/app/.hermes \
-  ghcr.io/mkoziy/hermes-coding-agent:local
+  ghcr.io/mkoziy/hermestrator:local
 ```
 
 No ports are `EXPOSE`d by the image — the gateway talks outbound to messaging
@@ -200,13 +200,13 @@ To reach the dashboard from the host, publish its port explicitly (it is not
 
 ```sh
 docker run -d \
-  --name hermes-coding-agent \
+  --name hermestrator \
   --env-file .env \
   -e HERMES_DASHBOARD_ENABLED=1 \
   -e HERMES_DASHBOARD_HOST=0.0.0.0 \
   -v hermes_home:/home/app/.hermes \
   -p 127.0.0.1:9119:9119 \
-  ghcr.io/mkoziy/hermes-coding-agent:local
+  ghcr.io/mkoziy/hermestrator:local
 ```
 
 `-p 127.0.0.1:9119:9119` restricts reachability to host loopback only (not
@@ -216,7 +216,7 @@ instead, depending on your deployment's trust model.
 ## Switch the ralphex profile manually
 
 ```sh
-docker exec -it hermes-coding-agent ralphex-use-profile.sh pi     # or codex / claude
+docker exec -it hermestrator ralphex-use-profile.sh pi     # or codex / claude
 ```
 
 This replaces `~/.config/ralphex` with a fresh copy of the selected baked-in
