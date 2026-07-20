@@ -105,6 +105,13 @@ ENV HOME=/home/app
 USER app
 WORKDIR /home/app
 
+# Global git excludes: applies to every repo any agent (hermes/ralphex/pi/
+# codex) clones or works in inside this container — not just this project's
+# own .gitignore. Baked in at build time (static, not env-dependent) rather
+# than in entrypoint.sh's runtime git config block.
+COPY --chown=app:app docker/global-gitignore /home/app/.gitignore_global
+RUN git config --global core.excludesFile /home/app/.gitignore_global
+
 # Hermes Agent — non-interactive install; skip the interactive `hermes setup`
 # wizard (it requires API keys), that runs from entrypoint.sh at container start
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive
@@ -116,9 +123,9 @@ RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --s
 # INSIDE the very directory ($HOME/.hermes == $HERMES_HOME) that this project
 # treats as pure mutable state and expects to live on an external persistent
 # volume across restarts (see Task 6 / entrypoint.sh). Mounting any volume at
-# $HERMES_HOME — including the intended empty-first-run or
-# restored-from-backup case — therefore shadows/deletes the baked-in
-# installation, and `hermes` fails outright. Fix: snapshot the as-installed
+# $HERMES_HOME — including the intended empty-first-run case — therefore
+# shadows/deletes the baked-in installation, and `hermes` fails outright.
+# Fix: snapshot the as-installed
 # app here, at build time, so entrypoint.sh can reseed just those two
 # subtrees into $HERMES_HOME at container start if they're missing, without
 # touching genuine state (config.yaml, sessions/, memories/, cron/, etc).
@@ -163,18 +170,12 @@ COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profil
 
 # HERMES_HOME: explicit persistent-state directory. Expected to be a mounted
 # volume in real deployments (survives `docker restart` / a future k8s
-# restart policy); entrypoint.sh restores it from HERMES_BACKUP_REPO or
-# initializes it fresh on first run when empty.
+# restart policy); entrypoint.sh initializes it fresh on first run when empty.
 ENV HERMES_HOME=/home/app/.hermes
 # HERMES_HOME_SEED: baked-in copy of the installed app subtrees (hermes-agent/,
 # bin/ — see the RUN cp -a above) entrypoint.sh reseeds into $HERMES_HOME on
 # every start if they're missing there (Task 9 fix, see that RUN's comment).
 ENV HERMES_HOME_SEED=/home/app/.hermes-seed
-
-# self-backup script + the cron job entrypoint.sh registers to run it daily
-# (Task 7): see docker/hermes-backup.sh's own header for the manual-trigger
-# command.
-COPY --chmod=755 docker/hermes-backup.sh /usr/local/bin/hermes-backup.sh
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 

@@ -11,16 +11,16 @@ with the three `ralphex` profiles from this repo's `ralphex/` directory
 At start-up an idempotent [`docker/entrypoint.sh`](docker/entrypoint.sh) configures
 git identity, `gh` auth, Hermes' non-secret config (provider/model selection,
 dangerous-command approval mode, terminal backend, restart-supervision), selects a
-`ralphex` profile, registers a daily self-backup cron job inside Hermes, and finally
-execs `hermes gateway` as PID 1 — so the agent is reachable through a messaging
-platform (Telegram/Discord/Slack/WhatsApp/Signal/Email, per Hermes' own gateway
-docs), not through an interactive TTY. [`docker/hermes-backup.sh`](docker/hermes-backup.sh)
-commits and pushes `$HERMES_HOME` to a private GitHub repository on that cron
-schedule (daily 03:00 UTC by default) so agent state (sessions, config, Mnemosyne
-memory) survives container recreation.
+`ralphex` profile, and finally execs `hermes gateway` as PID 1 — so the agent is
+reachable through a messaging platform (Telegram/Discord/Slack/WhatsApp/Signal/Email,
+per Hermes' own gateway docs), not through an interactive TTY.
 
 Kubernetes/k3s deployment (StatefulSet/Deployment, manifests, Secrets) is
 **out of scope** for this image and plan — see "Known limitations" below.
+
+Self-backup of `$HERMES_HOME` to a private git repository (restore-on-first-start,
+a daily backup cron job) is **not implemented in this image** — it is planned as a
+separate follow-up.
 
 ## Build the image locally
 
@@ -67,6 +67,21 @@ docker run --rm -i hadolint/hadolint < docker/Dockerfile
 
 ## Push to GHCR
 
+**Automated (recommended):** [`.github/workflows/build-and-push.yml`](.github/workflows/build-and-push.yml)
+builds and pushes on every git tag push. Just tag and push:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow lints the Dockerfile, builds the image, runs the Validation
+Commands above against it, and only pushes to
+`ghcr.io/mkoziy/hermes-coding-agent:<tag>` (plus `:latest`) if they pass. Uses
+the repo's built-in `GITHUB_TOKEN` — no extra secrets to configure.
+
+**Manual:**
+
 ```sh
 docker login ghcr.io -u <your-github-username>
 docker tag hermes-coding-agent:local ghcr.io/mkoziy/hermes-coding-agent:<tag>
@@ -80,9 +95,8 @@ is the image name assumed by the plan this image was built from.
 
 Hermes' persistent state (config, sessions, Mnemosyne memory) lives under
 `$HERMES_HOME` (`/home/app/.hermes` inside the image). Mount it as a volume so it
-survives container restarts/recreation — `entrypoint.sh` restores it from
-`HERMES_BACKUP_REPO` on first start if the volume is empty and a backup repo is
-configured, otherwise it initializes fresh:
+survives container restarts/recreation — `entrypoint.sh` initializes it fresh on
+first start:
 
 ```sh
 docker run -d \
@@ -108,17 +122,9 @@ or written to disk by `entrypoint.sh`) — put them in a `.env` file used with
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `GIT_USER_NAME` | recommended | Mapped to `git config --global user.name`. Needed for the backup cron (and any agent-made commits) to succeed. |
+| `GIT_USER_NAME` | recommended | Mapped to `git config --global user.name`. Needed for any agent-made commits to succeed. |
 | `GIT_USER_EMAIL` | recommended | Mapped to `git config --global user.email`. Same as above. |
-| `GH_TOKEN` | recommended | Used non-interactively for `gh auth login --with-token`. Needed for `gh`-based tooling and for cloning/pushing a private `HERMES_BACKUP_REPO` over HTTPS. |
-
-### backup
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `HERMES_BACKUP_REPO` | for backup/restore | Git remote URL (e.g. a private GitHub repo) that `$HERMES_HOME` is restored from on an empty first start and pushed to by the backup cron. Must already exist (even if empty) — nothing here creates the remote repo. If unset, no restore is attempted and the backup cron is not registered; unsetting it and restarting an already-configured deployment disables future backups (`entrypoint.sh` persists the decision to `$HERMES_HOME/.hermes-backup.conf` on every start, which `hermes-backup.sh` treats as authoritative). The previously-registered cron job itself stays registered but becomes a no-op — there is no `hermes cron delete` call. |
-| `HERMES_BACKUP_BRANCH` | optional | Branch used for the backup repo. Default `main`. |
-| `HERMES_BACKUP_CRON_SCHEDULE` | optional | Cron expression for the backup job `entrypoint.sh` registers via `hermes cron create`. Default `0 3 * * *` (daily 03:00 UTC, container has no `TZ` set so this is UTC). |
+| `GH_TOKEN` | recommended | Used non-interactively for `gh auth login --with-token`. Needed for `gh`-based tooling and for cloning/pushing private repos over HTTPS. |
 
 ### Hermes provider / model (non-secret selection)
 
@@ -152,7 +158,7 @@ full rationale):
 | Variable | Required | Description |
 | --- | --- | --- |
 | `HERMES_APPROVAL_MODE` | optional | Applied via `hermes config set approvals.mode`. Default `smart` (Hermes' own default) — dangerous commands prompt for approval, delivered as a chat message; paired users reply yes/no. |
-| `HERMES_CRON_APPROVAL_MODE` | optional | Applied via `hermes config set approvals.cron_mode`. Default `deny` — fail-closed for any future agent-driven (non-script) cron job, since nobody is watching to approve a cron-triggered prompt. The backup cron itself is registered `--no-agent` and is unaffected. |
+| `HERMES_CRON_APPROVAL_MODE` | optional | Applied via `hermes config set approvals.cron_mode`. Default `deny` — fail-closed for any agent-driven (non-script) cron job, since nobody is watching to approve a cron-triggered prompt. |
 | `HERMES_UNAUTHORIZED_DM_BEHAVIOR` | optional | Applied via `hermes config set unauthorized_dm_behavior`. Default `pair` (Hermes' DM Pairing System) — unknown users must pair before reaching the agent. |
 | `HERMES_YOLO_MODE` | optional | If `1`, bypasses all dangerous-command approval checks (hardline blocklist still applies). Read directly by Hermes; off by default. Opt-in, operator-accepted risk — read `docs/user-guide/security` before enabling. |
 | `HERMES_TERMINAL_BACKEND` | optional | Always `local` — this image only supports `local` (no `docker.sock`/DinD, no ssh/singularity/modal/daytona provisioning). Setting it to anything other than `local`/unset makes the entrypoint refuse to start, rather than silently accepting a backend that would break on the first sandboxed tool call. |
@@ -185,34 +191,6 @@ machine, which does not exist inside this container. If you diff the config
 after switching to `pi`, this is the one line you should expect to see
 mutated relative to the source repo.
 
-## Backups: view logs / trigger manually
-
-The backup cron job (`hermes-home-backup`) runs `/usr/local/bin/hermes-backup.sh`
-daily via Hermes' own cron. To trigger a backup immediately:
-
-```sh
-docker exec hermes-coding-agent /usr/local/bin/hermes-backup.sh
-# or, via Hermes' own cron machinery:
-docker exec hermes-coding-agent hermes cron run hermes-home-backup
-```
-
-`hermes-backup.sh` logs to stdout/stderr (visible via `docker logs`), commits only
-when `$HERMES_HOME` has new changes (and always retries the push even when
-there's nothing new to commit, in case a prior push failed), never
-force-pushes, and rewrites a `.gitignore` inside `$HERMES_HOME` on every run
-(so newer exclusion patterns reach volumes backed up by an older image, too)
-that excludes `.env`, `config.yaml` (excluded entirely rather than relied on
-as a name-matched "secret" — see the script's own comments for why),
-`auth-profiles.json`, `pairing/`, `webhook_subscriptions.json`, generic
-`*secret*`/`*credentials*` patterns, and Mnemosyne's `*.db-wal`/`*.db-shm` SQLite
-sidecar files. A `flock`-based lock file prevents two concurrent runs (e.g. the
-daily cron firing at the same moment as a manual trigger) from racing on the
-same `.git`.
-
-```sh
-docker logs hermes-coding-agent | grep hermes-backup
-```
-
 ## Known limitations
 
 - **No Kubernetes/k3s manifests.** This plan/image deliberately stops at "build and
@@ -224,22 +202,10 @@ docker logs hermes-coding-agent | grep hermes-backup
   webhook endpoint, that port must be published manually.
 - `ralphex` profile selection is not itself persisted across restarts — only
   `$HERMES_HOME` is expected to be a durable volume.
-- The backup mechanism assumes a single container instance; there is no
-  distributed-lock or multi-writer protection if you run more than one replica
-  against the same `HERMES_BACKUP_REPO` (within a single instance, `hermes-backup.sh`
-  does take a local `flock` so its own daily-cron and manual-trigger paths can't
-  race each other).
-- **`config.yaml` is excluded from the backup entirely, not just secret-shaped
-  keys inside it.** `hermes-backup.sh`'s `.gitignore` drops the whole file
-  rather than relying on a filename-based `*secret*`/`*credentials*` pattern,
-  since a future Hermes version could write a credential value inside it and
-  a name-based pattern would never catch that. `entrypoint.sh` re-applies the
-  handful of settings it manages (`model.provider`, `model.default`,
-  `approvals.mode`, `approvals.cron_mode`, `unauthorized_dm_behavior`,
-  `terminal.backend`) on every start regardless of restore, but any other
-  Hermes setting an operator configured by hand directly in `config.yaml` is
-  **not** restored on a disaster-recovery restore and must be reapplied
-  manually.
+- **No self-backup/restore.** `$HERMES_HOME` (sessions, config, Mnemosyne
+  memory) is only as durable as the volume it's mounted on — there is no
+  automatic backup to a remote git repository and no restore-on-first-start.
+  Planned as a separate follow-up.
 - **Image size.** Because the Hermes installer places its own application checkout
   (`hermes-agent/`, ~1.6GB of venv + node_modules) and private `uv`/`uvx` copies
   (`bin/`) inside `$HERMES_HOME` — the same directory this image treats as a pure
