@@ -33,7 +33,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/hermes-coding-agent
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest
