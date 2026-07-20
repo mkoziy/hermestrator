@@ -1,0 +1,67 @@
+name: Build and push image
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        run: docker run --rm -i hadolint/hadolint < docker/Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/hermes-coding-agent
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      # Built locally (load, not push) first so the Validation Commands from
+      # README.md/docs/plans/20260719-hermes-docker-agent.md can run against
+      # the actual image before anything reaches the registry.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate image
+        run: |
+          image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
+          docker run --rm "$image" hermes doctor
+          docker run --rm "$image" bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
+
+      - name: Push image
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker push "$tag"
+          done <<< "${{ steps.meta.outputs.tags }}"

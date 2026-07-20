@@ -1,0 +1,17 @@
+# ralphex config: pi executor (via opencode-go provider)
+# usage: ralphex --config-dir ~/.config/ralphex-pi docs/plans/feature.md
+# requires: pi CLI on PATH, jq on PATH, opencode-go provider already authenticated for pi
+
+# route claude-slot phases (task, review) through pi via the vendored wrapper
+claude_command = /Users/michael/.config/ralphex-pi/scripts/pi-opencode-go.sh
+claude_args =
+
+# task execution model
+task_model = deepseek-v4-flash
+
+# use a different model for review phases than for task execution
+# verified: `pi --provider opencode-go --model qwen3.7-plus --print` responds correctly
+review_model = qwen3.7-plus
+
+# no external (codex) review pass for this profile
+external_review_tool = none
