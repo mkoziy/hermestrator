@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ralphex-use-profile.sh <codex|pi|claude>
+# ralphex-use-profile.sh <codex|pi|claude|codex-planning|pi-planning|claude-planning>
 #
 # switches the active ralphex profile by fully replacing ~/.config/ralphex
 # with a fresh copy of the baked-in profile from the read-only image layer
@@ -17,9 +17,9 @@ set -euo pipefail
 profile="${1:-}"
 
 case "$profile" in
-    codex|pi|claude) ;;
+    codex|pi|claude|codex-planning|pi-planning|claude-planning) ;;
     *)
-        echo "usage: ralphex-use-profile.sh <codex|pi|claude>" >&2
+        echo "usage: ralphex-use-profile.sh <codex|pi|claude|codex-planning|pi-planning|claude-planning>" >&2
         exit 1
         ;;
 esac
@@ -36,11 +36,11 @@ rm -rf "$dest"
 mkdir -p "$dest"
 cp -r "$src/." "$dest/"
 
-# the pi profile's checked-in config carries an absolute claude_command path
+# the pi profiles' checked-in config carries an absolute claude_command path
 # from the source repo checkout (the original author's machine), which does
 # not exist inside this container. rewrite it to the actual on-disk location
 # of the wrapper script now that it has been copied into $dest/scripts.
-if [[ "$profile" == "pi" && -f "$dest/config" && -f "$dest/scripts/pi-opencode-go.sh" ]]; then
+if [[ ("$profile" == "pi" || "$profile" == "pi-planning") && -f "$dest/config" && -f "$dest/scripts/pi-opencode-go.sh" ]]; then
     sed -i "s|^claude_command = .*|claude_command = ${dest}/scripts/pi-opencode-go.sh|" "$dest/config"
 fi
 

@@ -5,9 +5,12 @@ headless, messaging-driven coding agent. The container installs `git`, `gh`, `fz
 `jq`, `ripgrep`, a Go toolchain, Node.js, `uv`/Python, Hermes Agent itself, the
 [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory layer, the `codex` and `pi` coding-agent CLIs,
 and the [`ralphex`](https://github.com/umputun/ralphex) orchestrator binary, together
-with the three `ralphex` profiles from this repo's `ralphex/` directory
-(`codex`, `pi`, `claude`) and the [Agent Skills](#agent-skills-codex--pi) from
-this repo's `skills/` directory.
+with the six `ralphex` profiles from this repo's `ralphex/` directory
+(`codex`, `pi`, `claude` for day-to-day task execution/coding, plus a
+`-planning` variant of each for plan creation — see
+["Switch the ralphex profile manually"](#switch-the-ralphex-profile-manually))
+and the [Agent Skills](#agent-skills-codex--pi) from this repo's `skills/`
+directory.
 
 At start-up an idempotent [`docker/entrypoint.sh`](docker/entrypoint.sh) configures
 git identity, `gh` auth, Hermes' non-secret config (provider/model selection,
@@ -176,7 +179,7 @@ full rationale):
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `RALPHEX_DEFAULT_PROFILE` | optional | Profile applied by `ralphex-use-profile.sh` on every container start. One of `codex`, `pi`, `claude`. Default `claude`. Profile selection is re-applied from the read-only image layer on every start — it is not itself persisted across restarts (only `$HERMES_HOME` is). |
+| `RALPHEX_DEFAULT_PROFILE` | optional | Profile applied by `ralphex-use-profile.sh` on every container start. One of `codex`, `pi`, `claude`, `codex-planning`, `pi-planning`, `claude-planning`. Default `claude`. Profile selection is re-applied from the read-only image layer on every start — it is not itself persisted across restarts (only `$HERMES_HOME` is). |
 
 ### dashboard / Kanban (optional sidecar)
 
@@ -217,7 +220,7 @@ instead, depending on your deployment's trust model.
 ## Switch the ralphex profile manually
 
 ```sh
-docker exec -it hermestrator ralphex-use-profile.sh pi     # or codex / claude
+docker exec -it hermestrator ralphex-use-profile.sh pi     # or codex / claude / *-planning
 ```
 
 This replaces `~/.config/ralphex` with a fresh copy of the selected baked-in
@@ -226,13 +229,32 @@ note it does **not** persist across a container restart unless `~/.config` is
 itself on a volume — `entrypoint.sh` re-applies `RALPHEX_DEFAULT_PROFILE` (or
 `claude`) on every start.
 
-For the `pi` profile specifically, `ralphex-use-profile.sh` also rewrites the
-`claude_command` line inside the copied `config` file to point at the actual
-on-disk path of `scripts/pi-opencode-go.sh` under `~/.config/ralphex` — the
-checked-in profile carries an absolute path from the original author's
-machine, which does not exist inside this container. If you diff the config
-after switching to `pi`, this is the one line you should expect to see
-mutated relative to the source repo.
+For the `pi`/`pi-planning` profiles specifically, `ralphex-use-profile.sh`
+also rewrites the `claude_command` line inside the copied `config` file to
+point at the actual on-disk path of `scripts/pi-opencode-go.sh` under
+`~/.config/ralphex` — the checked-in profile carries an absolute path from
+the original author's machine, which does not exist inside this container.
+If you diff the config after switching to `pi`/`pi-planning`, this is the
+one line you should expect to see mutated relative to the source repo.
+
+### Task/coding profiles vs. planning profiles
+
+`codex`/`pi`/`claude` are tuned for day-to-day task execution — their task
+(coding) effort is set lower than review effort to keep routine runs cheap
+and fast:
+
+| Profile | Task effort | Review effort |
+| --- | --- | --- |
+| `codex` | `low` (`codex_reasoning_effort`) | `xhigh` |
+| `pi` | `deepseek-v4-flash:low` | `qwen3.7-plus` (default effort) |
+| `claude` | `sonnet:medium` | `opus` (default effort) |
+
+`codex-planning`/`pi-planning`/`claude-planning` are exact copies of these
+three profiles as originally configured, at the higher (unreduced) task
+effort — use one of these for `ralphex --plan` / plan-creation runs, since
+plan creation shares the same task-effort setting as task execution within
+a single profile (there's no separate "plan model" key), so running `--plan`
+on a task-tuned profile would create plans at the same reduced effort.
 
 ## Use a ralphex profile outside Docker
 
@@ -242,20 +264,22 @@ inside the image, since there's no entrypoint to do it for you. Use
 `ralphex/install-profile.sh` instead of copying a profile directory by hand:
 
 ```sh
-ralphex/install-profile.sh pi     # -> ~/.config/ralphex-pi
-ralphex/install-profile.sh codex  # -> ~/.config/ralphex-codex
-ralphex/install-profile.sh claude # -> ~/.config/ralphex-claude
+ralphex/install-profile.sh pi              # -> ~/.config/ralphex-pi
+ralphex/install-profile.sh codex           # -> ~/.config/ralphex-codex
+ralphex/install-profile.sh claude          # -> ~/.config/ralphex-claude
+ralphex/install-profile.sh claude-planning # -> ~/.config/ralphex-claude-planning
 ralphex/install-profile.sh pi /custom/config-dir   # optional explicit dest
 
 ralphex --config-dir ~/.config/ralphex-pi docs/plans/feature.md
+ralphex --config-dir ~/.config/ralphex-claude-planning --plan docs/plans/feature.md
 ```
 
 Like `ralphex-use-profile.sh`, it's a full replace (safe/idempotent to
-re-run, e.g. after pulling repo updates) and, for the `pi` profile, rewrites
-`claude_command` to the actual on-disk path of `scripts/pi-opencode-go.sh`
-under the destination config-dir — `ralphex` has no `~`/env-var expansion
-for `claude_command`, so the source repo's checked-in value can only ever be
-correct for one machine.
+re-run, e.g. after pulling repo updates) and, for the `pi`/`pi-planning`
+profiles, rewrites `claude_command` to the actual on-disk path of
+`scripts/pi-opencode-go.sh` under the destination config-dir — `ralphex` has
+no `~`/env-var expansion for `claude_command`, so the source repo's
+checked-in value can only ever be correct for one machine.
 
 ## Agent skills (codex / pi)
 

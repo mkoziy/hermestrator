@@ -1,0 +1,17 @@
+# ralphex config: claude executor -- planning profile
+# usage: ralphex --config-dir ~/.config/ralphex-claude-planning --plan docs/plans/feature.md
+#
+# kept at the same task_model (no effort suffix, i.e. Claude CLI's own default
+# effort) as the default claude profile's original settings, before the
+# default profile's task_model was given a :medium effort suffix for
+# day-to-day coding -- this profile exists to keep plan quality unaffected by
+# that change.
+
+# task execution model
+task_model = sonnet
+
+# use a stronger model for review phases than for task execution
+review_model = opus
+
+# no external (codex) review pass for this profile
+external_review_tool = none

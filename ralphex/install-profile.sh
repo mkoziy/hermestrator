@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# ralphex/install-profile.sh <codex|pi|claude> [config-dir]
+# ralphex/install-profile.sh <codex|pi|claude|codex-planning|pi-planning|claude-planning> [config-dir]
 #
 # installs one of this repo's ralphex profiles (ralphex-codex/, ralphex-pi/,
-# ralphex-claude/) onto a host machine running ralphex directly (outside the
-# hermestrator Docker image, which handles this itself via
-# docker/ralphex-use-profile.sh + entrypoint.sh on every container start).
+# ralphex-claude/, plus the -planning variants of each, kept at the original
+# pre-effort-reduction settings for plan creation) onto a host machine
+# running ralphex directly (outside the hermestrator Docker image, which
+# handles this itself via docker/ralphex-use-profile.sh + entrypoint.sh on
+# every container start).
 #
 # on host there is no entrypoint to auto-rewrite paths, so this script plays
 # that same role: copy this repo's profile source to a config-dir (default
@@ -27,9 +29,9 @@ set -euo pipefail
 profile="${1:-}"
 
 case "$profile" in
-    codex|pi|claude) ;;
+    codex|pi|claude|codex-planning|pi-planning|claude-planning) ;;
     *)
-        echo "usage: $(basename "$0") <codex|pi|claude> [config-dir]" >&2
+        echo "usage: $(basename "$0") <codex|pi|claude|codex-planning|pi-planning|claude-planning> [config-dir]" >&2
         exit 1
         ;;
 esac
@@ -52,10 +54,13 @@ cp -R "$src/." "$dest/"
 # bare -i) because this script also runs on macOS: BSD sed requires an
 # argument to -i (even empty), GNU sed accepts either; .bak is the one
 # spelling both accept, so the backup is removed right after.
-if [[ "$profile" == "pi" && -f "$dest/config" && -f "$dest/scripts/pi-opencode-go.sh" ]]; then
+if [[ ("$profile" == "pi" || "$profile" == "pi-planning") && -f "$dest/config" && -f "$dest/scripts/pi-opencode-go.sh" ]]; then
     sed -i.bak "s|^claude_command = .*|claude_command = ${dest}/scripts/pi-opencode-go.sh|" "$dest/config"
     rm -f "$dest/config.bak"
 fi
 
 echo "ralphex profile installed: ${profile} (${dest})"
-echo "run: ralphex --config-dir ${dest} docs/plans/<your-plan>.md"
+case "$profile" in
+    *-planning) echo "run: ralphex --config-dir ${dest} --plan docs/plans/<your-plan>.md" ;;
+    *) echo "run: ralphex --config-dir ${dest} docs/plans/<your-plan>.md" ;;
+esac

@@ -162,7 +162,17 @@ COPY --chown=app:app ralphex/ralphex-pi/agents/ /opt/ralphex-profiles/pi/agents/
 COPY --chown=app:app ralphex/ralphex-pi/prompts/ /opt/ralphex-profiles/pi/prompts/
 COPY --chown=app:app ralphex/ralphex-pi/scripts/ /opt/ralphex-profiles/pi/scripts/
 COPY --chown=app:app ralphex/ralphex-claude/config /opt/ralphex-profiles/claude/config
-RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh
+
+# planning profiles: same executors as above, kept at the original
+# (pre-effort-reduction) settings so plan creation quality is unaffected by
+# the coding/task-execution profiles above having their effort tuned down.
+COPY --chown=app:app ralphex/ralphex-codex-planning/config /opt/ralphex-profiles/codex-planning/config
+COPY --chown=app:app ralphex/ralphex-pi-planning/config /opt/ralphex-profiles/pi-planning/config
+COPY --chown=app:app ralphex/ralphex-pi-planning/agents/ /opt/ralphex-profiles/pi-planning/agents/
+COPY --chown=app:app ralphex/ralphex-pi-planning/prompts/ /opt/ralphex-profiles/pi-planning/prompts/
+COPY --chown=app:app ralphex/ralphex-pi-planning/scripts/ /opt/ralphex-profiles/pi-planning/scripts/
+COPY --chown=app:app ralphex/ralphex-claude-planning/config /opt/ralphex-profiles/claude-planning/config
+RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh /opt/ralphex-profiles/pi-planning/scripts/*.sh
 
 # profile switcher: root-owned, world-executable, lives outside any profile
 # so it's available before a profile has ever been selected.

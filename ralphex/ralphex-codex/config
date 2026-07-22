@@ -1,13 +1,20 @@
-# ralphex config: codex executor
+# ralphex config: codex executor (default -- task execution / coding)
 # usage: ralphex --config-dir ~/.config/ralphex-codex docs/plans/feature.md
 # requires codex CLI >= 0.130.0
+#
+# for plan creation, use the ralphex-codex-planning profile instead: this
+# profile's codex_reasoning_effort is tuned down for day-to-day task
+# execution/coding, and plan creation shares that same setting here (there's
+# no separate plan_model key), so a lower effort here would also lower plan
+# quality if used for --plan.
 
 # route plan/task/review/finalize phases through the codex CLI natively
 executor = codex
 
 # base codex model + effort used for plan creation and task execution
+# lowered from medium: this profile is for coding/task execution, not review
 codex_model = gpt-5.4
-codex_reasoning_effort = medium
+codex_reasoning_effort = low
 
 # use higher reasoning effort for review phases than for task execution
 review_model = gpt-5.4:xhigh
