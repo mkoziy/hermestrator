@@ -3,7 +3,9 @@
 Repo layout: `docker/` holds the Hermes coding-agent Docker image (Dockerfile,
 entrypoint.sh, ralphex-use-profile.sh); `ralphex/` holds the
 ralphex profile source configs (`ralphex-codex/`, `ralphex-pi/`,
-`ralphex-claude/`) that get baked into the image; `skills/` holds Agent
+`ralphex-claude/`) that get baked into the image, plus
+`install-profile.sh` for using a profile directly on a host outside Docker
+(see README "Use a ralphex profile outside Docker"); `skills/` holds Agent
 Skills (`SKILL.md`, one per subdirectory) baked into the image for the
 `codex`/`pi` CLIs; `docs/plans/` holds
 implementation plans (see `20260719-hermes-docker-agent.md` for the full

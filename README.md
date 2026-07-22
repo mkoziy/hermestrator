@@ -234,6 +234,29 @@ machine, which does not exist inside this container. If you diff the config
 after switching to `pi`, this is the one line you should expect to see
 mutated relative to the source repo.
 
+## Use a ralphex profile outside Docker
+
+Running `ralphex` directly on a host (no container) needs the same
+"rewrite the checked-in absolute path" step `ralphex-use-profile.sh` does
+inside the image, since there's no entrypoint to do it for you. Use
+`ralphex/install-profile.sh` instead of copying a profile directory by hand:
+
+```sh
+ralphex/install-profile.sh pi     # -> ~/.config/ralphex-pi
+ralphex/install-profile.sh codex  # -> ~/.config/ralphex-codex
+ralphex/install-profile.sh claude # -> ~/.config/ralphex-claude
+ralphex/install-profile.sh pi /custom/config-dir   # optional explicit dest
+
+ralphex --config-dir ~/.config/ralphex-pi docs/plans/feature.md
+```
+
+Like `ralphex-use-profile.sh`, it's a full replace (safe/idempotent to
+re-run, e.g. after pulling repo updates) and, for the `pi` profile, rewrites
+`claude_command` to the actual on-disk path of `scripts/pi-opencode-go.sh`
+under the destination config-dir — `ralphex` has no `~`/env-var expansion
+for `claude_command`, so the source repo's checked-in value can only ever be
+correct for one machine.
+
 ## Agent skills (codex / pi)
 
 `skills/` at the repo root holds [Agent Skills](https://agentskills.io) — the
