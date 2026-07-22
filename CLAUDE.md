@@ -3,7 +3,9 @@
 Repo layout: `docker/` holds the Hermes coding-agent Docker image (Dockerfile,
 entrypoint.sh, ralphex-use-profile.sh); `ralphex/` holds the
 ralphex profile source configs (`ralphex-codex/`, `ralphex-pi/`,
-`ralphex-claude/`) that get baked into the image; `docs/plans/` holds
+`ralphex-claude/`) that get baked into the image; `skills/` holds Agent
+Skills (`SKILL.md`, one per subdirectory) baked into the image for the
+`codex`/`pi` CLIs; `docs/plans/` holds
 implementation plans (see `20260719-hermes-docker-agent.md` for the full
 design rationale of the current image).
 
@@ -76,6 +78,18 @@ rejected ("must be relative"); even a symlink pointing outside that directory
 is rejected ("escapes the scripts directory via traversal"). Relevant again
 if/when the deferred backup-cron follow-up (see above) registers a script-only
 cron job.
+
+**Agent Skills for codex/pi follow the same bake+reseed idiom as the Hermes
+app subtrees, but additive-per-skill instead of atomic-whole-subtree.**
+`skills/<name>/SKILL.md` (open Agent Skills format — same file works
+unmodified in Claude Code, `codex`, and `pi`) is baked into
+`/opt/agent-skills/` at build time (`docker/Dockerfile`); `entrypoint.sh`
+copies any skill missing from `~/.codex/skills/` and `~/.pi/agent/skills/`
+into place on every start. Unlike the hermes-agent reseed, this is
+unconditional on every start (not gated by `HERMES_HOME` state) and per-skill
+existence-checked rather than temp-dir+atomic-`mv`, since skill dirs are tiny
+text files, not a multi-GB venv a crash could leave half-copied. See README
+"Agent skills (codex / pi)".
 
 **`gh auth login --with-token` does not configure git's HTTPS credential
 helper.** Plain `git clone`/`git push` against a private GitHub repo over

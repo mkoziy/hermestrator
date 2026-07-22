@@ -6,7 +6,8 @@ headless, messaging-driven coding agent. The container installs `git`, `gh`, `fz
 [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory layer, the `codex` and `pi` coding-agent CLIs,
 and the [`ralphex`](https://github.com/umputun/ralphex) orchestrator binary, together
 with the three `ralphex` profiles from this repo's `ralphex/` directory
-(`codex`, `pi`, `claude`).
+(`codex`, `pi`, `claude`) and the [Agent Skills](#agent-skills-codex--pi) from
+this repo's `skills/` directory.
 
 At start-up an idempotent [`docker/entrypoint.sh`](docker/entrypoint.sh) configures
 git identity, `gh` auth, Hermes' non-secret config (provider/model selection,
@@ -232,6 +233,30 @@ checked-in profile carries an absolute path from the original author's
 machine, which does not exist inside this container. If you diff the config
 after switching to `pi`, this is the one line you should expect to see
 mutated relative to the source repo.
+
+## Agent skills (codex / pi)
+
+`skills/` at the repo root holds [Agent Skills](https://agentskills.io) — the
+open `SKILL.md` format shared unmodified across Claude Code, the `codex` CLI,
+and `pi`. Each skill is its own directory, `skills/<name>/SKILL.md`; the
+image bakes all of them into a read-only layer at `/opt/agent-skills/`, and
+`entrypoint.sh` installs them into `codex`'s and `pi`'s own native skill
+directories (`~/.codex/skills/`, `~/.pi/agent/skills/`) on every container
+start. This is independent of `ralphex` profile selection — skills are
+available to `codex`/`pi` whether invoked directly or spawned by `ralphex`,
+regardless of the active profile.
+
+Installation is additive: a skill directory that already exists at the
+target (e.g. one added or edited live inside a running container) is left
+alone, so it survives restarts and isn't overwritten by the image's own
+baked-in copy. To pick up a skill added/edited in this repo's `skills/`
+directory on an already-running container from an older image, remove the
+stale copy under `~/.codex/skills/<name>` / `~/.pi/agent/skills/<name>`
+before restarting (or just recreate the container).
+
+Add a new skill by adding `skills/<name>/SKILL.md` (YAML frontmatter with at
+least `name` and `description`) and rebuilding the image — see
+[agentskills.io](https://agentskills.io) for the full spec.
 
 ## Known limitations
 

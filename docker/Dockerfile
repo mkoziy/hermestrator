@@ -168,6 +168,14 @@ RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh
 # so it's available before a profile has ever been selected.
 COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profile.sh
 
+# Agent Skills (open SKILL.md standard, shared unmodified across Claude Code,
+# codex CLI, and pi): baked into the read-only image layer under
+# /opt/agent-skills/<skill-name>/SKILL.md; entrypoint.sh reseeds them
+# additively into codex's and pi's own native skill directories
+# (~/.codex/skills/, ~/.pi/agent/skills/) at every container start, the same
+# "bake once, reseed on start" idiom used for the Hermes app subtrees above.
+COPY --chown=app:app skills/ /opt/agent-skills/
+
 # HERMES_HOME: explicit persistent-state directory. Expected to be a mounted
 # volume in real deployments (survives `docker restart` / a future k8s
 # restart policy); entrypoint.sh initializes it fresh on first run when empty.

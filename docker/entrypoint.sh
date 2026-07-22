@@ -149,6 +149,35 @@ fi
 # case handled above; keep it that way.
 
 # ---------------------------------------------------------------------------
+# agent skills reseed (codex CLI + pi)
+# ---------------------------------------------------------------------------
+# Skills baked into the image under /opt/agent-skills/<name>/SKILL.md (see
+# Dockerfile) are the open Agent Skills format, read unmodified by both the
+# codex CLI (project/personal dirs: .codex/skills/, ~/.codex/skills/) and pi
+# (~/.pi/agent/skills/, among others — see pi's own skills docs). Installed
+# into each tool's personal/global skill directory so they're available
+# whether codex/pi are invoked directly or spawned by ralphex, regardless of
+# the active ralphex profile.
+#
+# Additive-only, per-skill existence check (same idiom as the hermes-agent
+# reseed above): never overwrites a skill directory that's already present,
+# so a skill installed/edited live inside a running container survives
+# restarts and isn't clobbered by this image's own baked-in copy.
+if [ -d /opt/agent-skills ]; then
+    for skills_target in "$HOME/.codex/skills" "$HOME/.pi/agent/skills"; do
+        mkdir -p "$skills_target"
+        for skill_src in /opt/agent-skills/*/; do
+            [ -d "$skill_src" ] || continue
+            skill_name="$(basename "$skill_src")"
+            if [ ! -d "$skills_target/$skill_name" ]; then
+                log "installing skill '$skill_name' into $skills_target"
+                cp -r "$skill_src" "$skills_target/$skill_name"
+            fi
+        done
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # idempotent `hermes config set` helper
 # ---------------------------------------------------------------------------
 # `hermes config get <key>` / `hermes config set <key> <value>` are confirmed
