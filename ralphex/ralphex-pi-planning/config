@@ -7,7 +7,7 @@
 # coding) -- this profile exists to keep plan quality unaffected by that change.
 
 # route claude-slot phases (task, review) through pi via the vendored wrapper
-claude_command = /Users/michael/.config/ralphex-pi-planning/scripts/pi-opencode-go.sh
+claude_command = /opt/ralphex-profiles/pi-planning/scripts/pi-opencode-go.sh
 claude_args =
 
 # task execution model

@@ -36,10 +36,12 @@ rm -rf "$dest"
 mkdir -p "$dest"
 cp -r "$src/." "$dest/"
 
-# the pi profiles' checked-in config carries an absolute claude_command path
-# from the source repo checkout (the original author's machine), which does
-# not exist inside this container. rewrite it to the actual on-disk location
-# of the wrapper script now that it has been copied into $dest/scripts.
+# the pi profiles' checked-in config points claude_command at the baked-in
+# /opt/ralphex-profiles/<name>/scripts/pi-opencode-go.sh copy, which is valid
+# on its own inside this container. rewrite it anyway to the copy under
+# $dest/scripts so the active profile is self-contained (e.g. it keeps
+# working if /opt/ralphex-profiles ever became unavailable, and matches what
+# install-profile.sh does on a host where there is no /opt fallback).
 if [[ ("$profile" == "pi" || "$profile" == "pi-planning") && -f "$dest/config" && -f "$dest/scripts/pi-opencode-go.sh" ]]; then
     sed -i "s|^claude_command = .*|claude_command = ${dest}/scripts/pi-opencode-go.sh|" "$dest/config"
 fi

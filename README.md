@@ -232,10 +232,14 @@ itself on a volume — `entrypoint.sh` re-applies `RALPHEX_DEFAULT_PROFILE` (or
 For the `pi`/`pi-planning` profiles specifically, `ralphex-use-profile.sh`
 also rewrites the `claude_command` line inside the copied `config` file to
 point at the actual on-disk path of `scripts/pi-opencode-go.sh` under
-`~/.config/ralphex` — the checked-in profile carries an absolute path from
-the original author's machine, which does not exist inside this container.
-If you diff the config after switching to `pi`/`pi-planning`, this is the
-one line you should expect to see mutated relative to the source repo.
+`~/.config/ralphex`. The checked-in profile's `claude_command` already
+points at the baked-in `/opt/ralphex-profiles/<name>/scripts/pi-opencode-go.sh`
+copy, which works unmodified inside this container (e.g. if you pass
+`--config-dir /opt/ralphex-profiles/pi` directly instead of switching
+profiles first) — the rewrite to `~/.config/ralphex` is redundant in that
+case but harmless. If you diff the config after switching to `pi`/`pi-planning`,
+this is the one line you should expect to see mutated relative to the source
+repo.
 
 ### Task/coding profiles vs. planning profiles
 
@@ -279,7 +283,9 @@ re-run, e.g. after pulling repo updates) and, for the `pi`/`pi-planning`
 profiles, rewrites `claude_command` to the actual on-disk path of
 `scripts/pi-opencode-go.sh` under the destination config-dir — `ralphex` has
 no `~`/env-var expansion for `claude_command`, so the source repo's
-checked-in value can only ever be correct for one machine.
+checked-in value (which points at the Docker-image-only
+`/opt/ralphex-profiles/<name>/` path) is not valid on a host outside the
+container and must be rewritten.
 
 ## Agent skills (codex / pi)
 

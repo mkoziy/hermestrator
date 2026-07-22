@@ -14,11 +14,11 @@
 # the top of each profile's checked-in `config` file), then, for the `pi`
 # profile, rewrite the `claude_command` line to the actual absolute path of
 # `scripts/pi-opencode-go.sh` under that config-dir. The repo's checked-in
-# ralphex/ralphex-pi/config carries a `claude_command` path from the original
-# author's machine (there is no portable way to express "next to this config
-# file" in ralphex's config format: ralphex does not expand `~` or resolve
-# relative paths for claude_command, so a literal path in the source repo can
-# only ever be correct for one machine).
+# ralphex/ralphex-pi/config points `claude_command` at the Docker-image-only
+# /opt/ralphex-profiles/pi/scripts/pi-opencode-go.sh path (there is no
+# portable way to express "next to this config file" in ralphex's config
+# format: ralphex does not expand `~` or resolve relative paths for
+# claude_command), which does not exist on a host outside that container.
 #
 # safe to re-run: like docker/ralphex-use-profile.sh, every invocation
 # discards whatever is currently at config-dir and recreates it from the
