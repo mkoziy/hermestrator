@@ -10,12 +10,15 @@
 # route plan/task/review/finalize phases through the codex CLI natively
 executor = codex
 
-# base codex model + effort used for plan creation and task execution
-codex_model = gpt-5.4
+# base codex model + effort used for plan creation and task execution.
+# terra is the balanced GPT-5.6 tier: plan quality needs more headroom than
+# the default profile's luna, without going all the way to sol.
+codex_model = gpt-5.6-terra
 codex_reasoning_effort = medium
 
-# use higher reasoning effort for review phases than for task execution
-review_model = gpt-5.4:xhigh
+# use the flagship GPT-5.6 tier + higher reasoning effort for review phases
+# than for task execution
+review_model = gpt-5.6-sol:xhigh
 
 # executor=codex already forces this to none, set explicitly for clarity
 external_review_tool = none

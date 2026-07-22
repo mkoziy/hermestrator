@@ -12,12 +12,14 @@
 executor = codex
 
 # base codex model + effort used for plan creation and task execution
-# lowered from medium: this profile is for coding/task execution, not review
-codex_model = gpt-5.4
+# lowered from medium: this profile is for coding/task execution, not review.
+# luna is the cheapest/fastest GPT-5.6 tier, matching that intent.
+codex_model = gpt-5.6-luna
 codex_reasoning_effort = low
 
-# use higher reasoning effort for review phases than for task execution
-review_model = gpt-5.4:xhigh
+# use the flagship GPT-5.6 tier + higher reasoning effort for review phases
+# than for task execution
+review_model = gpt-5.6-sol:xhigh
 
 # executor=codex already forces this to none, set explicitly for clarity
 external_review_tool = none

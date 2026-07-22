@@ -249,13 +249,17 @@ and fast:
 
 | Profile | Task effort | Review effort |
 | --- | --- | --- |
-| `codex` | `low` (`codex_reasoning_effort`) | `xhigh` |
+| `codex` | `gpt-5.6-luna:low` | `gpt-5.6-sol:xhigh` |
 | `pi` | `deepseek-v4-flash:low` | `qwen3.7-plus` (default effort) |
 | `claude` | `sonnet:medium` | `opus` (default effort) |
 
-`codex-planning`/`pi-planning`/`claude-planning` are exact copies of these
-three profiles as originally configured, at the higher (unreduced) task
-effort — use one of these for `ralphex --plan` / plan-creation runs, since
+`pi-planning`/`claude-planning` are exact copies of their non-planning
+profiles as originally configured, at the higher (unreduced) task
+effort — `codex-planning` additionally steps its task model up a tier, from
+`gpt-5.6-luna` to `gpt-5.6-terra` (review stays on `gpt-5.6-sol` in both), for
+the same reason: plan quality needs more headroom than the cheapest tier.
+Use one of these `-planning` profiles for `ralphex --plan` / plan-creation
+runs, since
 plan creation shares the same task-effort setting as task execution within
 a single profile (there's no separate "plan model" key), so running `--plan`
 on a task-tuned profile would create plans at the same reduced effort.
