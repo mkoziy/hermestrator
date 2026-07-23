@@ -152,8 +152,8 @@ fi
 # agent skills reseed (codex CLI + pi)
 # ---------------------------------------------------------------------------
 # Skills baked into the image under /opt/agent-skills/<name>/SKILL.md (see
-# Dockerfile) are the open Agent Skills format, read unmodified by both the
-# codex CLI (project/personal dirs: .codex/skills/, ~/.codex/skills/) and pi
+# Dockerfile) are the open Agent Skills format, read unmodified by the codex
+# CLI (project/personal dirs: .codex/skills/, ~/.codex/skills/) and pi
 # (~/.pi/agent/skills/, among others — see pi's own skills docs). Installed
 # into each tool's personal/global skill directory so they're available
 # whether codex/pi are invoked directly or spawned by ralphex, regardless of
@@ -243,22 +243,17 @@ fi
 #       delivered into the messaging platform itself — this is Hermes' own
 #       documented mechanism for exactly this headless/messaging-only
 #       scenario, not a workaround.
-# Chose (b): keep approvals ON by default (do not force YOLO), and pair it
-# with the DM Pairing System (unauthorized_dm_behavior: pair, Hermes'
-# already-existing default, set explicitly below for clarity) so unknown
-# users must pair before they can reach the agent at all, and approvals for
-# paired users arrive as ordinary chat replies. HERMES_YOLO_MODE remains a
-# supported opt-in escape hatch (Hermes reads the env var directly, no
-# config-set needed) for operators who explicitly accept the risk — off by
-# default here. Full risk writeup goes in the README (Task 9); this comment
-# is the authoritative record of the decision for now.
+# Chose (b): keep approvals ON by default (do not force YOLO). HERMES_YOLO_MODE
+# remains a supported opt-in escape hatch (Hermes reads the env var directly,
+# no config-set needed) for operators who explicitly accept the risk — off by
+# default here. Full risk writeup goes in the README (Task 9); this comment is
+# the authoritative record of the decision for now.
 hermes_config_ensure "approvals.mode" "${HERMES_APPROVAL_MODE:-smart}"
 # Cron-triggered agent runs have nobody watching to answer an approval
 # prompt at all, so default that path to "deny" (safe fail-closed) rather
 # than inheriting the interactive default; this protects any agent-driven
 # (non-script) cron job an operator adds.
 hermes_config_ensure "approvals.cron_mode" "${HERMES_CRON_APPROVAL_MODE:-deny}"
-hermes_config_ensure "unauthorized_dm_behavior" "${HERMES_UNAUTHORIZED_DM_BEHAVIOR:-pair}"
 if [ "${HERMES_YOLO_MODE:-0}" = "1" ]; then
     warn "HERMES_YOLO_MODE=1 — dangerous-command approval checks are BYPASSED (hardline blocklist still applies). Opt-in, operator-accepted risk."
     export HERMES_YOLO_MODE

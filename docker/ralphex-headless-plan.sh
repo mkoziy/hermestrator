@@ -219,7 +219,6 @@ if [ "$executor" = "codex" ]; then
     codex exec \
         --cd "$repo_root" \
         --sandbox "$codex_sandbox" \
-        --ask-for-approval never \
         --model "$codex_model" \
         -c "model_reasoning_effort=\"$codex_effort\"" \
         -o "$tmp_output" \
