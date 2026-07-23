@@ -1,15 +1,13 @@
 # CLAUDE.md
 
 Repo layout: `docker/` holds the Hermes coding-agent Docker image (Dockerfile,
-entrypoint.sh, ralphex-use-profile.sh); `ralphex/` holds the
+entrypoint.sh, ralphex-wrapper.sh, ralphex-headless-plan.sh); `ralphex/` holds the
 ralphex profile source configs (`ralphex-codex/`, `ralphex-pi/`,
 `ralphex-claude/` for day-to-day task execution/coding, plus a
 `-planning` variant of each — `ralphex-codex-planning/`, `ralphex-pi-planning/`,
 `ralphex-claude-planning/` — kept at the original, unreduced task effort for
 plan creation; see README "Task/coding profiles vs. planning profiles") that
-get baked into the image, plus `install-profile.sh` for using a profile
-directly on a host outside Docker
-(see README "Use a ralphex profile outside Docker"); `skills/` holds Agent
+get baked into the image; `skills/` holds Agent
 Skills (`SKILL.md`, one per subdirectory) baked into the image for the
 `codex`/`pi` CLIs; `docs/plans/` holds
 implementation plans (see `20260719-hermes-docker-agent.md` for the full

@@ -16,6 +16,9 @@ executor = codex
 # luna is the cheapest/fastest GPT-5.6 tier, matching that intent.
 codex_model = gpt-5.6-luna
 codex_reasoning_effort = low
+# executor=codex defaults to danger-full-access in ralphex; force Codex's
+# normal writable-workspace sandbox instead.
+codex_sandbox = workspace-write
 
 # use the flagship GPT-5.6 tier + higher reasoning effort for review phases
 # than for task execution

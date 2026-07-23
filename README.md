@@ -8,7 +8,7 @@ and the [`ralphex`](https://github.com/umputun/ralphex) orchestrator binary, tog
 with the six `ralphex` profiles from this repo's `ralphex/` directory
 (`codex`, `pi`, `claude` for day-to-day task execution/coding, plus a
 `-planning` variant of each for plan creation — see
-["Switch the ralphex profile manually"](#switch-the-ralphex-profile-manually))
+["Use the baked-in ralphex profiles"](#use-the-baked-in-ralphex-profiles))
 and the [Agent Skills](#agent-skills-codex--pi) from this repo's `skills/`
 directory.
 
@@ -175,12 +175,6 @@ full rationale):
 | `HERMES_GATEWAY_NO_SUPERVISE` | optional | Exported as `1` by default (env equivalent of `hermes gateway run --no-supervise`) so Hermes' own internal restart-loop stays off and the external container runtime (`docker restart`, a future k8s restart policy) is the single supervisor of restarts. Override only if you understand the double-supervision risk this avoids. |
 | `HERMES_FORCE_RESEED` | optional | If `1`, deletes the existing `hermes-agent/`/`bin/` subtrees under `$HERMES_HOME` before reseeding them from the image on this start. See "Known limitations" — reseeding is otherwise existence-checked, not version-checked, so a persistent volume keeps running whatever Hermes app version it was first seeded with even after you rebuild/redeploy a newer image, until you set this. |
 
-### ralphex
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `RALPHEX_DEFAULT_PROFILE` | optional | Profile applied by `ralphex-use-profile.sh` on every container start. One of `codex`, `pi`, `claude`, `codex-planning`, `pi-planning`, `claude-planning`. Default `claude`. Profile selection is re-applied from the read-only image layer on every start — it is not itself persisted across restarts (only `$HERMES_HOME` is). |
-
 ### dashboard / Kanban (optional sidecar)
 
 Off by default. When enabled, `entrypoint.sh` runs `hermes dashboard` as a
@@ -217,29 +211,19 @@ docker run -d \
 LAN-exposed); widen it, or tunnel in via SSH/Tailscale to a loopback bind
 instead, depending on your deployment's trust model.
 
-## Switch the ralphex profile manually
+## Use the baked-in ralphex profiles
+
+The image keeps all checked-in ralphex profiles under `/opt/ralphex-profiles/`.
+Hermes can choose whichever one it wants when it invokes `ralphex`; the image
+does not auto-select or copy a default profile at container start anymore.
+
+If you want to invoke `ralphex` manually against a specific baked-in profile,
+pass it explicitly with `--config-dir`:
 
 ```sh
-docker exec -it hermestrator ralphex-use-profile.sh pi     # or codex / claude / *-planning
+ralphex --config-dir /opt/ralphex-profiles/pi docs/plans/feature.md
+ralphex --config-dir /opt/ralphex-profiles/claude-planning --plan docs/plans/feature.md
 ```
-
-This replaces `~/.config/ralphex` with a fresh copy of the selected baked-in
-profile (`/opt/ralphex-profiles/<name>/`). It is idempotent/safe to re-run, but
-note it does **not** persist across a container restart unless `~/.config` is
-itself on a volume — `entrypoint.sh` re-applies `RALPHEX_DEFAULT_PROFILE` (or
-`claude`) on every start.
-
-For the `pi`/`pi-planning` profiles specifically, `ralphex-use-profile.sh`
-also rewrites the `claude_command` line inside the copied `config` file to
-point at the actual on-disk path of `scripts/pi-opencode-go.sh` under
-`~/.config/ralphex`. The checked-in profile's `claude_command` already
-points at the baked-in `/opt/ralphex-profiles/<name>/scripts/pi-opencode-go.sh`
-copy, which works unmodified inside this container (e.g. if you pass
-`--config-dir /opt/ralphex-profiles/pi` directly instead of switching
-profiles first) — the rewrite to `~/.config/ralphex` is redundant in that
-case but harmless. If you diff the config after switching to `pi`/`pi-planning`,
-this is the one line you should expect to see mutated relative to the source
-repo.
 
 ### Task/coding profiles vs. planning profiles
 
@@ -259,37 +243,37 @@ effort — `codex-planning` additionally steps its task model up a tier, from
 `gpt-5.6-luna` to `gpt-5.6-terra` (review stays on `gpt-5.6-sol` in both), for
 the same reason: plan quality needs more headroom than the cheapest tier.
 Use one of these `-planning` profiles for `ralphex --plan` / plan-creation
-runs, since
-plan creation shares the same task-effort setting as task execution within
-a single profile (there's no separate "plan model" key), so running `--plan`
-on a task-tuned profile would create plans at the same reduced effort.
+runs on a normal interactive terminal, since plan creation shares the same
+task-effort setting as task execution within a single profile (there's no
+separate "plan model" key), so running `--plan` on a task-tuned profile would
+create plans at the same reduced effort.
 
-## Use a ralphex profile outside Docker
+Inside this Docker image specifically, bare `ralphex` and upstream
+`ralphex --plan` are intentionally intercepted by a small wrapper script.
+Upstream ralphex plan creation is interactive by design: after generating a
+draft it waits for an accept/revise/open-in-`$EDITOR`/reject choice, and bare
+`ralphex` can also enter an interactive picker. Hermes runs headlessly (no
+usable stdin/TTY for that review step), so allowing those paths only produces a
+late `read input: EOF` failure after the draft is already generated.
 
-Running `ralphex` directly on a host (no container) needs the same
-"rewrite the checked-in absolute path" step `ralphex-use-profile.sh` does
-inside the image, since there's no entrypoint to do it for you. Use
-`ralphex/install-profile.sh` instead of copying a profile directory by hand:
+Use `ralphex-headless-plan "your request"` instead. This image-local helper:
+- calls `codex exec` non-interactively using either:
+  - an explicitly selected baked-in profile via `--profile codex|codex-planning|pi|pi-planning`
+  - an explicit profile directory via `--profile-dir /path/to/profile`
+  - or, if neither is passed, the current `RALPHEX_CONFIG_DIR` / active config
+    for either `codex_*` settings or `claude_command` + `task_model`
+- writes the generated plan to `docs/plans/YYYYMMDD-<slug>.md`
+- exits immediately after creating the plan file; it does not start execution
+
+`ralphex-headless-plan` supports both baked-in `codex*` and `pi*` profiles.
+The simplest deterministic invocation is to point it at the baked-in planning
+profile directly:
 
 ```sh
-ralphex/install-profile.sh pi              # -> ~/.config/ralphex-pi
-ralphex/install-profile.sh codex           # -> ~/.config/ralphex-codex
-ralphex/install-profile.sh claude          # -> ~/.config/ralphex-claude
-ralphex/install-profile.sh claude-planning # -> ~/.config/ralphex-claude-planning
-ralphex/install-profile.sh pi /custom/config-dir   # optional explicit dest
-
-ralphex --config-dir ~/.config/ralphex-pi docs/plans/feature.md
-ralphex --config-dir ~/.config/ralphex-claude-planning --plan docs/plans/feature.md
+ralphex-headless-plan --profile-dir /opt/ralphex-profiles/codex-planning "add health check endpoint"
+ralphex-headless-plan --profile-dir /opt/ralphex-profiles/pi-planning "add health check endpoint"
+ralphex docs/plans/<generated-plan>.md
 ```
-
-Like `ralphex-use-profile.sh`, it's a full replace (safe/idempotent to
-re-run, e.g. after pulling repo updates) and, for the `pi`/`pi-planning`
-profiles, rewrites `claude_command` to the actual on-disk path of
-`scripts/pi-opencode-go.sh` under the destination config-dir — `ralphex` has
-no `~`/env-var expansion for `claude_command`, so the source repo's
-checked-in value (which points at the Docker-image-only
-`/opt/ralphex-profiles/<name>/` path) is not valid on a host outside the
-container and must be rewritten.
 
 ## Agent skills (codex / pi)
 

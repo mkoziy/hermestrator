@@ -317,18 +317,6 @@ fi
 export HERMES_GATEWAY_NO_SUPERVISE="${HERMES_GATEWAY_NO_SUPERVISE:-1}"
 
 # ---------------------------------------------------------------------------
-# ralphex profile selection
-# ---------------------------------------------------------------------------
-# ralphex-use-profile.sh is itself idempotent (full replace of
-# ~/.config/ralphex from the read-only baked-in profile every call), so it's
-# safe/expected to call unconditionally on every start. This does mean an
-# in-chat profile switch made during a previous container lifetime does not
-# survive a restart unless ~/.config is itself on a persistent volume — by
-# design here, only $HERMES_HOME is treated as persistent state; profile
-# selection resets to RALPHEX_DEFAULT_PROFILE (or "claude") every start.
-ralphex-use-profile.sh "${RALPHEX_DEFAULT_PROFILE:-claude}"
-
-# ---------------------------------------------------------------------------
 # hermes dashboard (+ Kanban) — optional sidecar, off by default
 # ---------------------------------------------------------------------------
 # [decision] HERMES_DASHBOARD_ENABLED=1 opts in to running `hermes dashboard`

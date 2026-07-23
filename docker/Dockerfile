@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         ca-certificates \
         jq \
         ripgrep \
+        bubblewrap \
         build-essential \
         ffmpeg \
         unzip \
@@ -83,7 +84,7 @@ RUN --mount=type=secret,id=github_token \
         | grep -oE "https://github.com/umputun/ralphex/releases/download/[^\"]*linux_${ARCH}\.tar\.gz")" \
     && curl -fsSL "$REL_URL" -o /tmp/ralphex.tar.gz \
     && tar -xzf /tmp/ralphex.tar.gz -C /tmp ralphex \
-    && install -m 755 /tmp/ralphex /usr/local/bin/ralphex \
+    && install -m 755 /tmp/ralphex /usr/local/bin/ralphex-real \
     && rm -f /tmp/ralphex.tar.gz /tmp/ralphex
 
 # non-root `npm install -g` needs a writable prefix — the system Node's
@@ -152,8 +153,8 @@ RUN uv tool install "mnemosyne-memory[mcp,embeddings,openclaw]"
 RUN npm install -g @openai/codex @earendil-works/pi-coding-agent
 
 # ralphex profiles: baked into the read-only image layer under
-# /opt/ralphex-profiles/<name>/; ralphex-use-profile.sh (below) copies the
-# selected one into ~/.config/ralphex at runtime. COPY runs with the
+# /opt/ralphex-profiles/<name>/ so Hermes or helper scripts can point
+# ralphex at a concrete profile directory directly. COPY runs with the
 # builder's own privileges regardless of the current USER, so --chown=app:app
 # is still honored here even though we already switched to `USER app` above.
 COPY --chown=app:app ralphex/ralphex-codex/config /opt/ralphex-profiles/codex/config
@@ -174,9 +175,8 @@ COPY --chown=app:app ralphex/ralphex-pi-planning/scripts/ /opt/ralphex-profiles/
 COPY --chown=app:app ralphex/ralphex-claude-planning/config /opt/ralphex-profiles/claude-planning/config
 RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh /opt/ralphex-profiles/pi-planning/scripts/*.sh
 
-# profile switcher: root-owned, world-executable, lives outside any profile
-# so it's available before a profile has ever been selected.
-COPY --chmod=755 docker/ralphex-use-profile.sh /usr/local/bin/ralphex-use-profile.sh
+COPY --chmod=755 docker/ralphex-wrapper.sh /usr/local/bin/ralphex
+COPY --chmod=755 docker/ralphex-headless-plan.sh /usr/local/bin/ralphex-headless-plan
 
 # Agent Skills (open SKILL.md standard, shared unmodified across Claude Code,
 # codex CLI, and pi): baked into the read-only image layer under
