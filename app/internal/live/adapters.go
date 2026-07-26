@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -21,8 +22,9 @@ import (
 // GitHub lists repositories visible to the automation identity, never to the
 // operator's OAuth identity.
 type GitHub struct {
-	Token  string
-	Client *http.Client
+	Token    string
+	Client   *http.Client
+	ReposURL string
 }
 
 func (g GitHub) Repositories(ctx context.Context) ([]dashboard.Repository, error) {
@@ -33,32 +35,66 @@ func (g GitHub) Repositories(ctx context.Context) ([]dashboard.Repository, error
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user/repos?per_page=100&sort=full_name", nil)
+	next := g.ReposURL
+	if next == "" {
+		next = "https://api.github.com/user/repos?per_page=100&sort=full_name"
+	}
+	repos := []dashboard.Repository{}
+	for next != "" {
+		values, pageNext, err := g.repositoriesPage(ctx, client, next)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, values...)
+		next = pageNext
+	}
+	return repos, nil
+}
+
+func (g GitHub) repositoriesPage(ctx context.Context, client *http.Client, pageURL string) ([]dashboard.Repository, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub request: %w", err)
+		return nil, "", fmt.Errorf("create GitHub request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+g.Token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub repositories: %w", err)
+		return nil, "", fmt.Errorf("list GitHub repositories: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list GitHub repositories: %s", resp.Status)
+		return nil, "", fmt.Errorf("list GitHub repositories: %s", resp.Status)
 	}
 	var values []struct {
 		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&values); err != nil {
-		return nil, fmt.Errorf("decode GitHub repositories: %w", err)
+		return nil, "", fmt.Errorf("decode GitHub repositories: %w", err)
 	}
 	repos := make([]dashboard.Repository, 0, len(values))
 	for _, value := range values {
 		repos = append(repos, dashboard.Repository{ID: fmt.Sprint(value.ID), FullName: value.FullName})
 	}
-	return repos, nil
+	return repos, githubNextPage(resp.Header.Get("Link")), nil
+}
+
+func githubNextPage(header string) string {
+	for _, link := range strings.Split(header, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 || !strings.Contains(parts[1], `rel="next"`) {
+			continue
+		}
+		value := strings.TrimSpace(parts[0])
+		if len(value) < 3 || value[0] != '<' || value[len(value)-1] != '>' {
+			continue
+		}
+		if _, err := url.ParseRequestURI(value[1 : len(value)-1]); err == nil {
+			return value[1 : len(value)-1]
+		}
+	}
+	return ""
 }
 
 // OpenRouterModel makes Genkit model calls through OpenRouter's OpenAI-compatible API.
@@ -234,7 +270,7 @@ func AllowedUsers(value string) map[string]bool {
 	users := map[string]bool{}
 	for _, user := range strings.Split(value, ",") {
 		if user = strings.TrimSpace(user); user != "" {
-			users[user] = true
+			users[strings.ToLower(user)] = true
 		}
 	}
 	return users

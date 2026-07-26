@@ -116,6 +116,14 @@ func TestProtectedRoutesRejectUnapprovedOperator(t *testing.T) {
 	}
 }
 
+func TestProtectedRoutesMatchGitHubLoginsCaseInsensitively(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	response := request(t, app, http.MethodGet, "/repositories", "", "Michael")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
 func TestRepositoryRegistrationRejectsUnknownRepository(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	response := request(t, app, http.MethodPost, "/repositories/not-listed", "", "michael")

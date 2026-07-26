@@ -183,7 +183,7 @@ func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
 
 func (a *application) authorized(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := r.Header.Get("X-PM-User")
+		user := strings.ToLower(r.Header.Get("X-PM-User"))
 		if user == "" || !a.deps.AllowedUsers[user] {
 			http.Error(w, "operator access required", http.StatusForbidden)
 			return

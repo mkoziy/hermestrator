@@ -40,19 +40,23 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 		AllowedRedirectHosts: token.AllowedHostsFunc(func() ([]string, error) { return []string{}, nil }),
 		AvatarStore:          avatar.NewNoOp(),
 	})
-	svc.AddProvider("github", c.ClientID, c.ClientSecret)
+	// GitHub's provider places the profile display name in User.Name. Preserve
+	// the immutable account login separately so the configured allowlist has
+	// the semantics its name promises.
+	svc.AddProviderWithUserAttributes("github", c.ClientID, c.ClientSecret, map[string]string{"login": "login"})
 	authRoutes, _ := svc.Handlers()
 	mux := http.NewServeMux()
 	mux.Handle("/auth/", authRoutes)
 	middleware := svc.Middleware()
 	mux.Handle("/", middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := token.GetUserInfo(r)
-		if err != nil || user.Name == "" {
+		login := user.StrAttr("login")
+		if err != nil || login == "" {
 			http.Error(w, "GitHub operator identity required", http.StatusForbidden)
 			return
 		}
 		r = r.Clone(r.Context())
-		r.Header.Set("X-PM-User", user.Name)
+		r.Header.Set("X-PM-User", login)
 		next.ServeHTTP(w, r)
 	})))
 	return mux, nil
