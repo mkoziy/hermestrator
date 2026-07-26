@@ -36,6 +36,7 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 		TokenDuration:        24 * time.Hour,
 		CookieDuration:       7 * 24 * time.Hour,
 		SameSiteCookie:       http.SameSiteLaxMode,
+		XSRFIgnoreMethods:    []string{http.MethodGet, http.MethodHead, http.MethodOptions},
 		AllowedRedirectHosts: token.AllowedHostsFunc(func() ([]string, error) { return []string{}, nil }),
 		AvatarStore:          avatar.NewNoOp(),
 	})

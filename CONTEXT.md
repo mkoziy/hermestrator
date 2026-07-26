@@ -22,4 +22,3 @@
 - **Operator** — an authenticated GitHub user allowed to use the PM dashboard.
 - **Action-required notification** — a read-only Telegram notification linking
   to a dashboard question, approval, or failure.
-

@@ -9,11 +9,16 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
+
+var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
 
 type Repository struct{ ID, FullName string }
 type Message struct {
@@ -23,7 +28,12 @@ type Message struct {
 type Conversation struct {
 	RepositoryID string
 	Messages     []Message
+	PendingTurns []PendingTurn
+	LastReply    Reply
+	Status       Status
 }
+type PendingTurn struct{ TurnID, RepositoryID string }
+type Status struct{ Phase, ModelRole, Elapsed, RecentActivity string }
 type Reply struct {
 	Text    string
 	Tokens  int
@@ -46,6 +56,9 @@ type Model interface {
 type StreamingModel interface {
 	Stream(context.Context, Conversation, string, func(string) error) (Reply, error)
 }
+type StatusModel interface {
+	Status(context.Context, string) (Status, error)
+}
 type Telegram interface {
 	Notify(context.Context, string) error
 }
@@ -62,10 +75,21 @@ type Dependencies struct {
 type application struct {
 	deps      Dependencies
 	db        *sql.DB
+	handler   http.Handler
 	templates *template.Template
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	mu        sync.Mutex
+	closed    bool
 }
 
-func New(deps Dependencies) (http.Handler, error) {
+type Handler interface {
+	http.Handler
+	Close() error
+}
+
+func New(deps Dependencies) (Handler, error) {
 	if deps.GitHub == nil || deps.Model == nil || deps.Store == "" {
 		return nil, errors.New("dashboard requires GitHub, model, and SQLite store")
 	}
@@ -76,8 +100,26 @@ func New(deps Dependencies) (http.Handler, error) {
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL;
 		CREATE TABLE IF NOT EXISTS repositories (id TEXT PRIMARY KEY, full_name TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS genkit_sessions (repository_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at TEXT NOT NULL);
-		CREATE TABLE IF NOT EXISTS messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
-		CREATE TABLE IF NOT EXISTS activity (repository_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);`); err != nil {
+		CREATE TABLE IF NOT EXISTS messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, tokens INTEGER, cost_usd REAL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS activity (repository_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT);
+		CREATE TABLE IF NOT EXISTS turn_events (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL);`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "messages", "tokens", "INTEGER"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "messages", "cost_usd", "REAL"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "pending_turns", "started_at", "TEXT"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`UPDATE pending_turns SET started_at=NULL WHERE completed_at IS NULL`); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -86,14 +128,57 @@ func New(deps Dependencies) (http.Handler, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	a := &application{deps: deps, db: db, templates: t}
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &application{deps: deps, db: db, templates: t, ctx: ctx, cancel: cancel}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repositories", a.repositories)
 	mux.HandleFunc("POST /repositories/{id}", a.selectRepository)
 	mux.HandleFunc("GET /repositories/{id}", a.workspace)
 	mux.HandleFunc("POST /repositories/{id}/conversation", a.converse)
+	mux.HandleFunc("GET /repositories/{id}/conversation/{turn}/stream", a.stream)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
-	return a.authorized(mux), nil
+	a.handler = a.authorized(mux)
+	if err := a.resumePendingTurns(); err != nil {
+		cancel()
+		_ = db.Close()
+		return nil, err
+	}
+	return a, nil
+}
+
+func (a *application) Close() error {
+	a.mu.Lock()
+	a.closed = true
+	a.cancel()
+	a.mu.Unlock()
+	a.workers.Wait()
+	return a.db.Close()
+}
+
+func (a *application) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.handler.ServeHTTP(w, r) }
+
+func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return fmt.Errorf("scan %s column: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 func (a *application) authorized(next http.Handler) http.Handler {
@@ -121,6 +206,15 @@ func (a *application) repositories(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "repositories", repos)
 }
 func (a *application) selectRepository(w http.ResponseWriter, r *http.Request) {
+	var exists string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM repositories WHERE id=?`, r.PathValue("id")).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "could not register repository", http.StatusInternalServerError)
+		return
+	}
 	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO genkit_sessions(repository_id,session_id,updated_at) VALUES(?,?,?) ON CONFLICT(repository_id) DO NOTHING`, r.PathValue("id"), "pm-"+r.PathValue("id"), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		http.Error(w, "could not register repository", http.StatusInternalServerError)
 		return
@@ -133,6 +227,13 @@ func (a *application) workspace(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if model, ok := a.deps.Model.(StatusModel); ok {
+		c.Status, err = model.Status(r.Context(), c.RepositoryID)
+		if err != nil {
+			http.Error(w, "could not load PM status", http.StatusInternalServerError)
+			return
+		}
+	}
 	a.render(w, "workspace", c)
 }
 func (a *application) converse(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +241,7 @@ func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form", 400)
 		return
 	}
-	prompt := strings.TrimSpace(r.Form.Get("message"))
+	prompt := redactSecrets(strings.TrimSpace(r.Form.Get("message")))
 	if prompt == "" {
 		http.Error(w, "message required", 400)
 		return
@@ -152,65 +253,212 @@ func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO messages VALUES(?,?,?,?)`, id, "operator", prompt, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO messages(repository_id,role,text,created_at) VALUES(?,?,?,?)`, id, "operator", prompt, now.Format(time.RFC3339Nano)); err != nil {
 		http.Error(w, "could not save message", 500)
 		return
 	}
 	c.Messages = append(c.Messages, Message{Role: "operator", Text: prompt, CreatedAt: now})
-	stream, streaming := a.deps.Model.(StreamingModel)
-	var reply Reply
-	if streaming {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		if _, err := w.Write([]byte(`<div id="pm-stream" hx-swap-oob="innerHTML:#pm-stream"></div>`)); err != nil {
+	if _, streaming := a.deps.Model.(StreamingModel); streaming && r.Header.Get("HX-Request") == "true" {
+		turnID := uuid.NewString()
+		if _, err = a.db.ExecContext(r.Context(), `INSERT INTO pending_turns(id,repository_id,prompt) VALUES(?,?,?)`, turnID, id, prompt); err != nil {
+			http.Error(w, "could not start response stream", http.StatusInternalServerError)
 			return
 		}
-		if flush, ok := w.(http.Flusher); ok {
+		a.startTurn(id, turnID, prompt)
+		a.render(w, "stream-start", struct{ RepositoryID, TurnID string }{id, turnID})
+		return
+	}
+	reply, err := a.reply(r.Context(), c, prompt, nil)
+	if err != nil {
+		http.Error(w, "model response unavailable", http.StatusBadGateway)
+		return
+	}
+	status, err := a.completeTurn(r.Context(), id, reply)
+	if err != nil {
+		http.Error(w, "could not save response", http.StatusInternalServerError)
+		return
+	}
+	a.render(w, "turn", struct {
+		Reply  Reply
+		Status Status
+	}{reply, status})
+}
+
+func (a *application) resumePendingTurns() error {
+	rows, err := a.db.Query(`SELECT id,repository_id,prompt FROM pending_turns WHERE completed_at IS NULL`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var turnID, repositoryID, prompt string
+		if err := rows.Scan(&turnID, &repositoryID, &prompt); err != nil {
+			return err
+		}
+		a.startTurn(repositoryID, turnID, prompt)
+	}
+	return rows.Err()
+}
+
+func (a *application) startTurn(repositoryID, turnID, prompt string) {
+	result, err := a.db.Exec(`UPDATE pending_turns SET started_at=? WHERE id=? AND started_at IS NULL AND completed_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
+	if err != nil {
+		return
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return
+	}
+	a.workers.Add(1)
+	go func() {
+		defer a.workers.Done()
+		a.runTurn(a.ctx, repositoryID, turnID, prompt)
+	}()
+}
+
+func (a *application) stream(w http.ResponseWriter, r *http.Request) {
+	id, turnID := r.PathValue("id"), r.PathValue("turn")
+	var repositoryID string
+	var completedAt sql.NullString
+	err := a.db.QueryRowContext(r.Context(), `SELECT repository_id,completed_at FROM pending_turns WHERE id=?`, turnID).Scan(&repositoryID, &completedAt)
+	if errors.Is(err, sql.ErrNoRows) || repositoryID != id {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "could not load response stream", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flush, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	lastID := int64(0)
+	for {
+		rows, err := a.db.QueryContext(r.Context(), `SELECT id,event,data FROM turn_events WHERE turn_id=? AND id>? ORDER BY id`, turnID, lastID)
+		if err != nil {
+			return
+		}
+		for rows.Next() {
+			var event, data string
+			if err := rows.Scan(&lastID, &event, &data); err != nil {
+				_ = rows.Close()
+				return
+			}
+			a.writeEvent(w, event, data)
 			flush.Flush()
 		}
+		if err := rows.Close(); err != nil {
+			return
+		}
+		if err := a.db.QueryRowContext(r.Context(), `SELECT completed_at FROM pending_turns WHERE id=?`, turnID).Scan(&completedAt); err != nil || completedAt.Valid {
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt string) {
+	c, err := a.conversation(ctx, repositoryID)
+	if err == nil {
 		var text strings.Builder
-		reply, err = stream.Stream(r.Context(), c, prompt, func(chunk string) error {
+		var reply Reply
+		reply, err = a.reply(ctx, c, prompt, func(chunk string) error {
 			text.WriteString(chunk)
-			if _, err := fmt.Fprintf(w, `<span id="pm-stream" hx-swap-oob="innerHTML:#pm-stream">%s</span>`, template.HTMLEscapeString(text.String())); err != nil {
-				return err
-			}
-			if flush, ok := w.(http.Flusher); ok {
-				flush.Flush()
-			}
-			return nil
+			return a.recordTurnEvent(ctx, turnID, "chunk", `<p><strong>pm:</strong> `+template.HTMLEscapeString(redactSecrets(text.String()))+`</p>`)
 		})
 		if err == nil && reply.Text == "" {
 			reply.Text = text.String()
 		}
-	} else {
-		reply, err = a.deps.Model.Reply(r.Context(), c, prompt)
+		var status Status
+		if err == nil {
+			status, err = a.completeTurn(ctx, repositoryID, reply)
+		}
+		if err == nil {
+			var fragment string
+			fragment, err = a.fragment("streamed-turn", struct {
+				Reply  Reply
+				Status Status
+			}{reply, status})
+			if err == nil {
+				err = a.recordTurnEvent(ctx, turnID, "done", fragment)
+			}
+		}
 	}
 	if err != nil {
-		if !streaming {
-			http.Error(w, "model response unavailable", http.StatusBadGateway)
-		}
-		return
+		_ = a.recordTurnEvent(ctx, turnID, "error", `<p class="text-danger">The PM response could not be completed.</p>`)
 	}
-	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO messages VALUES(?,?,?,?)`, id, "pm", reply.Text, now.Format(time.RFC3339Nano)); err != nil {
-		http.Error(w, "could not save response", 500)
-		return
-	}
-	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO activity VALUES(?,?,?)`, id, "discovery turn completed", now.Format(time.RFC3339Nano)); err != nil {
-		http.Error(w, "could not save activity", http.StatusInternalServerError)
-		return
-	}
-	if streaming {
-		a.render(w, "streamed-turn", struct {
-			Reply Reply
-		}{reply})
-		return
-	}
-	a.render(w, "turn", struct {
-		Reply   Reply
-		Phase   string
-		Elapsed string
-	}{reply, "discovery", "0s"})
+	_, _ = a.db.ExecContext(ctx, `UPDATE pending_turns SET completed_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
 }
+
+func (a *application) recordTurnEvent(ctx context.Context, turnID, event, data string) error {
+	_, err := a.db.ExecContext(ctx, `INSERT INTO turn_events(turn_id,event,data) VALUES(?,?,?)`, turnID, event, data)
+	return err
+}
+
+func (a *application) reply(ctx context.Context, c Conversation, prompt string, emit func(string) error) (Reply, error) {
+	if stream, ok := a.deps.Model.(StreamingModel); ok {
+		var text strings.Builder
+		reply, err := stream.Stream(ctx, c, prompt, func(chunk string) error {
+			text.WriteString(chunk)
+			if emit == nil {
+				return nil
+			}
+			return emit(chunk)
+		})
+		if err == nil && reply.Text == "" {
+			reply.Text = text.String()
+		}
+		reply.Text = redactSecrets(reply.Text)
+		return reply, err
+	}
+	reply, err := a.deps.Model.Reply(ctx, c, prompt)
+	reply.Text = redactSecrets(reply.Text)
+	return reply, err
+}
+
+func (a *application) completeTurn(ctx context.Context, id string, reply Reply) (Status, error) {
+	reply.Text = redactSecrets(reply.Text)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO messages(repository_id,role,text,tokens,cost_usd,created_at) VALUES(?,?,?,?,?,?)`, id, "pm", reply.Text, reply.Tokens, reply.CostUSD, now); err != nil {
+		return Status{}, err
+	}
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO activity VALUES(?,?,?)`, id, "discovery turn completed", now); err != nil {
+		return Status{}, err
+	}
+	status := Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "discovery turn completed"}
+	if model, ok := a.deps.Model.(StatusModel); ok {
+		return model.Status(ctx, id)
+	}
+	return status, nil
+}
+
+func (a *application) fragment(name string, data any) (string, error) {
+	var out strings.Builder
+	if err := a.templates.ExecuteTemplate(&out, name, data); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+func (a *application) writeEvent(w http.ResponseWriter, event, data string) {
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, strings.ReplaceAll(data, "\n", "&#10;"))
+}
+
+func redactSecrets(value string) string { return secretPattern.ReplaceAllString(value, "[redacted]") }
 func (a *application) testNotification(w http.ResponseWriter, r *http.Request) {
 	if a.deps.Telegram != nil {
 		base := strings.TrimRight(a.deps.DashboardURL, "/")
@@ -229,7 +477,7 @@ func (a *application) conversation(ctx context.Context, id string) (Conversation
 	if err := a.db.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id=?`, id).Scan(&exists); err != nil {
 		return Conversation{}, err
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT role,text,created_at FROM messages WHERE repository_id=? ORDER BY rowid`, id)
+	rows, err := a.db.QueryContext(ctx, `SELECT role,text,tokens,cost_usd,created_at FROM messages WHERE repository_id=? ORDER BY rowid`, id)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -238,13 +486,37 @@ func (a *application) conversation(ctx context.Context, id string) (Conversation
 	for rows.Next() {
 		var m Message
 		var created string
-		if err := rows.Scan(&m.Role, &m.Text, &created); err != nil {
+		var tokens sql.NullInt64
+		var cost sql.NullFloat64
+		if err := rows.Scan(&m.Role, &m.Text, &tokens, &cost, &created); err != nil {
 			return Conversation{}, err
 		}
-		m.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		m.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return Conversation{}, fmt.Errorf("parse message timestamp: %w", err)
+		}
 		c.Messages = append(c.Messages, m)
+		if m.Role == "pm" {
+			c.LastReply = Reply{Text: m.Text, Tokens: int(tokens.Int64), CostUSD: cost.Float64}
+		}
 	}
-	return c, rows.Err()
+	if err := rows.Err(); err != nil {
+		return Conversation{}, err
+	}
+	pending, err := a.db.QueryContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND completed_at IS NULL ORDER BY rowid`, id)
+	if err != nil {
+		return Conversation{}, err
+	}
+	defer func() { _ = pending.Close() }()
+	for pending.Next() {
+		var turn PendingTurn
+		if err := pending.Scan(&turn.TurnID); err != nil {
+			return Conversation{}, err
+		}
+		turn.RepositoryID = id
+		c.PendingTurns = append(c.PendingTurns, turn)
+	}
+	return c, pending.Err()
 }
 func (a *application) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -253,7 +525,8 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 	}
 }
 
-const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><h1>Repositories</h1>{{range .}}<form method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><aside>Phase: discovery · Model role: discovery · Elapsed: 0s · Recent activity: discovery</aside><main id="conversation">{{range .Messages}}<p><strong>{{.Role}}:</strong> {{.Text}}</p>{{end}}<div id="pm-stream"></div></main><form method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation" hx-swap="beforeend"><input name="message" aria-label="Message the PM"><button>Send</button></form></body></html>{{end}}
-{{define "turn"}}<p><strong>pm:</strong> {{.Reply.Text}}</p><aside>Phase: {{.Phase}} · Model role: discovery · Elapsed: {{.Elapsed}} · Recent activity: discovery · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</aside>{{end}}
-{{define "streamed-turn"}}<p><strong>pm:</strong> {{.Reply.Text}}</p><aside>Phase: discovery · Model role: discovery · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</aside><div id="pm-stream" hx-swap-oob="innerHTML:#pm-stream"></div>{{end}}`
+const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><h1>Repositories</h1>{{range .}}<form method="post" action="/repositories/{{.ID}}" hx-post="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><aside id="pm-status">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</aside><main id="conversation">{{range .Messages}}<p><strong>{{.Role}}:</strong> {{.Text}}</p>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</main><form method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation" hx-swap="beforeend"><input name="message" aria-label="Message the PM"><button>Send</button></form></body></html>{{end}}
+{{define "turn"}}<p><strong>pm:</strong> {{.Reply.Text}}</p><aside id="pm-status" hx-swap-oob="true">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</aside>{{end}}
+{{define "stream-start"}}<div id="pending-turn" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done"><p><strong>pm:</strong> Thinking…</p></div>{{end}}
+{{define "streamed-turn"}}<p><strong>pm:</strong> {{.Reply.Text}}</p><aside id="pm-status" hx-swap-oob="true">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</aside>{{end}}`
