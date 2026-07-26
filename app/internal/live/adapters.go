@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/firebase/genkit/go/plugins/compat_oai"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
+
+var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
 
 // GitHub lists repositories visible to the automation identity, never to the
 // operator's OAuth identity.
@@ -126,11 +129,14 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*
 	if err != nil {
 		return nil, err
 	}
-	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model), aix.WithSessionStore(store))
+	discoveryContext := genkitx.DefineTool(g, "pm_discovery_context", "Returns the constraints for the current PM discovery phase.", func(context.Context, struct{}) (string, error) {
+		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
+	})
+	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryContext), aix.WithSessionStore(store))
 	return &OpenRouterModel{agent: agent, store: store}, nil
 }
 
-func discoveryAgent(g *genkit.Genkit, model string) aix.AgentFunc[PMState] {
+func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[struct{}, string]) aix.AgentFunc[PMState] {
 	return func(ctx context.Context, responder aix.Responder, session *aix.SessionRunner[PMState]) (*aix.AgentResult, error) {
 		var message *ai.Message
 		err := session.Run(ctx, func(ctx context.Context, input *aix.AgentInput) (*aix.TurnResult, error) {
@@ -146,14 +152,15 @@ func discoveryAgent(g *genkit.Genkit, model string) aix.AgentFunc[PMState] {
 			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager. Ask one focused discovery question at a time.")}, session.Messages()...)
 			messages = append(messages, input.Message)
 			var reason aix.AgentFinishReason
-			for result, err := range genkit.GenerateStream(ctx, g, ai.WithModelName("openrouter/"+model), ai.WithMessages(messages...)) {
+			for result, err := range genkit.GenerateStream(ctx, g, ai.WithModelName("openrouter/"+model), ai.WithMessages(messages...), ai.WithTools(discoveryContext)) {
 				if err != nil {
 					return nil, fmt.Errorf("generate discovery response: %w", err)
 				}
 				if result.Done {
-					message = result.Response.Message
+					message = ai.NewModelTextMessage(redactSecrets(result.Response.Message.Text()))
 					reason = aix.AgentFinishReason(result.Response.FinishReason)
 					session.AddMessages(input.Message, message)
+					responder.SendArtifact(&aix.Artifact{Name: "latest-discovery-response.md", Parts: []*ai.Part{ai.NewTextPart(message.Text())}})
 					session.UpdateCustom(func(state PMState) PMState {
 						if result.Response.Usage != nil {
 							state.Tokens = result.Response.Usage.InputTokens + result.Response.Usage.OutputTokens
@@ -177,6 +184,8 @@ func discoveryAgent(g *genkit.Genkit, model string) aix.AgentFunc[PMState] {
 		return &aix.AgentResult{Message: message}, nil
 	}
 }
+
+func redactSecrets(value string) string { return secretPattern.ReplaceAllString(value, "[redacted]") }
 
 func (m *OpenRouterModel) Close() error { return m.store.Close() }
 

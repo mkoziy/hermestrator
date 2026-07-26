@@ -84,7 +84,7 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 		t.Fatalf("select status = %d", selectRepo.Code)
 	}
 
-	turn := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"a dashboard"}}.Encode(), "michael")
+	turn := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"a dashboard"}}.Encode(), "michael")
 	if turn.Code != http.StatusOK || !strings.Contains(turn.Body.String(), "What outcome would make a dashboard successful?") {
 		t.Fatalf("turn = %d %q", turn.Code, turn.Body.String())
 	}
@@ -105,6 +105,21 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 	}
 	if !strings.Contains(page.Body.String(), "Elapsed: 12s") || !strings.Contains(page.Body.String(), "awaiting operator") {
 		t.Fatalf("durable agent status missing: %q", page.Body.String())
+	}
+}
+
+func TestNonHTMXConversationPostRedirectsToWorkspace(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"a dashboard"}}.Encode(), "michael")
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/repositories/42" {
+		t.Fatalf("response = %d location=%q", response.Code, response.Header().Get("Location"))
 	}
 }
 
@@ -136,7 +151,7 @@ func TestConversationRedactsSecretsBeforePersistenceAndRendering(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
-	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"sk-abcdefghijklmnopqrstuvwxyz"}}.Encode(), "michael")
+	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"sk-abcdefghijklmnopqrstuvwxyz"}}.Encode(), "michael")
 	if strings.Contains(response.Body.String(), "sk-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(response.Body.String(), "[redacted]") {
 		t.Fatalf("secret rendered in %q", response.Body.String())
 	}
@@ -254,7 +269,7 @@ func TestExistingConversationDatabaseMigratesTelemetryColumns(t *testing.T) {
 	app := mustApp(t, deps)
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
 
-	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"migrate"}}.Encode(), "michael")
+	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"migrate"}}.Encode(), "michael")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Tokens: 21") {
 		t.Fatalf("migrated conversation = %d %q", response.Code, response.Body.String())
 	}
