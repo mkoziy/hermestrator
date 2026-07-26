@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
+var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|\d{6,}:[a-z0-9_-]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
 
 type Repository struct{ ID, FullName string }
 type Message struct {
@@ -379,11 +379,19 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 	c, err := a.conversation(ctx, repositoryID)
 	if err == nil {
 		var text strings.Builder
+		var safe streamTextBuffer
 		var reply Reply
 		reply, err = a.reply(ctx, c, prompt, func(chunk string) error {
 			text.WriteString(chunk)
-			return a.recordTurnEvent(ctx, turnID, "chunk", `<p><strong>pm:</strong> `+template.HTMLEscapeString(redactSecrets(text.String()))+`</p>`)
+			return safe.Append(chunk, func(visible string) error {
+				return a.recordTurnEvent(ctx, turnID, "chunk", `<p><strong>pm:</strong> `+template.HTMLEscapeString(visible)+`</p>`)
+			})
 		})
+		if flushErr := safe.Flush(func(visible string) error {
+			return a.recordTurnEvent(ctx, turnID, "chunk", `<p><strong>pm:</strong> `+template.HTMLEscapeString(visible)+`</p>`)
+		}); err == nil && flushErr != nil {
+			err = flushErr
+		}
 		if err == nil && reply.Text == "" {
 			reply.Text = text.String()
 		}
@@ -463,6 +471,27 @@ func (a *application) writeEvent(w http.ResponseWriter, event, data string) {
 }
 
 func redactSecrets(value string) string { return secretPattern.ReplaceAllString(value, "[redacted]") }
+
+type streamTextBuffer struct{ pending string }
+
+func (b *streamTextBuffer) Append(chunk string, emit func(string) error) error {
+	b.pending += chunk
+	boundary := strings.LastIndexAny(b.pending, " \t\r\n")
+	if boundary < 0 {
+		return nil
+	}
+	return b.emit(b.pending[:boundary+1], emit)
+}
+
+func (b *streamTextBuffer) Flush(emit func(string) error) error { return b.emit(b.pending, emit) }
+
+func (b *streamTextBuffer) emit(value string, emit func(string) error) error {
+	if value == "" {
+		return nil
+	}
+	b.pending = strings.TrimPrefix(b.pending, value)
+	return emit(redactSecrets(value))
+}
 func (a *application) testNotification(w http.ResponseWriter, r *http.Request) {
 	if a.deps.Telegram != nil {
 		base := strings.TrimRight(a.deps.DashboardURL, "/")

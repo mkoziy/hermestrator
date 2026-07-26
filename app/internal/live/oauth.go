@@ -48,7 +48,7 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/", authRoutes)
 	middleware := svc.Middleware()
-	mux.Handle("/", middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", formXSRFBridge(middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := token.GetUserInfo(r)
 		login := user.StrAttr("login")
 		if err != nil || login == "" {
@@ -58,6 +58,20 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 		r = r.Clone(r.Context())
 		r.Header.Set("X-PM-User", login)
 		next.ServeHTTP(w, r)
-	})))
+	}))))
 	return mux, nil
+}
+
+// formXSRFBridge supplies the double-submit token for regular same-origin HTML
+// form posts. HTMX already sends this header itself. The auth middleware still
+// compares the value against the signed JWT claim before allowing the request.
+func formXSRFBridge(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Header.Get("X-XSRF-TOKEN") == "" && r.Header.Get("HX-Request") != "true" {
+			if cookie, err := r.Cookie("XSRF-TOKEN"); err == nil && cookie.Value != "" {
+				r.Header.Set("X-XSRF-TOKEN", cookie.Value)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

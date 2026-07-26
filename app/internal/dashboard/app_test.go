@@ -39,6 +39,17 @@ func (streamingFakeModel) Stream(_ context.Context, _ Conversation, _ string, em
 	return Reply{Text: "A focused next step", Tokens: 12, CostUSD: 0.0012}, nil
 }
 
+type splitSecretStreamingModel struct{ fakeModel }
+
+func (splitSecretStreamingModel) Stream(_ context.Context, _ Conversation, _ string, emit func(string) error) (Reply, error) {
+	for _, chunk := range []string{"The token is ", "123456789", ":AAabcdefghijklmnopqrstuvwxyz123456789", " done"} {
+		if err := emit(chunk); err != nil {
+			return Reply{}, err
+		}
+	}
+	return Reply{Text: "The token is 123456789:AAabcdefghijklmnopqrstuvwxyz123456789 done"}, nil
+}
+
 type blockingStreamingModel struct {
 	fakeModel
 	started sync.Once
@@ -151,8 +162,9 @@ func TestConversationRedactsSecretsBeforePersistenceAndRendering(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
-	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"sk-abcdefghijklmnopqrstuvwxyz"}}.Encode(), "michael")
-	if strings.Contains(response.Body.String(), "sk-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(response.Body.String(), "[redacted]") {
+	token := "123456789:AAabcdefghijklmnopqrstuvwxyz123456789"
+	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {token}}.Encode(), "michael")
+	if strings.Contains(response.Body.String(), token) || !strings.Contains(response.Body.String(), "[redacted]") {
 		t.Fatalf("secret rendered in %q", response.Body.String())
 	}
 }
@@ -208,6 +220,32 @@ func TestConversationStreamsHTMXFragmentsAndPersistsTheCompletedTurn(t *testing.
 	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
 	if !strings.Contains(page.Body.String(), "A focused next step") {
 		t.Fatalf("completed stream was not durable: %q", page.Body.String())
+	}
+}
+
+func TestConversationNeverPersistsSplitStreamedSecrets(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: splitSecretStreamingModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+
+	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"stream safely"}}.Encode(), "michael")
+	stream := request(t, app, http.MethodGet, streamURL(t, response.Body.String()), "", "michael")
+	token := "123456789:AAabcdefghijklmnopqrstuvwxyz123456789"
+	if strings.Contains(stream.Body.String(), token) || !strings.Contains(stream.Body.String(), "[redacted]") {
+		t.Fatalf("stream leaked secret: %q", stream.Body.String())
+	}
+
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var events string
+	if err := db.QueryRow(`SELECT group_concat(data, '') FROM turn_events`).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(events, token) {
+		t.Fatalf("persisted stream leaked secret: %q", events)
 	}
 }
 
