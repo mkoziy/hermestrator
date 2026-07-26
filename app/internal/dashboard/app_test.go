@@ -19,6 +19,18 @@ func (fakeModel) Reply(_ context.Context, _ Conversation, prompt string) (Reply,
 	return Reply{Text: "What outcome would make " + prompt + " successful?", Tokens: 21, CostUSD: 0.0042}, nil
 }
 
+type streamingFakeModel struct{ fakeModel }
+
+func (streamingFakeModel) Stream(_ context.Context, _ Conversation, _ string, emit func(string) error) (Reply, error) {
+	if err := emit("A focused "); err != nil {
+		return Reply{}, err
+	}
+	if err := emit("next step"); err != nil {
+		return Reply{}, err
+	}
+	return Reply{Text: "A focused next step", Tokens: 12, CostUSD: 0.0012}, nil
+}
+
 type fakeTelegram struct{ messages []string }
 
 func (f *fakeTelegram) Notify(_ context.Context, message string) error {
@@ -83,6 +95,27 @@ func TestTestNotificationIsReadOnlyAndLinksToDashboard(t *testing.T) {
 	}
 	if len(telegram.messages) != 1 || !strings.Contains(telegram.messages[0], "https://pm.example/repositories") {
 		t.Fatalf("message = %#v", telegram.messages)
+	}
+}
+
+func TestConversationStreamsHTMXFragmentsAndPersistsTheCompletedTurn(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: streamingFakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app := mustApp(t, deps)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"ship it"}}.Encode(), "michael")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "hx-swap-oob") || !strings.Contains(response.Body.String(), "A focused next step") {
+		t.Fatalf("stream fragments missing: %q", response.Body.String())
+	}
+
+	restarted := mustApp(t, deps)
+	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(page.Body.String(), "A focused next step") {
+		t.Fatalf("completed stream was not durable: %q", page.Body.String())
 	}
 }
 

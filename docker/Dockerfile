@@ -186,6 +186,11 @@ COPY --chmod=755 docker/ralphex-headless-plan.sh /usr/local/bin/ralphex-headless
 # "bake once, reseed on start" idiom used for the Hermes app subtrees above.
 COPY --chown=app:app skills/ /opt/agent-skills/
 
+# PM dashboard binary. It remains an explicit command (`pm`) until the later
+# runtime-replacement ticket switches the image's default gateway.
+COPY --chown=app:app app/ /opt/pm-app/
+RUN cd /opt/pm-app && go build -o /home/app/.local/bin/pm ./cmd/pm
+
 # HERMES_HOME: explicit persistent-state directory. Expected to be a mounted
 # volume in real deployments (survives `docker restart` / a future k8s
 # restart policy); entrypoint.sh initializes it fresh on first run when empty.

@@ -1,0 +1,20 @@
+# PM dashboard
+
+Run the service with `go run ./cmd/pm` from this directory, or use the baked
+`pm` command in the image. Required runtime configuration is supplied only as
+environment variables:
+
+- `OPENROUTER_API_KEY` and optional `PM_MODEL_DISCOVERY`
+- `GH_TOKEN` for the GitHub automation identity
+- `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and `PM_JWT_SECRET`
+- `PM_ALLOWED_GITHUB_USERS` (comma-separated GitHub logins)
+- `PM_DASHBOARD_URL`, `PM_SQLITE_PATH`, and optional `PM_LISTEN_ADDR`
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for the test notification
+
+The dashboard requires GitHub OAuth for every protected route. `GH_TOKEN` is
+never used as an operator login. SQLite uses WAL mode and persists repository
+sessions and conversation projections across restarts.
+
+To inspect Genkit traces in the optional Developer UI, run the service under
+the Genkit developer tooling in a development environment; do not expose that
+diagnostic surface as the operator dashboard.
