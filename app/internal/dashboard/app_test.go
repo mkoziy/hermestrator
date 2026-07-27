@@ -96,6 +96,23 @@ func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T
 	}
 }
 
+func TestRepositoryPickerUsesBrowserNavigationForSelection(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+
+	picker := request(t, app, http.MethodGet, "/repositories", "", "michael")
+	if strings.Contains(picker.Body.String(), `hx-post="/repositories/42"`) {
+		t.Fatalf("repository picker intercepts browser navigation: %q", picker.Body.String())
+	}
+	if !strings.Contains(picker.Body.String(), `action="/repositories/42"`) {
+		t.Fatalf("repository picker form action missing: %q", picker.Body.String())
+	}
+}
+
 func TestOperatorCanOpenFreshRepositoryWorkspace(t *testing.T) {
 	app := mustApp(t, Dependencies{
 		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},

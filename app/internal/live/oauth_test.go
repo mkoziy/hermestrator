@@ -3,6 +3,7 @@ package live
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -35,4 +36,31 @@ func TestFormXSRFBridgeDoesNotOverrideHTMXHeader(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: "form-token"})
 
 	handler.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+func TestGitHubOAuthLoginRedirectsToRepositoryPicker(t *testing.T) {
+	handler, err := (GitHubOAuth{
+		BaseURL:      "http://localhost:8080",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		JWTSecret:    "jwt-secret",
+	}).Wrap(http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want %d", response.Code, http.StatusFound)
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Path != "/auth/github/login" {
+		t.Fatalf("login path = %q, want /auth/github/login", location.Path)
+	}
+	if got := location.Query().Get("from"); got != "http://localhost:8080/repositories" {
+		t.Fatalf("login return URL = %q", got)
+	}
 }

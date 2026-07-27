@@ -47,6 +47,13 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 	authRoutes, _ := svc.Handlers()
 	mux := http.NewServeMux()
 	mux.Handle("/auth/", authRoutes)
+	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
+		login := &url.URL{Path: "/auth/github/login"}
+		query := login.Query()
+		query.Set("from", strings.TrimRight(c.BaseURL, "/")+"/repositories")
+		login.RawQuery = query.Encode()
+		http.Redirect(w, r, login.String(), http.StatusFound)
+	})
 	middleware := svc.Middleware()
 	mux.Handle("/", formXSRFBridge(middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := token.GetUserInfo(r)
