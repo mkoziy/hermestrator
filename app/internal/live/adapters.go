@@ -19,6 +19,7 @@ import (
 	genkitx "github.com/firebase/genkit/go/genkit/exp"
 	"github.com/firebase/genkit/go/plugins/compat_oai"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
+	"github.com/openai/openai-go"
 )
 
 var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|\d{6,}:[a-z0-9_-]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
@@ -159,7 +160,7 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 				ai.WithModelName("openrouter/"+model),
 				ai.WithMessages(messages...),
 				ai.WithTools(discoveryContext),
-				ai.WithConfig(&ai.GenerationCommonConfig{MaxOutputTokens: discoveryMaxOutputTokens}),
+				ai.WithConfig(&openai.ChatCompletionNewParams{MaxCompletionTokens: openai.Int(discoveryMaxOutputTokens)}),
 			) {
 				if err != nil {
 					return nil, fmt.Errorf("generate discovery response: %w", err)

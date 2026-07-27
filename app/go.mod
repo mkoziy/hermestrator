@@ -6,6 +6,7 @@ require (
 	github.com/firebase/genkit/go v1.11.0
 	github.com/go-pkgz/auth/v2 v2.1.6
 	github.com/google/uuid v1.6.0
+	github.com/openai/openai-go v1.8.2
 	modernc.org/sqlite v1.50.1
 )
 
@@ -166,7 +167,6 @@ require (
 	github.com/nishanths/exhaustive v0.12.0 // indirect
 	github.com/nishanths/predeclared v0.2.2 // indirect
 	github.com/nunnatsa/ginkgolinter v0.23.0 // indirect
-	github.com/openai/openai-go v1.8.2 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
