@@ -241,7 +241,7 @@ func TestTestNotificationIsReadOnlyAndLinksToDashboard(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d", response.Code)
 	}
-	if len(telegram.messages) != 1 || !strings.Contains(telegram.messages[0], "https://pm.example/repositories") {
+	if len(telegram.messages) != 1 || telegram.messages[0] != `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>` {
 		t.Fatalf("message = %#v", telegram.messages)
 	}
 }

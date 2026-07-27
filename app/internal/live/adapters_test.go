@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,24 @@ import (
 	"github.com/firebase/genkit/go/core"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
+
+func TestTelegramPayloadUsesHTMLForExplicitLinks(t *testing.T) {
+	payload, err := telegramPayload("123", `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message struct {
+		ChatID    string `json:"chat_id"`
+		Text      string `json:"text"`
+		ParseMode string `json:"parse_mode"`
+	}
+	if err := json.Unmarshal(payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.ChatID != "123" || message.ParseMode != "HTML" || message.Text != `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>` {
+		t.Fatalf("message = %#v", message)
+	}
+}
 
 func TestGitHubRepositoriesFollowsPagination(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -506,7 +506,9 @@ func (a *application) testNotification(w http.ResponseWriter, r *http.Request) {
 		if base == "" {
 			base = "http://localhost:8080"
 		}
-		if err := a.deps.Telegram.Notify(r.Context(), "PM dashboard test notification: "+base+"/repositories"); err != nil {
+		link := template.HTMLEscapeString(base + "/repositories")
+		message := `PM dashboard test notification: <a href="` + link + `">Open dashboard</a>`
+		if err := a.deps.Telegram.Notify(r.Context(), message); err != nil {
 			http.Error(w, "Telegram unavailable", http.StatusBadGateway)
 			return
 		}

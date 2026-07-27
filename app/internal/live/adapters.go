@@ -286,7 +286,7 @@ func (t Telegram) Notify(ctx context.Context, message string) error {
 	if t.BotToken == "" || t.ChatID == "" {
 		return fmt.Errorf("Telegram bot token and chat ID are required")
 	}
-	payload, err := json.Marshal(map[string]string{"chat_id": t.ChatID, "text": message, "disable_web_page_preview": "true"})
+	payload, err := telegramPayload(t.ChatID, message)
 	if err != nil {
 		return fmt.Errorf("encode Telegram notification: %w", err)
 	}
@@ -308,6 +308,20 @@ func (t Telegram) Notify(ctx context.Context, message string) error {
 		return fmt.Errorf("send Telegram notification: %s", resp.Status)
 	}
 	return nil
+}
+
+func telegramPayload(chatID, message string) ([]byte, error) {
+	return json.Marshal(struct {
+		ChatID                string `json:"chat_id"`
+		Text                  string `json:"text"`
+		ParseMode             string `json:"parse_mode"`
+		DisableWebPagePreview bool   `json:"disable_web_page_preview"`
+	}{
+		ChatID:                chatID,
+		Text:                  message,
+		ParseMode:             "HTML",
+		DisableWebPagePreview: true,
+	})
 }
 
 // AllowedUsers parses a comma-separated GitHub login allowlist.
