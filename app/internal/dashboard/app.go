@@ -418,6 +418,7 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 		}
 	}
 	if err != nil {
+		log.Printf("complete PM response for repository %q turn %q: %s", repositoryID, turnID, redactSecrets(err.Error()))
 		_ = a.recordTurnEvent(ctx, turnID, "error", `<p class="text-danger">The PM response could not be completed.</p>`)
 	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE pending_turns SET completed_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
