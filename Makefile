@@ -30,4 +30,4 @@ install-hooks:
 # process. Production must provide its environment through its runtime.
 pm-run:
 	@test -f "$(PM_ENV_FILE)" || { echo "missing environment file: $(PM_ENV_FILE)"; exit 1; }
-	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && go run ./cmd/pm
+	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && exec go run ./cmd/pm
