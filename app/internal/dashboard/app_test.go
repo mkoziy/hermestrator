@@ -39,6 +39,12 @@ func (streamingFakeModel) Stream(_ context.Context, _ Conversation, _ string, em
 	return Reply{Text: "A focused next step", Tokens: 12, CostUSD: 0.0012}, nil
 }
 
+type noSnapshotModel struct{ fakeModel }
+
+func (noSnapshotModel) Status(context.Context, string) (Status, error) {
+	return Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}, nil
+}
+
 type splitSecretStreamingModel struct{ fakeModel }
 
 func (splitSecretStreamingModel) Stream(_ context.Context, _ Conversation, _ string, emit func(string) error) (Reply, error) {
@@ -71,6 +77,48 @@ type fakeTelegram struct{ messages []string }
 func (f *fakeTelegram) Notify(_ context.Context, message string) error {
 	f.messages = append(f.messages, message)
 	return nil
+}
+
+func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+
+	response := request(t, app, http.MethodGet, "/", "", "michael")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("root status = %d, want %d", response.Code, http.StatusSeeOther)
+	}
+	if got := response.Header().Get("Location"); got != "/repositories" {
+		t.Fatalf("root location = %q, want %q", got, "/repositories")
+	}
+}
+
+func TestOperatorCanOpenFreshRepositoryWorkspace(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        noSnapshotModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+
+	request(t, app, http.MethodGet, "/repositories", "", "michael")
+	selected := request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	if selected.Code != http.StatusSeeOther {
+		t.Fatalf("select status = %d, want %d", selected.Code, http.StatusSeeOther)
+	}
+
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if workspace.Code != http.StatusOK {
+		t.Fatalf("workspace status = %d, want %d", workspace.Code, http.StatusOK)
+	}
+	for _, want := range []string{"discovery", "awaiting discovery", "0s"} {
+		if !strings.Contains(workspace.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, workspace.Body.String())
+		}
+	}
 }
 
 func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testing.T) {

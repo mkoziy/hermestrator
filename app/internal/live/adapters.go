@@ -14,6 +14,7 @@ import (
 
 	"github.com/firebase/genkit/go/ai"
 	aix "github.com/firebase/genkit/go/ai/exp"
+	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/genkit"
 	genkitx "github.com/firebase/genkit/go/genkit/exp"
 	"github.com/firebase/genkit/go/plugins/compat_oai"
@@ -191,14 +192,21 @@ func (m *OpenRouterModel) Close() error { return m.store.Close() }
 
 func (m *OpenRouterModel) Status(ctx context.Context, repositoryID string) (dashboard.Status, error) {
 	snapshot, err := m.agent.GetLatestSnapshot(ctx, "pm-"+repositoryID)
+	if err != nil && core.AsGenkitError(err).Status == core.NOT_FOUND {
+		return initialStatus(), nil
+	}
 	if err != nil {
 		return dashboard.Status{}, fmt.Errorf("load Genkit PM status: %w", err)
 	}
 	if snapshot == nil || snapshot.State == nil {
-		return dashboard.Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}, nil
+		return initialStatus(), nil
 	}
 	state := snapshot.State.Custom
 	return dashboard.Status{Phase: state.Phase, ModelRole: state.ModelRole, Elapsed: time.Since(state.StartedAt).Round(time.Second).String(), RecentActivity: state.LastActivity}, nil
+}
+
+func initialStatus() dashboard.Status {
+	return dashboard.Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}
 }
 
 func (m *OpenRouterModel) Reply(ctx context.Context, conversation dashboard.Conversation, prompt string) (dashboard.Reply, error) {

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
 
 func TestGitHubRepositoriesFollowsPagination(t *testing.T) {
@@ -38,5 +40,22 @@ func serverURL(r *http.Request) string { return "http://" + r.Host }
 func TestGitHubNextPage(t *testing.T) {
 	if got := githubNextPage(`<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=3>; rel="last"`); got != "https://api.github.com/user/repos?page=2" {
 		t.Fatalf("next page = %q", got)
+	}
+}
+
+func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
+	model, err := NewOpenRouterModel(context.Background(), "test-key", "openai/gpt-4.1-mini", t.TempDir()+"/pm.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = model.Close() })
+
+	status, err := model.Status(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("status before first turn: %v", err)
+	}
+	want := dashboard.Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}
+	if status != want {
+		t.Fatalf("status = %#v, want %#v", status, want)
 	}
 }

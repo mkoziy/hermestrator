@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -131,6 +132,7 @@ func New(deps Dependencies) (Handler, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &application{deps: deps, db: db, templates: t, ctx: ctx, cancel: cancel}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", a.root)
 	mux.HandleFunc("GET /repositories", a.repositories)
 	mux.HandleFunc("POST /repositories/{id}", a.selectRepository)
 	mux.HandleFunc("GET /repositories/{id}", a.workspace)
@@ -144,6 +146,10 @@ func New(deps Dependencies) (Handler, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+func (a *application) root(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/repositories", http.StatusSeeOther)
 }
 
 func (a *application) Close() error {
@@ -230,6 +236,7 @@ func (a *application) workspace(w http.ResponseWriter, r *http.Request) {
 	if model, ok := a.deps.Model.(StatusModel); ok {
 		c.Status, err = model.Status(r.Context(), c.RepositoryID)
 		if err != nil {
+			log.Printf("load PM status for repository %q: %s", c.RepositoryID, redactSecrets(err.Error()))
 			http.Error(w, "could not load PM status", http.StatusInternalServerError)
 			return
 		}

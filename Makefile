@@ -1,6 +1,7 @@
 APP_DIR := app
+PM_ENV_FILE ?= $(APP_DIR)/.env
 
-.PHONY: check fmt-check mod-check vet lint test race install-hooks
+.PHONY: check fmt-check mod-check vet lint test race install-hooks pm-run
 
 check: fmt-check mod-check vet lint test race
 
@@ -24,3 +25,9 @@ race:
 
 install-hooks:
 	@git config core.hooksPath .githooks
+
+# pm-run loads local, ignored development settings only for the dashboard
+# process. Production must provide its environment through its runtime.
+pm-run:
+	@test -f "$(PM_ENV_FILE)" || { echo "missing environment file: $(PM_ENV_FILE)"; exit 1; }
+	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && go run ./cmd/pm
