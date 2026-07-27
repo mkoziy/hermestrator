@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/firebase/genkit/go/ai"
+	aix "github.com/firebase/genkit/go/ai/exp"
 	"github.com/firebase/genkit/go/core"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
@@ -42,6 +44,23 @@ func TestIsMissingSnapshot(t *testing.T) {
 	}
 	if isMissingSnapshot(core.NewError(core.INTERNAL, "store unavailable")) {
 		t.Fatal("non-NOT_FOUND error was recognized as a missing snapshot")
+	}
+}
+
+func TestReplyFromOutputRejectsFailedAgentTurn(t *testing.T) {
+	_, err := replyFromOutput(&aix.AgentOutput[PMState]{
+		FinishReason: aix.AgentFinishReasonFailed,
+		Error:        core.NewError(core.INTERNAL, "model unavailable"),
+	})
+	if err == nil || err.Error() != "genkit PM turn failed: model unavailable" {
+		t.Fatalf("failed agent turn error = %v", err)
+	}
+}
+
+func TestReplyFromOutputRejectsEmptyAgentTurn(t *testing.T) {
+	_, err := replyFromOutput(&aix.AgentOutput[PMState]{Message: ai.NewModelTextMessage("")})
+	if err == nil || err.Error() != "genkit PM turn completed without a response" {
+		t.Fatalf("empty agent turn error = %v", err)
 	}
 }
 

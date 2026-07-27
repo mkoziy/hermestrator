@@ -117,6 +117,8 @@ type PMState struct {
 	CostUSD      float64   `json:"costUSD"`
 }
 
+const discoveryMaxOutputTokens = 1024
+
 func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*OpenRouterModel, error) {
 	if apiKey == "" || model == "" {
 		return nil, fmt.Errorf("OpenRouter API key and discovery model are required")
@@ -153,7 +155,12 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager. Ask one focused discovery question at a time.")}, session.Messages()...)
 			messages = append(messages, input.Message)
 			var reason aix.AgentFinishReason
-			for result, err := range genkit.GenerateStream(ctx, g, ai.WithModelName("openrouter/"+model), ai.WithMessages(messages...), ai.WithTools(discoveryContext)) {
+			for result, err := range genkit.GenerateStream(ctx, g,
+				ai.WithModelName("openrouter/"+model),
+				ai.WithMessages(messages...),
+				ai.WithTools(discoveryContext),
+				ai.WithConfig(&ai.GenerationCommonConfig{MaxOutputTokens: discoveryMaxOutputTokens}),
+			) {
 				if err != nil {
 					return nil, fmt.Errorf("generate discovery response: %w", err)
 				}
@@ -235,16 +242,32 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 	if err != nil {
 		return dashboard.Reply{}, fmt.Errorf("complete Genkit PM turn: %w", err)
 	}
+	reply, err := replyFromOutput(result)
+	if err != nil {
+		return dashboard.Reply{}, err
+	}
 	status, err := m.agent.GetLatestSnapshot(ctx, "pm-"+conversation.RepositoryID)
 	if err != nil && !isMissingSnapshot(err) {
 		return dashboard.Reply{}, fmt.Errorf("load completed Genkit PM turn: %w", err)
 	}
-	reply := dashboard.Reply{Text: result.Message.Text()}
 	if status != nil && status.State != nil {
 		reply.Tokens = status.State.Custom.Tokens
 		reply.CostUSD = status.State.Custom.CostUSD
 	}
 	return reply, nil
+}
+
+func replyFromOutput(result *aix.AgentOutput[PMState]) (dashboard.Reply, error) {
+	if result == nil {
+		return dashboard.Reply{}, fmt.Errorf("genkit PM turn completed without an output")
+	}
+	if result.Error != nil {
+		return dashboard.Reply{}, fmt.Errorf("genkit PM turn failed: %w", result.Error)
+	}
+	if result.Message == nil || strings.TrimSpace(result.Message.Text()) == "" {
+		return dashboard.Reply{}, fmt.Errorf("genkit PM turn completed without a response")
+	}
+	return dashboard.Reply{Text: result.Message.Text()}, nil
 }
 
 func isMissingSnapshot(err error) bool {
