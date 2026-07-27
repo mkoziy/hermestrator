@@ -29,17 +29,20 @@ func TestTelegramPayloadIncludesInlineDashboardLink(t *testing.T) {
 }
 
 func TestTelegramNotifySendsInlineDashboardLink(t *testing.T) {
+	requests := make(chan telegramRequest, 1)
+	decodeErrors := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
 		var message telegramRequest
 		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
-			t.Fatal(err)
+			decodeErrors <- err
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
-		if message.Text != "PM dashboard test notification. Open dashboard" || len(message.Entities) != 1 || message.Entities[0].URL != "https://pm.example/repositories" {
-			t.Fatalf("message = %#v", message)
-		}
+		requests <- message
 		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
 	}))
 	defer server.Close()
@@ -47,6 +50,16 @@ func TestTelegramNotifySendsInlineDashboardLink(t *testing.T) {
 	err := (Telegram{BotToken: "bot-token", ChatID: "123", Client: server.Client(), Endpoint: server.URL}).Notify(context.Background(), dashboard.Notification{Text: "PM dashboard test notification.", URL: "https://pm.example/repositories"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case err := <-decodeErrors:
+		t.Fatal(err)
+	case message := <-requests:
+		if message.Text != "PM dashboard test notification. Open dashboard" || len(message.Entities) != 1 || message.Entities[0].URL != "https://pm.example/repositories" {
+			t.Fatalf("message = %#v", message)
+		}
+	default:
+		t.Fatal("Telegram request was not captured")
 	}
 }
 
