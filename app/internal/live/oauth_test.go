@@ -64,3 +64,20 @@ func TestGitHubOAuthLoginRedirectsToRepositoryPicker(t *testing.T) {
 		t.Fatalf("login return URL = %q", got)
 	}
 }
+
+func TestGitHubOAuthRootRedirectsUnauthenticatedOperatorToLogin(t *testing.T) {
+	handler, err := (GitHubOAuth{
+		BaseURL:      "http://localhost:8080",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		JWTSecret:    "jwt-secret",
+	}).Wrap(http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/login" {
+		t.Fatalf("root response = %d %q", response.Code, response.Header().Get("Location"))
+	}
+}

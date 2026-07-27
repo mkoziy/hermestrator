@@ -54,6 +54,9 @@ func (c GitHubOAuth) Wrap(next http.Handler) (http.Handler, error) {
 		login.RawQuery = query.Encode()
 		http.Redirect(w, r, login.String(), http.StatusFound)
 	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
 	middleware := svc.Middleware()
 	mux.Handle("/", formXSRFBridge(middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := token.GetUserInfo(r)
