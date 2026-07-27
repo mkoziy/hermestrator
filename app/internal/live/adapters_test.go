@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
@@ -13,21 +14,46 @@ import (
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
 
-func TestTelegramPayloadUsesHTMLForExplicitLinks(t *testing.T) {
-	payload, err := telegramPayload("123", `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>`)
+func TestTelegramPayloadIncludesInlineDashboardLink(t *testing.T) {
+	payload, err := telegramPayload("123", dashboard.Notification{Text: "PM dashboard test notification.", URL: "https://pm.example/repositories"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var message struct {
-		ChatID    string `json:"chat_id"`
-		Text      string `json:"text"`
-		ParseMode string `json:"parse_mode"`
-	}
+	var message telegramRequest
 	if err := json.Unmarshal(payload, &message); err != nil {
 		t.Fatal(err)
 	}
-	if message.ChatID != "123" || message.ParseMode != "HTML" || message.Text != `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>` {
+	if message.ChatID != "123" || message.Text != "PM dashboard test notification. Open dashboard" || len(message.Entities) != 1 || message.Entities[0] != (telegramEntity{Type: "text_link", Offset: 32, Length: 14, URL: "https://pm.example/repositories"}) {
 		t.Fatalf("message = %#v", message)
+	}
+}
+
+func TestTelegramNotifySendsInlineDashboardLink(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		var message telegramRequest
+		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		if message.Text != "PM dashboard test notification. Open dashboard" || len(message.Entities) != 1 || message.Entities[0].URL != "https://pm.example/repositories" {
+			t.Fatalf("message = %#v", message)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+	}))
+	defer server.Close()
+
+	err := (Telegram{BotToken: "bot-token", ChatID: "123", Client: server.Client(), Endpoint: server.URL}).Notify(context.Background(), dashboard.Notification{Text: "PM dashboard test notification.", URL: "https://pm.example/repositories"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTelegramNotifyRejectsUnreachableDashboardURL(t *testing.T) {
+	err := (Telegram{BotToken: "bot-token", ChatID: "123"}).Notify(context.Background(), dashboard.Notification{Text: "PM dashboard test notification.", URL: "http://localhost:8080/repositories"})
+	if err == nil || !strings.Contains(err.Error(), "reachable HTTPS") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

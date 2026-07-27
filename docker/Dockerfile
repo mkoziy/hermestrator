@@ -3,6 +3,7 @@ FROM debian:bookworm-slim
 
 ARG GO_VERSION=1.26.5
 ARG NODE_MAJOR=24
+ARG GENKIT_CLI_VERSION=1.15.5
 # Build-time only (ARG, not ENV): keeps apt-get non-interactive during the
 # build without leaking DEBIAN_FRONTEND=noninteractive into the running
 # container's environment (an ENV instruction here would persist into every
@@ -44,6 +45,13 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && rm /tmp/go.tar.gz
 ENV GOPATH=/home/app/go \
     PATH=/usr/local/go/bin:/home/app/go/bin:$PATH
+
+# Genkit Developer UI CLI, pinned because the Agents API and reflection
+# protocol are beta. It is diagnostic-only and is invoked explicitly via
+# `make pm-dev`; it is not part of the dashboard entrypoint.
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://storage.googleapis.com/genkit-assets-cli/prod/linux-${ARCH}/v${GENKIT_CLI_VERSION}/genkit" -o /usr/local/bin/genkit \
+    && chmod 755 /usr/local/bin/genkit
 
 # Node.js LTS (NodeSource). Confirmed against the real Hermes installer
 # (install.sh): it only installs its own managed Node under $HERMES_HOME/node

@@ -40,6 +40,7 @@ type Reply struct {
 	Tokens  int
 	CostUSD float64
 }
+type Notification struct{ Text, URL string }
 
 // GitHub is deliberately the small automation boundary used by the handler.
 type GitHub interface {
@@ -61,7 +62,7 @@ type StatusModel interface {
 	Status(context.Context, string) (Status, error)
 }
 type Telegram interface {
-	Notify(context.Context, string) error
+	Notify(context.Context, Notification) error
 }
 
 type Dependencies struct {
@@ -506,9 +507,9 @@ func (a *application) testNotification(w http.ResponseWriter, r *http.Request) {
 		if base == "" {
 			base = "http://localhost:8080"
 		}
-		link := template.HTMLEscapeString(base + "/repositories")
-		message := `PM dashboard test notification: <a href="` + link + `">Open dashboard</a>`
-		if err := a.deps.Telegram.Notify(r.Context(), message); err != nil {
+		notification := Notification{Text: "PM dashboard test notification.", URL: base + "/repositories"}
+		if err := a.deps.Telegram.Notify(r.Context(), notification); err != nil {
+			log.Printf("send PM test notification: %s", redactSecrets(err.Error()))
 			http.Error(w, "Telegram unavailable", http.StatusBadGateway)
 			return
 		}

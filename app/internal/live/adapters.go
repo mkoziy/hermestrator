@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/firebase/genkit/go/ai"
 	aix "github.com/firebase/genkit/go/ai/exp"
@@ -280,13 +282,17 @@ type Telegram struct {
 	BotToken string
 	ChatID   string
 	Client   *http.Client
+	Endpoint string
 }
 
-func (t Telegram) Notify(ctx context.Context, message string) error {
+func (t Telegram) Notify(ctx context.Context, notification dashboard.Notification) error {
 	if t.BotToken == "" || t.ChatID == "" {
 		return fmt.Errorf("Telegram bot token and chat ID are required")
 	}
-	payload, err := telegramPayload(t.ChatID, message)
+	if err := validateTelegramLink(notification.URL); err != nil {
+		return err
+	}
+	payload, err := telegramPayload(t.ChatID, notification)
 	if err != nil {
 		return fmt.Errorf("encode Telegram notification: %w", err)
 	}
@@ -294,7 +300,11 @@ func (t Telegram) Notify(ctx context.Context, message string) error {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+t.BotToken+"/sendMessage", bytes.NewReader(payload))
+	endpoint := t.Endpoint
+	if endpoint == "" {
+		endpoint = "https://api.telegram.org/bot" + t.BotToken + "/sendMessage"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create Telegram request: %w", err)
 	}
@@ -307,21 +317,57 @@ func (t Telegram) Notify(ctx context.Context, message string) error {
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("send Telegram notification: %s", resp.Status)
 	}
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<10)).Decode(&result); err != nil {
+		return fmt.Errorf("decode Telegram notification response: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("send Telegram notification: %s", redactSecrets(result.Description))
+	}
 	return nil
 }
 
-func telegramPayload(chatID, message string) ([]byte, error) {
-	return json.Marshal(struct {
-		ChatID                string `json:"chat_id"`
-		Text                  string `json:"text"`
-		ParseMode             string `json:"parse_mode"`
-		DisableWebPagePreview bool   `json:"disable_web_page_preview"`
-	}{
+func validateTelegramLink(value string) error {
+	link, err := url.ParseRequestURI(value)
+	if err != nil || link.Scheme != "https" || link.Host == "" || strings.EqualFold(link.Hostname(), "localhost") {
+		return fmt.Errorf("Telegram dashboard link requires a reachable HTTPS PM_DASHBOARD_URL")
+	}
+	return nil
+}
+
+func telegramPayload(chatID string, notification dashboard.Notification) ([]byte, error) {
+	const linkLabel = "Open dashboard"
+	text := notification.Text + " " + linkLabel
+	return json.Marshal(telegramRequest{
 		ChatID:                chatID,
-		Text:                  message,
-		ParseMode:             "HTML",
+		Text:                  text,
 		DisableWebPagePreview: true,
+		Entities: []telegramEntity{{
+			Type:   "text_link",
+			Offset: utf16Length(notification.Text + " "),
+			Length: utf16Length(linkLabel),
+			URL:    notification.URL,
+		}},
 	})
+}
+
+func utf16Length(value string) int { return len(utf16.Encode([]rune(value))) }
+
+type telegramRequest struct {
+	ChatID                string           `json:"chat_id"`
+	Text                  string           `json:"text"`
+	DisableWebPagePreview bool             `json:"disable_web_page_preview"`
+	Entities              []telegramEntity `json:"entities"`
+}
+
+type telegramEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+	URL    string `json:"url"`
 }
 
 // AllowedUsers parses a comma-separated GitHub login allowlist.

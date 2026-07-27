@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -72,12 +73,16 @@ func (m *blockingStreamingModel) Stream(_ context.Context, _ Conversation, _ str
 	return Reply{Text: "resumed reply"}, nil
 }
 
-type fakeTelegram struct{ messages []string }
+type fakeTelegram struct{ notifications []Notification }
 
-func (f *fakeTelegram) Notify(_ context.Context, message string) error {
-	f.messages = append(f.messages, message)
+func (f *fakeTelegram) Notify(_ context.Context, notification Notification) error {
+	f.notifications = append(f.notifications, notification)
 	return nil
 }
+
+type failingTelegram struct{ err error }
+
+func (f failingTelegram) Notify(context.Context, Notification) error { return f.err }
 
 func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
 	app := mustApp(t, Dependencies{
@@ -167,8 +172,8 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 	if !strings.Contains(turn.Body.String(), "discovery") || !strings.Contains(turn.Body.String(), "0.0042") {
 		t.Fatalf("telemetry absent: %q", turn.Body.String())
 	}
-	if len(telegram.messages) != 0 {
-		t.Fatalf("ordinary turn notified Telegram: %#v", telegram.messages)
+	if len(telegram.notifications) != 0 {
+		t.Fatalf("ordinary turn notified Telegram: %#v", telegram.notifications)
 	}
 
 	restarted := mustApp(t, deps)
@@ -241,8 +246,16 @@ func TestTestNotificationIsReadOnlyAndLinksToDashboard(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d", response.Code)
 	}
-	if len(telegram.messages) != 1 || telegram.messages[0] != `PM dashboard test notification: <a href="https://pm.example/repositories">Open dashboard</a>` {
-		t.Fatalf("message = %#v", telegram.messages)
+	if len(telegram.notifications) != 1 || telegram.notifications[0] != (Notification{Text: "PM dashboard test notification.", URL: "https://pm.example/repositories"}) {
+		t.Fatalf("notifications = %#v", telegram.notifications)
+	}
+}
+
+func TestTestNotificationKeepsTelegramFailureOutOfBrowser(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Telegram: failingTelegram{err: errors.New("bot token secret-value rejected")}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, DashboardURL: "https://pm.example"})
+	response := request(t, app, http.MethodPost, "/notifications/test", "", "michael")
+	if response.Code != http.StatusBadGateway || response.Body.String() != "Telegram unavailable\n" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 }
 

@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/firebase/genkit/go v1.11.0
 	github.com/go-pkgz/auth/v2 v2.1.6
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/openai/openai-go v1.8.2
 	modernc.org/sqlite v1.50.1
@@ -96,7 +97,6 @@ require (
 	github.com/goccy/go-yaml v1.17.1 // indirect
 	github.com/godoc-lint/godoc-lint v0.11.2 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/golangci/asciicheck v0.5.0 // indirect
