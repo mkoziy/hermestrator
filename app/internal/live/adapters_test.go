@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/firebase/genkit/go/core"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
 
@@ -32,6 +33,15 @@ func TestGitHubRepositoriesFollowsPagination(t *testing.T) {
 	}
 	if len(repos) != 2 || repos[0].FullName != "acme/first" || repos[1].FullName != "acme/second" {
 		t.Fatalf("repositories = %#v", repos)
+	}
+}
+
+func TestIsMissingSnapshot(t *testing.T) {
+	if !isMissingSnapshot(core.NewError(core.NOT_FOUND, "no snapshot found")) {
+		t.Fatal("NOT_FOUND snapshot error was not recognized")
+	}
+	if isMissingSnapshot(core.NewError(core.INTERNAL, "store unavailable")) {
+		t.Fatal("non-NOT_FOUND error was recognized as a missing snapshot")
 	}
 }
 

@@ -192,7 +192,7 @@ func (m *OpenRouterModel) Close() error { return m.store.Close() }
 
 func (m *OpenRouterModel) Status(ctx context.Context, repositoryID string) (dashboard.Status, error) {
 	snapshot, err := m.agent.GetLatestSnapshot(ctx, "pm-"+repositoryID)
-	if err != nil && core.AsGenkitError(err).Status == core.NOT_FOUND {
+	if isMissingSnapshot(err) {
 		return initialStatus(), nil
 	}
 	if err != nil {
@@ -236,7 +236,7 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 		return dashboard.Reply{}, fmt.Errorf("complete Genkit PM turn: %w", err)
 	}
 	status, err := m.agent.GetLatestSnapshot(ctx, "pm-"+conversation.RepositoryID)
-	if err != nil {
+	if err != nil && !isMissingSnapshot(err) {
 		return dashboard.Reply{}, fmt.Errorf("load completed Genkit PM turn: %w", err)
 	}
 	reply := dashboard.Reply{Text: result.Message.Text()}
@@ -245,6 +245,10 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 		reply.CostUSD = status.State.Custom.CostUSD
 	}
 	return reply, nil
+}
+
+func isMissingSnapshot(err error) bool {
+	return err != nil && core.AsGenkitError(err).Status == core.NOT_FOUND
 }
 
 // Telegram posts read-only notification messages through the Bot API.
