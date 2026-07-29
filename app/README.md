@@ -15,10 +15,13 @@ The dashboard requires GitHub OAuth for every protected route. `GH_TOKEN` is
 never used as an operator login. SQLite uses WAL mode and persists repository
 sessions and conversation projections across restarts.
 
-To inspect Genkit traces in the optional Developer UI, install the pinned
-`genkit` CLI available in the project image and run `make pm-dev`. It enables
-`GENKIT_ENV=dev` and starts the local Developer UI alongside the PM process.
-The diagnostic surface must never be exposed as the operator dashboard.
+To inspect Genkit traces in the optional Developer UI, run `make pm-dev` from
+the repository root. On first use it downloads the pinned `genkit` CLI into
+the ignored `app/.bin/` directory; it does not install anything globally. It
+enables `GENKIT_ENV=dev` and starts the local Developer UI alongside the PM
+process. Genkit displays its own analytics consent prompt on first launch;
+press Enter to continue. The diagnostic surface must never be exposed as the
+operator dashboard.
 
 Telegram links require `PM_DASHBOARD_URL` to be a reachable HTTPS dashboard
 URL. `http://localhost:8080` is suitable for local browser development but

@@ -1,4 +1,6 @@
 .env
+app/.bin/
+app/.genkit/
 *.env
 **/*secret*
 **/credentials*
