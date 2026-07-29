@@ -56,4 +56,4 @@ genkit-cli:
 pm-dev: genkit-cli
 	@test -f "$(PM_ENV_FILE)" || { echo "missing environment file: $(PM_ENV_FILE)"; exit 1; }
 	@cd "$(APP_DIR)" && go build -o ".bin/pm-dev" ./cmd/pm
-	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && GENKIT_ENV=dev GENKIT_REFLECTION_PORT="$(GENKIT_REFLECTION_PORT)" exec "$(abspath $(GENKIT_BIN))" start -- sh ./scripts/pm-dev-server.sh
+	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && GENKIT_ENV=dev GENKIT_REFLECTION_PORT="$(GENKIT_REFLECTION_PORT)" GENKIT_ENABLE_REALTIME_TELEMETRY=true exec "$(abspath $(GENKIT_BIN))" start -- sh ./scripts/pm-dev-server.sh

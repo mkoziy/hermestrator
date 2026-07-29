@@ -228,6 +228,7 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 	if err != nil {
 		return dashboard.Reply{}, fmt.Errorf("connect Genkit PM agent: %w", err)
 	}
+	defer func() { _ = conn.Close() }()
 	if err := conn.SendText(prompt); err != nil {
 		return dashboard.Reply{}, fmt.Errorf("send Genkit PM turn: %w", err)
 	}
