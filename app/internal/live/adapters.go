@@ -232,6 +232,7 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 	if err := conn.SendText(prompt); err != nil {
 		return dashboard.Reply{}, fmt.Errorf("send Genkit PM turn: %w", err)
 	}
+	turnEnded := false
 	for chunk, err := range conn.Receive() {
 		if err != nil {
 			return dashboard.Reply{}, fmt.Errorf("receive Genkit PM turn: %w", err)
@@ -241,6 +242,13 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 				return dashboard.Reply{}, err
 			}
 		}
+		if chunk.TurnEnd != nil {
+			turnEnded = true
+			break
+		}
+	}
+	if !turnEnded {
+		return dashboard.Reply{}, fmt.Errorf("genkit PM turn ended without a turn completion event")
 	}
 	result, err := conn.Output()
 	if err != nil {

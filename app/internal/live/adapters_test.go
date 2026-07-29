@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/firebase/genkit/go/ai"
 	aix "github.com/firebase/genkit/go/ai/exp"
 	"github.com/firebase/genkit/go/core"
+	"github.com/firebase/genkit/go/genkit"
+	genkitx "github.com/firebase/genkit/go/genkit/exp"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
 
@@ -144,5 +147,34 @@ func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
 	want := dashboard.Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}
 	if status != want {
 		t.Fatalf("status = %#v, want %#v", status, want)
+	}
+}
+
+func TestOpenRouterStreamFinishesAfterFirstAgentTurn(t *testing.T) {
+	store, err := NewSQLiteSessionStore[PMState](t.TempDir() + "/pm.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	g := genkit.Init(context.Background(), genkit.WithExperimental())
+	agent := genkitx.DefineCustomAgent(g, "one-turn", func(ctx context.Context, _ aix.Responder, session *aix.SessionRunner[PMState]) (*aix.AgentResult, error) {
+		var reply *ai.Message
+		err := session.Run(ctx, func(_ context.Context, input *aix.AgentInput) (*aix.TurnResult, error) {
+			reply = ai.NewModelTextMessage("completed")
+			session.AddMessages(input.Message, reply)
+			return &aix.TurnResult{FinishReason: aix.AgentFinishReasonStop}, nil
+		})
+		return &aix.AgentResult{Message: reply}, err
+	}, aix.WithSessionStore(store))
+	model := OpenRouterModel{agent: agent, store: store}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	reply, err := model.Stream(ctx, dashboard.Conversation{RepositoryID: "42"}, "hello", func(string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Text != "completed" {
+		t.Fatalf("reply = %#v", reply)
 	}
 }
