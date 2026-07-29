@@ -251,6 +251,37 @@ func TestTestNotificationIsReadOnlyAndLinksToDashboard(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUsesTablerComponentsForConversationAndTestNotification(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        streamingFakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	for _, want := range []string{
+		`class="card mb-3"`,
+		`class="btn btn-primary"`,
+		`action="/notifications/test"`,
+		`Test Telegram notification`,
+	} {
+		if !strings.Contains(workspace.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, workspace.Body.String())
+		}
+	}
+
+	started := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"style it"}}.Encode(), "michael")
+	if !strings.Contains(started.Body.String(), `class="card card-body mb-2"`) {
+		t.Fatalf("stream start is not a Tabler component: %q", started.Body.String())
+	}
+	stream := request(t, app, http.MethodGet, streamURL(t, started.Body.String()), "", "michael")
+	if !strings.Contains(stream.Body.String(), `class="card card-body py-2 mb-2"`) || !strings.Contains(stream.Body.String(), `class="card card-body mb-2"`) {
+		t.Fatalf("streamed response is not a Tabler component: %q", stream.Body.String())
+	}
+}
+
 func TestTestNotificationKeepsTelegramFailureOutOfBrowser(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Telegram: failingTelegram{err: errors.New("bot token secret-value rejected")}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, DashboardURL: "https://pm.example"})
 	response := request(t, app, http.MethodPost, "/notifications/test", "", "michael")
