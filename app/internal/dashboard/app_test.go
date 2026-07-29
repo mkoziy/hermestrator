@@ -449,6 +449,45 @@ func TestStartupCancelsLegacyDuplicatePendingTurns(t *testing.T) {
 	}
 }
 
+func TestStartupCancelsInterruptedRunningTurn(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE repositories (id TEXT PRIMARY KEY, full_name TEXT NOT NULL);
+		CREATE TABLE messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT, state TEXT NOT NULL DEFAULT 'pending', terminal_reason TEXT);
+		INSERT INTO repositories(id,full_name) VALUES('42','mkoziy/hermestrator');
+		INSERT INTO pending_turns(id,repository_id,prompt,started_at,state) VALUES('interrupted','42','first','2026-07-29T12:00:00Z','running');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: streamingFakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}})
+	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if page.Code != http.StatusOK || strings.Contains(page.Body.String(), "sse-connect=") || strings.Contains(page.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
+		t.Fatalf("interrupted turn should not keep the workspace locked: %d %q", page.Code, page.Body.String())
+	}
+
+	db, err = sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var state, reason string
+	if err := db.QueryRow(`SELECT state,terminal_reason FROM pending_turns WHERE id='interrupted'`).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != turnCanceled || reason != "canceled after PM service restart" {
+		t.Fatalf("interrupted turn = (%q,%q)", state, reason)
+	}
+}
+
 func streamURL(t *testing.T, body string) string {
 	t.Helper()
 	const prefix = `sse-connect="`

@@ -238,7 +238,10 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 }
 
 func recoverDuplicatePendingTurns(db *sql.DB) error {
-	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state IN ('pending','running') ORDER BY repository_id,rowid DESC`)
+	if err := cancelInterruptedRunningTurns(db); err != nil {
+		return err
+	}
+	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state=? ORDER BY repository_id,rowid DESC`, turnPending)
 	if err != nil {
 		return fmt.Errorf("list active PM responses for recovery: %w", err)
 	}
@@ -254,18 +257,45 @@ func recoverDuplicatePendingTurns(db *sql.DB) error {
 			retained[repositoryID] = true
 			continue
 		}
-		if _, err := db.Exec(`UPDATE pending_turns SET state=?,terminal_reason=?,completed_at=? WHERE id=?`, turnCanceled, "canceled after duplicate submission recovery", now, turnID); err != nil {
-			return fmt.Errorf("cancel duplicate PM response %q: %w", turnID, err)
-		}
-		if _, err := db.Exec(`INSERT INTO activity VALUES(?,?,?)`, repositoryID, "duplicate PM response canceled during recovery", now); err != nil {
-			return fmt.Errorf("record duplicate PM response recovery: %w", err)
-		}
-		if _, err := db.Exec(`INSERT INTO turn_events(turn_id,event,data) VALUES(?,?,?)`, turnID, "error", `<p class="text-danger">This duplicate PM response was canceled during recovery.</p>`); err != nil {
-			return fmt.Errorf("record duplicate PM response event: %w", err)
+		if err := cancelRecoveredTurn(db, repositoryID, turnID, "canceled after duplicate submission recovery", "duplicate PM response canceled during recovery", `<p class="text-danger">This duplicate PM response was canceled during recovery.</p>`, now); err != nil {
+			return err
 		}
 		log.Printf("canceled duplicate PM response for repository %q turn %q during recovery", repositoryID, turnID)
 	}
 	return rows.Err()
+}
+
+func cancelInterruptedRunningTurns(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state=?`, turnRunning)
+	if err != nil {
+		return fmt.Errorf("list interrupted PM responses for recovery: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for rows.Next() {
+		var turnID, repositoryID string
+		if err := rows.Scan(&turnID, &repositoryID); err != nil {
+			return fmt.Errorf("scan interrupted PM response for recovery: %w", err)
+		}
+		if err := cancelRecoveredTurn(db, repositoryID, turnID, "canceled after PM service restart", "interrupted PM response canceled after service restart", `<p class="text-danger">The PM response was canceled after the service restarted.</p>`, now); err != nil {
+			return err
+		}
+		log.Printf("canceled interrupted PM response for repository %q turn %q after service restart", repositoryID, turnID)
+	}
+	return rows.Err()
+}
+
+func cancelRecoveredTurn(db *sql.DB, repositoryID, turnID, reason, activity, event, now string) error {
+	if _, err := db.Exec(`UPDATE pending_turns SET state=?,terminal_reason=?,completed_at=? WHERE id=?`, turnCanceled, reason, now, turnID); err != nil {
+		return fmt.Errorf("cancel PM response %q: %w", turnID, err)
+	}
+	if _, err := db.Exec(`INSERT INTO activity VALUES(?,?,?)`, repositoryID, activity, now); err != nil {
+		return fmt.Errorf("record PM response recovery: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO turn_events(turn_id,event,data) VALUES(?,?,?)`, turnID, "error", event); err != nil {
+		return fmt.Errorf("record PM response event: %w", err)
+	}
+	return nil
 }
 
 func (a *application) authorized(next http.Handler) http.Handler {
