@@ -30,10 +30,14 @@ type Conversation struct {
 	RepositoryID string
 	Messages     []Message
 	PendingTurns []PendingTurn
+	HasPending   bool
 	LastReply    Reply
 	Status       Status
 }
-type PendingTurn struct{ TurnID, RepositoryID string }
+type PendingTurn struct {
+	TurnID, RepositoryID string
+	Sending              bool
+}
 type Status struct{ Phase, ModelRole, Elapsed, RecentActivity string }
 type Reply struct {
 	Text    string
@@ -83,8 +87,11 @@ type application struct {
 	cancel    context.CancelFunc
 	workers   sync.WaitGroup
 	mu        sync.Mutex
+	turnMu    sync.Mutex
 	closed    bool
 }
+
+var errTurnInProgress = errors.New("PM response already in progress")
 
 type Handler interface {
 	http.Handler
@@ -260,22 +267,27 @@ func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if _, streaming := a.deps.Model.(StreamingModel); streaming && r.Header.Get("HX-Request") == "true" {
+		turnID := uuid.NewString()
+		if err = a.beginStreamingTurn(r.Context(), id, turnID, prompt); err != nil {
+			if errors.Is(err, errTurnInProgress) {
+				http.Error(w, "A PM response is already in progress.", http.StatusConflict)
+				return
+			}
+			http.Error(w, "could not start response stream", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("start PM response for repository %q turn %q", id, turnID)
+		a.startTurn(id, turnID, prompt)
+		a.render(w, "stream-start", PendingTurn{RepositoryID: id, TurnID: turnID, Sending: true})
+		return
+	}
 	now := time.Now().UTC()
 	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO messages(repository_id,role,text,created_at) VALUES(?,?,?,?)`, id, "operator", prompt, now.Format(time.RFC3339Nano)); err != nil {
 		http.Error(w, "could not save message", 500)
 		return
 	}
 	c.Messages = append(c.Messages, Message{Role: "operator", Text: prompt, CreatedAt: now})
-	if _, streaming := a.deps.Model.(StreamingModel); streaming && r.Header.Get("HX-Request") == "true" {
-		turnID := uuid.NewString()
-		if _, err = a.db.ExecContext(r.Context(), `INSERT INTO pending_turns(id,repository_id,prompt) VALUES(?,?,?)`, turnID, id, prompt); err != nil {
-			http.Error(w, "could not start response stream", http.StatusInternalServerError)
-			return
-		}
-		a.startTurn(id, turnID, prompt)
-		a.render(w, "stream-start", struct{ RepositoryID, TurnID string }{id, turnID})
-		return
-	}
 	reply, err := a.reply(r.Context(), c, prompt, nil)
 	if err != nil {
 		http.Error(w, "model response unavailable", http.StatusBadGateway)
@@ -294,6 +306,36 @@ func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 		Reply  Reply
 		Status Status
 	}{reply, status})
+}
+
+func (a *application) beginStreamingTurn(ctx context.Context, repositoryID, turnID, prompt string) error {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+
+	var activeTurn string
+	err := a.db.QueryRowContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND completed_at IS NULL LIMIT 1`, repositoryID).Scan(&activeTurn)
+	if err == nil {
+		return errTurnInProgress
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check pending PM response: %w", err)
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin PM response: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO messages(repository_id,role,text,created_at) VALUES(?,?,?,?)`, repositoryID, "operator", prompt, now); err != nil {
+		return fmt.Errorf("save operator message: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO pending_turns(id,repository_id,prompt) VALUES(?,?,?)`, turnID, repositoryID, prompt); err != nil {
+		return fmt.Errorf("save pending PM response: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit PM response: %w", err)
+	}
+	return nil
 }
 
 func (a *application) resumePendingTurns() error {
@@ -387,16 +429,19 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 	c, err := a.conversation(ctx, repositoryID)
 	if err == nil {
 		var text strings.Builder
+		var visibleText strings.Builder
 		var safe streamTextBuffer
 		var reply Reply
 		reply, err = a.reply(ctx, c, prompt, func(chunk string) error {
 			text.WriteString(chunk)
 			return safe.Append(chunk, func(visible string) error {
-				return a.recordTurnEvent(ctx, turnID, "chunk", `<article class="card card-body py-2 mb-2"><strong>pm:</strong> `+template.HTMLEscapeString(visible)+`</article>`)
+				visibleText.WriteString(visible)
+				return a.recordTurnEvent(ctx, turnID, "chunk", `<strong>pm:</strong> `+template.HTMLEscapeString(visibleText.String()))
 			})
 		})
 		if flushErr := safe.Flush(func(visible string) error {
-			return a.recordTurnEvent(ctx, turnID, "chunk", `<article class="card card-body py-2 mb-2"><strong>pm:</strong> `+template.HTMLEscapeString(visible)+`</article>`)
+			visibleText.WriteString(visible)
+			return a.recordTurnEvent(ctx, turnID, "chunk", `<strong>pm:</strong> `+template.HTMLEscapeString(visibleText.String()))
 		}); err == nil && flushErr != nil {
 			err = flushErr
 		}
@@ -412,7 +457,8 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 			fragment, err = a.fragment("streamed-turn", struct {
 				Reply  Reply
 				Status Status
-			}{reply, status})
+				TurnID string
+			}{reply, status, turnID})
 			if err == nil {
 				err = a.recordTurnEvent(ctx, turnID, "done", fragment)
 			}
@@ -420,7 +466,9 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 	}
 	if err != nil {
 		log.Printf("complete PM response for repository %q turn %q: %s", repositoryID, turnID, redactSecrets(err.Error()))
-		_ = a.recordTurnEvent(ctx, turnID, "error", `<p class="text-danger">The PM response could not be completed.</p>`)
+		_ = a.recordTurnEvent(ctx, turnID, "error", `<p class="text-danger">The PM response could not be completed.</p><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button>`)
+	} else {
+		log.Printf("completed PM response for repository %q turn %q", repositoryID, turnID)
 	}
 	_, _ = a.db.ExecContext(ctx, `UPDATE pending_turns SET completed_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
 }
@@ -560,6 +608,7 @@ func (a *application) conversation(ctx context.Context, id string) (Conversation
 		turn.RepositoryID = id
 		c.PendingTurns = append(c.PendingTurns, turn)
 	}
+	c.HasPending = len(c.PendingTurns) > 0
 	return c, pending.Err()
 }
 func (a *application) render(w http.ResponseWriter, name string, data any) {
@@ -570,7 +619,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button class="btn btn-primary">Send</button></form><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
-{{define "stream-start"}}<div id="pending-turn" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done"><strong>pm:</strong> Thinking…</div>{{end}}
-{{define "streamed-turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`
+{{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
+{{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`

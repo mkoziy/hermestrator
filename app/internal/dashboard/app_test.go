@@ -277,7 +277,7 @@ func TestWorkspaceUsesTablerComponentsForConversationAndTestNotification(t *test
 		t.Fatalf("stream start is not a Tabler component: %q", started.Body.String())
 	}
 	stream := request(t, app, http.MethodGet, streamURL(t, started.Body.String()), "", "michael")
-	if !strings.Contains(stream.Body.String(), `class="card card-body py-2 mb-2"`) || !strings.Contains(stream.Body.String(), `class="card card-body mb-2"`) {
+	if !strings.Contains(stream.Body.String(), `event: chunk`) || !strings.Contains(stream.Body.String(), `<strong>pm:</strong> A focused next step`) || !strings.Contains(stream.Body.String(), `class="card card-body mb-2"`) {
 		t.Fatalf("streamed response is not a Tabler component: %q", stream.Body.String())
 	}
 }
@@ -367,13 +367,36 @@ func TestWorkspaceReconnectsToPendingTurnAfterReload(t *testing.T) {
 	<-model.ready
 
 	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `sse-connect="`+stream+`"`) {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `sse-connect="`+stream+`"`) || !strings.Contains(page.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
 		t.Fatalf("pending turn was not reconnected: %d %q", page.Code, page.Body.String())
 	}
 	close(model.release)
 	completed := request(t, app, http.MethodGet, stream, "", "michael")
 	if !strings.Contains(completed.Body.String(), "event: done") {
 		t.Fatalf("resumed turn did not complete: %q", completed.Body.String())
+	}
+}
+
+func TestConversationAllowsOnlyOneStreamingTurnAtATime(t *testing.T) {
+	model := &blockingStreamingModel{ready: make(chan struct{}), release: make(chan struct{})}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: model, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+
+	started := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"first"}}.Encode(), "michael")
+	if started.Code != http.StatusOK || !strings.Contains(started.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
+		t.Fatalf("stream start should disable sending: %d %q", started.Code, started.Body.String())
+	}
+	<-model.ready
+
+	second := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"second"}}.Encode(), "michael")
+	if second.Code != http.StatusConflict || second.Body.String() != "A PM response is already in progress.\n" {
+		t.Fatalf("second streaming turn = %d %q", second.Code, second.Body.String())
+	}
+
+	close(model.release)
+	stream := request(t, app, http.MethodGet, streamURL(t, started.Body.String()), "", "michael")
+	if !strings.Contains(stream.Body.String(), `id="pending-turn-`) || !strings.Contains(stream.Body.String(), `hx-swap-oob="outerHTML"`) || !strings.Contains(stream.Body.String(), `id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML"`) {
+		t.Fatalf("stream completion should replace its pending card and restore sending: %q", stream.Body.String())
 	}
 }
 
