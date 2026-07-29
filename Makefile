@@ -7,9 +7,9 @@ GENKIT_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GENKIT_ARCH := $(shell uname -m | sed -e 's/^arm64$$/arm64/' -e 's/^aarch64$$/arm64/' -e 's/^x86_64$$/x64/' -e 's/^amd64$$/x64/')
 GENKIT_CLI_URL := https://storage.googleapis.com/genkit-assets-cli/prod/$(GENKIT_OS)-$(GENKIT_ARCH)/v$(GENKIT_CLI_VERSION)/genkit
 
-.PHONY: check fmt-check mod-check vet lint test race install-hooks pm-run genkit-cli pm-dev
+.PHONY: check fmt-check mod-check vet lint test race shell-check install-hooks pm-run genkit-cli pm-dev
 
-check: fmt-check mod-check vet lint test race
+check: fmt-check mod-check vet lint test race shell-check
 
 fmt-check:
 	@test -z "$$(gofmt -l $$(find $(APP_DIR) -name '*.go' -type f))"
@@ -28,6 +28,9 @@ test:
 
 race:
 	@cd $(APP_DIR) && go test -race ./internal/dashboard ./internal/live
+
+shell-check:
+	@sh -n $(APP_DIR)/scripts/*.sh
 
 install-hooks:
 	@git config core.hooksPath .githooks
@@ -52,4 +55,5 @@ genkit-cli:
 # never be exposed as the authenticated operator dashboard.
 pm-dev: genkit-cli
 	@test -f "$(PM_ENV_FILE)" || { echo "missing environment file: $(PM_ENV_FILE)"; exit 1; }
-	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && GENKIT_ENV=dev GENKIT_REFLECTION_PORT="$(GENKIT_REFLECTION_PORT)" exec "$(abspath $(GENKIT_BIN))" start -- go run ./cmd/pm
+	@cd "$(APP_DIR)" && go build -o ".bin/pm-dev" ./cmd/pm
+	@set -a; . "$(PM_ENV_FILE)"; set +a; cd "$(APP_DIR)" && GENKIT_ENV=dev GENKIT_REFLECTION_PORT="$(GENKIT_REFLECTION_PORT)" exec "$(abspath $(GENKIT_BIN))" start -- sh ./scripts/pm-dev-server.sh
