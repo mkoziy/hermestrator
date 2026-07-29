@@ -400,6 +400,55 @@ func TestConversationAllowsOnlyOneStreamingTurnAtATime(t *testing.T) {
 	}
 }
 
+func TestStartupCancelsLegacyDuplicatePendingTurns(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	legacy, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE repositories (id TEXT PRIMARY KEY, full_name TEXT NOT NULL);
+		CREATE TABLE messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT);
+		INSERT INTO repositories(id,full_name) VALUES('42','mkoziy/hermestrator');
+		INSERT INTO pending_turns(id,repository_id,prompt,started_at) VALUES
+			('oldest','42','first','2026-07-29T12:00:00Z'),
+			('middle','42','second','2026-07-29T12:01:00Z'),
+			('newest','42','third','2026-07-29T12:02:00Z');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	model := &blockingStreamingModel{ready: make(chan struct{}), release: make(chan struct{})}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: model, Store: database, AllowedUsers: map[string]bool{"michael": true}})
+	defer func() { close(model.release) }()
+	<-model.ready
+
+	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if page.Code != http.StatusOK || strings.Count(page.Body.String(), "sse-connect=") != 1 || !strings.Contains(page.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
+		t.Fatalf("workspace did not retain one active turn: %d %q", page.Code, page.Body.String())
+	}
+
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var active, canceled int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_turns WHERE state IN ('pending','running')`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_turns WHERE state='canceled' AND terminal_reason='canceled after duplicate submission recovery'`).Scan(&canceled); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || canceled != 2 {
+		t.Fatalf("pending turn recovery = %d active, %d canceled; want 1 active, 2 canceled", active, canceled)
+	}
+}
+
 func streamURL(t *testing.T, body string) string {
 	t.Helper()
 	const prefix = `sse-connect="`

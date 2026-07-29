@@ -21,6 +21,14 @@ import (
 
 var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|\d{6,}:[a-z0-9_-]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
 
+const (
+	turnPending   = "pending"
+	turnRunning   = "running"
+	turnCompleted = "completed"
+	turnFailed    = "failed"
+	turnCanceled  = "canceled"
+)
+
 type Repository struct{ ID, FullName string }
 type Message struct {
 	Role, Text string
@@ -111,7 +119,7 @@ func New(deps Dependencies) (Handler, error) {
 		CREATE TABLE IF NOT EXISTS genkit_sessions (repository_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, tokens INTEGER, cost_usd REAL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS activity (repository_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
-		CREATE TABLE IF NOT EXISTS pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT);
+		CREATE TABLE IF NOT EXISTS pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT, state TEXT NOT NULL DEFAULT 'pending', terminal_reason TEXT);
 		CREATE TABLE IF NOT EXISTS turn_events (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL);`); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -128,7 +136,30 @@ func New(deps Dependencies) (Handler, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err = db.Exec(`UPDATE pending_turns SET started_at=NULL WHERE completed_at IS NULL`); err != nil {
+	stateExists, err := columnExists(db, "pending_turns", "state")
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !stateExists {
+		if err = addColumnIfMissing(db, "pending_turns", "state", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		if _, err = db.Exec(`UPDATE pending_turns SET state=CASE WHEN completed_at IS NULL THEN 'pending' ELSE 'completed' END`); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	if err = addColumnIfMissing(db, "pending_turns", "terminal_reason", "TEXT"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = recoverDuplicatePendingTurns(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS one_active_pending_turn_per_repository ON pending_turns(repository_id) WHERE state IN ('pending','running')`); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -172,27 +203,69 @@ func (a *application) Close() error {
 func (a *application) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.handler.ServeHTTP(w, r) }
 
 func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	exists, err := columnExists(db, table, column)
 	if err != nil {
-		return fmt.Errorf("inspect %s columns: %w", table, err)
+		return err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("scan %s column: %w", table, err)
-		}
-		if name == column {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate %s columns: %w", table, err)
+	if exists {
+		return nil
 	}
 	if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition); err != nil {
 		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("scan %s column: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	return false, nil
+}
+
+func recoverDuplicatePendingTurns(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state IN ('pending','running') ORDER BY repository_id,rowid DESC`)
+	if err != nil {
+		return fmt.Errorf("list active PM responses for recovery: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	retained := make(map[string]bool)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for rows.Next() {
+		var turnID, repositoryID string
+		if err := rows.Scan(&turnID, &repositoryID); err != nil {
+			return fmt.Errorf("scan active PM response for recovery: %w", err)
+		}
+		if !retained[repositoryID] {
+			retained[repositoryID] = true
+			continue
+		}
+		if _, err := db.Exec(`UPDATE pending_turns SET state=?,terminal_reason=?,completed_at=? WHERE id=?`, turnCanceled, "canceled after duplicate submission recovery", now, turnID); err != nil {
+			return fmt.Errorf("cancel duplicate PM response %q: %w", turnID, err)
+		}
+		if _, err := db.Exec(`INSERT INTO activity VALUES(?,?,?)`, repositoryID, "duplicate PM response canceled during recovery", now); err != nil {
+			return fmt.Errorf("record duplicate PM response recovery: %w", err)
+		}
+		if _, err := db.Exec(`INSERT INTO turn_events(turn_id,event,data) VALUES(?,?,?)`, turnID, "error", `<p class="text-danger">This duplicate PM response was canceled during recovery.</p>`); err != nil {
+			return fmt.Errorf("record duplicate PM response event: %w", err)
+		}
+		log.Printf("canceled duplicate PM response for repository %q turn %q during recovery", repositoryID, turnID)
+	}
+	return rows.Err()
 }
 
 func (a *application) authorized(next http.Handler) http.Handler {
@@ -313,7 +386,7 @@ func (a *application) beginStreamingTurn(ctx context.Context, repositoryID, turn
 	defer a.turnMu.Unlock()
 
 	var activeTurn string
-	err := a.db.QueryRowContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND completed_at IS NULL LIMIT 1`, repositoryID).Scan(&activeTurn)
+	err := a.db.QueryRowContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND state IN ('pending','running') LIMIT 1`, repositoryID).Scan(&activeTurn)
 	if err == nil {
 		return errTurnInProgress
 	}
@@ -339,7 +412,7 @@ func (a *application) beginStreamingTurn(ctx context.Context, repositoryID, turn
 }
 
 func (a *application) resumePendingTurns() error {
-	rows, err := a.db.Query(`SELECT id,repository_id,prompt FROM pending_turns WHERE completed_at IS NULL`)
+	rows, err := a.db.Query(`SELECT id,repository_id,prompt FROM pending_turns WHERE state=?`, turnPending)
 	if err != nil {
 		return err
 	}
@@ -355,7 +428,7 @@ func (a *application) resumePendingTurns() error {
 }
 
 func (a *application) startTurn(repositoryID, turnID, prompt string) {
-	result, err := a.db.Exec(`UPDATE pending_turns SET started_at=? WHERE id=? AND started_at IS NULL AND completed_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
+	result, err := a.db.Exec(`UPDATE pending_turns SET started_at=?,state=? WHERE id=? AND state=?`, time.Now().UTC().Format(time.RFC3339Nano), turnRunning, turnID, turnPending)
 	if err != nil {
 		return
 	}
@@ -378,8 +451,8 @@ func (a *application) startTurn(repositoryID, turnID, prompt string) {
 func (a *application) stream(w http.ResponseWriter, r *http.Request) {
 	id, turnID := r.PathValue("id"), r.PathValue("turn")
 	var repositoryID string
-	var completedAt sql.NullString
-	err := a.db.QueryRowContext(r.Context(), `SELECT repository_id,completed_at FROM pending_turns WHERE id=?`, turnID).Scan(&repositoryID, &completedAt)
+	var state string
+	err := a.db.QueryRowContext(r.Context(), `SELECT repository_id,state FROM pending_turns WHERE id=?`, turnID).Scan(&repositoryID, &state)
 	if errors.Is(err, sql.ErrNoRows) || repositoryID != id {
 		http.NotFound(w, r)
 		return
@@ -414,7 +487,7 @@ func (a *application) stream(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Close(); err != nil {
 			return
 		}
-		if err := a.db.QueryRowContext(r.Context(), `SELECT completed_at FROM pending_turns WHERE id=?`, turnID).Scan(&completedAt); err != nil || completedAt.Valid {
+		if err := a.db.QueryRowContext(r.Context(), `SELECT state FROM pending_turns WHERE id=?`, turnID).Scan(&state); err != nil || (state != turnPending && state != turnRunning) {
 			return
 		}
 		select {
@@ -464,13 +537,17 @@ func (a *application) runTurn(ctx context.Context, repositoryID, turnID, prompt 
 			}
 		}
 	}
+	state, reason := turnCompleted, ""
 	if err != nil {
+		state, reason = turnFailed, "PM response could not be completed"
 		log.Printf("complete PM response for repository %q turn %q: %s", repositoryID, turnID, redactSecrets(err.Error()))
 		_ = a.recordTurnEvent(ctx, turnID, "error", `<p class="text-danger">The PM response could not be completed.</p><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button>`)
 	} else {
 		log.Printf("completed PM response for repository %q turn %q", repositoryID, turnID)
 	}
-	_, _ = a.db.ExecContext(ctx, `UPDATE pending_turns SET completed_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), turnID)
+	if _, updateErr := a.db.ExecContext(ctx, `UPDATE pending_turns SET state=?,terminal_reason=?,completed_at=? WHERE id=?`, state, reason, time.Now().UTC().Format(time.RFC3339Nano), turnID); updateErr != nil {
+		log.Printf("record PM response terminal state for repository %q turn %q: %s", repositoryID, turnID, redactSecrets(updateErr.Error()))
+	}
 }
 
 func (a *application) recordTurnEvent(ctx context.Context, turnID, event, data string) error {
@@ -595,7 +672,7 @@ func (a *application) conversation(ctx context.Context, id string) (Conversation
 	if err := rows.Err(); err != nil {
 		return Conversation{}, err
 	}
-	pending, err := a.db.QueryContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND completed_at IS NULL ORDER BY rowid`, id)
+	pending, err := a.db.QueryContext(ctx, `SELECT id FROM pending_turns WHERE repository_id=? AND state IN ('pending','running') ORDER BY rowid`, id)
 	if err != nil {
 		return Conversation{}, err
 	}
