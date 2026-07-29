@@ -6,3 +6,4 @@ app/.genkit/
 **/credentials*
 progress/
 worktrees/
+app/pm.db*
