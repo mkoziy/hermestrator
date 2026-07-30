@@ -218,7 +218,7 @@ func TestGitHubOAuthComposesFullDashboardLifecycle(t *testing.T) {
 	}
 }
 
-func oauthDashboardHandler(t *testing.T, secret string, app dashboard.Handler) http.Handler {
+func oauthDashboardHandler(t *testing.T, secret string, app http.Handler) http.Handler {
 	t.Helper()
 	handler, err := (GitHubOAuth{BaseURL: "http://localhost:8080", ClientID: "client-id", ClientSecret: "client-secret", JWTSecret: secret}).Wrap(app)
 	if err != nil {

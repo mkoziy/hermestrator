@@ -449,7 +449,7 @@ func TestStartupCancelsLegacyDuplicatePendingTurns(t *testing.T) {
 	}
 }
 
-func TestStartupCancelsInterruptedRunningTurn(t *testing.T) {
+func TestStartupResumesInterruptedRunningTurn(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
 	db, err := sql.Open("sqlite", database)
 	if err != nil {
@@ -468,10 +468,17 @@ func TestStartupCancelsInterruptedRunningTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: streamingFakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}})
+	model := &blockingStreamingModel{ready: make(chan struct{}), release: make(chan struct{})}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: model, Store: database, AllowedUsers: map[string]bool{"michael": true}})
+	<-model.ready
 	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
-	if page.Code != http.StatusOK || strings.Contains(page.Body.String(), "sse-connect=") || strings.Contains(page.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
-		t.Fatalf("interrupted turn should not keep the workspace locked: %d %q", page.Code, page.Body.String())
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "sse-connect=") || !strings.Contains(page.Body.String(), `id="pm-send" class="btn btn-primary" disabled`) {
+		t.Fatalf("interrupted turn was not resumed: %d %q", page.Code, page.Body.String())
+	}
+	close(model.release)
+	stream := request(t, app, http.MethodGet, streamURL(t, page.Body.String()), "", "michael")
+	if !strings.Contains(stream.Body.String(), "resumed reply") {
+		t.Fatalf("resumed turn did not complete: %q", stream.Body.String())
 	}
 
 	db, err = sql.Open("sqlite", database)
@@ -483,7 +490,7 @@ func TestStartupCancelsInterruptedRunningTurn(t *testing.T) {
 	if err := db.QueryRow(`SELECT state,terminal_reason FROM pending_turns WHERE id='interrupted'`).Scan(&state, &reason); err != nil {
 		t.Fatal(err)
 	}
-	if state != turnCanceled || reason != "canceled after PM service restart" {
+	if state != string(turnCompleted) || reason != "" {
 		t.Fatalf("interrupted turn = (%q,%q)", state, reason)
 	}
 }

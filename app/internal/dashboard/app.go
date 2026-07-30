@@ -10,23 +10,23 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mkoziy/hermestrator/internal/redaction"
 	_ "modernc.org/sqlite"
 )
 
-var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|\d{6,}:[a-z0-9_-]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
+type turnState string
 
 const (
-	turnPending   = "pending"
-	turnRunning   = "running"
-	turnCompleted = "completed"
-	turnFailed    = "failed"
-	turnCanceled  = "canceled"
+	turnPending   turnState = "pending"
+	turnRunning   turnState = "running"
+	turnCompleted turnState = "completed"
+	turnFailed    turnState = "failed"
+	turnCanceled  turnState = "canceled"
 )
 
 type Repository struct{ ID, FullName string }
@@ -101,12 +101,7 @@ type application struct {
 
 var errTurnInProgress = errors.New("PM response already in progress")
 
-type Handler interface {
-	http.Handler
-	Close() error
-}
-
-func New(deps Dependencies) (Handler, error) {
+func New(deps Dependencies) (*application, error) {
 	if deps.GitHub == nil || deps.Model == nil || deps.Store == "" {
 		return nil, errors.New("dashboard requires GitHub, model, and SQLite store")
 	}
@@ -238,7 +233,7 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 }
 
 func recoverDuplicatePendingTurns(db *sql.DB) error {
-	if err := cancelInterruptedRunningTurns(db); err != nil {
+	if err := resumeInterruptedRunningTurns(db); err != nil {
 		return err
 	}
 	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state=? ORDER BY repository_id,rowid DESC`, turnPending)
@@ -265,22 +260,27 @@ func recoverDuplicatePendingTurns(db *sql.DB) error {
 	return rows.Err()
 }
 
-func cancelInterruptedRunningTurns(db *sql.DB) error {
+func resumeInterruptedRunningTurns(db *sql.DB) error {
 	rows, err := db.Query(`SELECT id,repository_id FROM pending_turns WHERE state=?`, turnRunning)
 	if err != nil {
 		return fmt.Errorf("list interrupted PM responses for recovery: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for rows.Next() {
 		var turnID, repositoryID string
 		if err := rows.Scan(&turnID, &repositoryID); err != nil {
 			return fmt.Errorf("scan interrupted PM response for recovery: %w", err)
 		}
-		if err := cancelRecoveredTurn(db, repositoryID, turnID, "canceled after PM service restart", "interrupted PM response canceled after service restart", `<p class="text-danger">The PM response was canceled after the service restarted.</p>`, now); err != nil {
-			return err
+		if _, err := db.Exec(`UPDATE pending_turns SET state=?,started_at=NULL,completed_at=NULL,terminal_reason=NULL WHERE id=?`, turnPending, turnID); err != nil {
+			return fmt.Errorf("resume interrupted PM response %q: %w", turnID, err)
 		}
-		log.Printf("canceled interrupted PM response for repository %q turn %q after service restart", repositoryID, turnID)
+		if _, err := db.Exec(`DELETE FROM turn_events WHERE turn_id=?`, turnID); err != nil {
+			return fmt.Errorf("clear interrupted PM response events for %q: %w", turnID, err)
+		}
+		if _, err := db.Exec(`INSERT INTO activity VALUES(?,?,?)`, repositoryID, "interrupted PM response resumed after service restart", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("record interrupted PM response recovery: %w", err)
+		}
+		log.Printf("resuming interrupted PM response for repository %q turn %q after service restart", repositoryID, turnID)
 	}
 	return rows.Err()
 }
@@ -481,7 +481,7 @@ func (a *application) startTurn(repositoryID, turnID, prompt string) {
 func (a *application) stream(w http.ResponseWriter, r *http.Request) {
 	id, turnID := r.PathValue("id"), r.PathValue("turn")
 	var repositoryID string
-	var state string
+	var state turnState
 	err := a.db.QueryRowContext(r.Context(), `SELECT repository_id,state FROM pending_turns WHERE id=?`, turnID).Scan(&repositoryID, &state)
 	if errors.Is(err, sql.ErrNoRows) || repositoryID != id {
 		http.NotFound(w, r)
@@ -634,7 +634,7 @@ func (a *application) writeEvent(w http.ResponseWriter, event, data string) {
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, strings.ReplaceAll(data, "\n", "&#10;"))
 }
 
-func redactSecrets(value string) string { return secretPattern.ReplaceAllString(value, "[redacted]") }
+func redactSecrets(value string) string { return redaction.Secrets(value) }
 
 type streamTextBuffer struct{ pending string }
 

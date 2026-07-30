@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -21,10 +20,9 @@ import (
 	genkitx "github.com/firebase/genkit/go/genkit/exp"
 	"github.com/firebase/genkit/go/plugins/compat_oai"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
+	"github.com/mkoziy/hermestrator/internal/redaction"
 	"github.com/openai/openai-go"
 )
-
-var secretPattern = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|\d{6,}:[a-z0-9_-]{20,}|[a-z0-9_-]{20,}\.[a-z0-9_-]{20,}\.[a-z0-9_-]{20,})\b`)
 
 // GitHub lists repositories visible to the automation identity, never to the
 // operator's OAuth identity.
@@ -196,7 +194,7 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 	}
 }
 
-func redactSecrets(value string) string { return secretPattern.ReplaceAllString(value, "[redacted]") }
+func redactSecrets(value string) string { return redaction.Secrets(value) }
 
 func (m *OpenRouterModel) Close() error { return m.store.Close() }
 
