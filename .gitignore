@@ -1,6 +1,9 @@
 .env
+app/.bin/
+app/.genkit/
 *.env
 **/*secret*
 **/credentials*
 progress/
 worktrees/
+app/pm.db*

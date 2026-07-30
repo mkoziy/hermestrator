@@ -1,138 +1,71 @@
-# CLAUDE.md
+# AI guide
 
-Repo layout: `docker/` holds the Hermes coding-agent Docker image (Dockerfile,
-entrypoint.sh, ralphex-wrapper.sh, ralphex-headless-plan.sh); `ralphex/` holds the
-ralphex profile source configs (`ralphex-codex/`, `ralphex-pi/`,
-`ralphex-claude/` for day-to-day task execution/coding, plus a
-`-planning` variant of each — `ralphex-codex-planning/`, `ralphex-pi-planning/`,
-`ralphex-claude-planning/` — kept at the original, unreduced task effort for
-plan creation; see README "Task/coding profiles vs. planning profiles") that
-get baked into the image; `skills/` holds Agent
-Skills (`SKILL.md`, one per subdirectory) baked into the image for the
-`codex`/`pi` CLIs; `docs/plans/` holds
-implementation plans (see `20260719-hermes-docker-agent.md` for the full
-design rationale of the current image).
+Hermestrator is becoming a web-first project-management runtime. Its accepted
+architecture is recorded in [ADR 0001](docs/adr/0001-use-genkit-for-the-pm-runtime.md).
+Read that ADR, then the current
+[dashboard specification](docs/specs/20260726-genkit-pm-dashboard.md) and
+[ticket breakdown](docs/tickets/20260726-genkit-pm-dashboard.md), before making
+architecture or workflow changes.
 
-## Build / validate the Docker image
+## Current direction
 
-The `Dockerfile` lives at `docker/Dockerfile`; build context is the repo root
-(it `COPY`s `ralphex/` and `docker/*.sh`):
+- Build the PM service in Go in the `app/` module.
+- Use Genkit's Agents API for agent sessions, typed state, snapshots,
+  interrupts, background work, tools, middleware, artifacts, and telemetry.
+- Use OpenRouter through Genkit's OpenAI-compatible integration.
+- Serve the authenticated operator dashboard with `net/http`, `html/template`,
+  HTMX, and Tabler. The Genkit Developer UI is for diagnostics, not a product
+  dashboard replacement.
+- Persist Genkit sessions and operational projections in SQLite. Use a pure-Go
+  driver and WAL mode.
+- Authenticate dashboard users with `github.com/go-pkgz/auth/v2`. Keep this
+  OAuth identity separate from `GH_TOKEN`, the automation credential for GitHub
+  and git.
+- Send Telegram notifications only for action-required and terminal events.
+  They must link back to the dashboard and never mutate or approve work.
 
-```sh
-docker build -f docker/Dockerfile -t hermestrator:local .
-docker run --rm hermestrator:local hermes doctor
-docker run --rm hermestrator:local bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
-docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL3016 --ignore DL3059 --ignore SC2016 - < docker/Dockerfile   # no local hadolint binary needed
-```
+## Workflow boundaries
 
-The `hadolint/hadolint` image has no `ENTRYPOINT` and a bare `CMD ["/bin/hadolint", "-"]`,
-so any args after the image name in `docker run` *replace* that CMD instead
-of appending to it — the command above must spell out `hadolint ... -`
-explicitly (binary name + trailing `-` for stdin) or the container tries to
-exec `--ignore` itself and fails with exit 127.
+The intended workflow is:
 
-The `--ignore` flags match CI (`.github/workflows/build-and-push.yml`) and are
-deliberate, not laziness: DL3008/DL3016 (pin apt/npm package versions) are
-skipped because this image intentionally floats to latest for security
-patches and current tool releases; DL3059 (consolidate consecutive `RUN`s) is
-skipped because the `RUN` boundaries are deliberately split for layer-cache
-and build-secret scoping reasons documented inline in the Dockerfile; SC2016
-(single-quoted string won't expand `$PATH`) is skipped because that's the
-intended behavior — the `$PATH` reference must stay unexpanded at build time
-so it's written literally into the generated `/etc/profile.d` script and only
-expands when that script runs later. hadolint reads the Dockerfile over
-stdin in both CI and here, so a `.hadolint.yaml` config file would not be
-picked up — the ignores must stay on the command line.
+`grill-with-docs → to-spec → to-tickets → issue → executor selection →
+executor-owned plan → critique → plan approval → execution → verification →
+PR → code review → fixes → merge approval → merge → cleanup`.
 
-Full env-var reference, run/profile-switch instructions, and known
-limitations are in `README.md` — read that before changing runtime behavior.
+The application, not an LLM prompt, must enforce mandatory phase transitions
+and approval gates. Keep agent judgment within the phase it is executing.
 
-Self-backup of `$HERMES_HOME` (restore-on-first-start + a daily cron push to
-a git repo) is **not implemented** in this image — it was deliberately
-descoped and is planned as a separate follow-up. Don't re-add
-`HERMES_BACKUP_REPO`/`hermes-backup.sh`/backup-cron-registration wiring
-without confirming the follow-up plan first.
+When executor orchestration is introduced, invoke ralphex, Codex, and Pi
+binaries directly. Own separate ralphex configuration directories for planning
+and execution. Do not reuse `docker/ralphex-wrapper.sh`,
+`docker/ralphex-headless-plan.sh`, or other Hermes-specific orchestration.
+Ralphex owns its own plans; the PM may critique or request regeneration but
+must not rewrite them.
 
-## Non-obvious patterns established on this image (read before touching docker/*)
+## Implementation and testing
 
-**The Hermes installer puts its own app inside the state directory.** The
-installer places `hermes-agent/` (~1.6GB venv + node_modules) and `bin/`
-(private uv/uvx) INSIDE `$HERMES_HOME` (`~/.hermes`), the same directory this
-project treats as a pure persistent-state volume. A build-time seed
-(`$HOME/.hermes-seed`, `docker/Dockerfile`) plus a runtime reseed step
-(`docker/entrypoint.sh`) recreates those two subtrees on any start where
-they're missing — additive-only, atomic (copy-to-temp then `mv`, never
-`cp -a` straight into place, so a crash mid-copy can't leave a
-permanently-broken partial subtree). Roughly doubles image size
-(~5.45GB → ~7.13GB); see README "Known limitations" for the tradeoff
-rationale. Reseeding is existence-checked, not version-checked — set
-`HERMES_FORCE_RESEED=1` to force a re-copy from a rebuilt image.
+- Treat the complete `net/http` handler as the primary test seam. Use
+  `httptest` and fake GitHub, Genkit/model, session-store, and Telegram
+  adapters for vertical behavior.
+- Reserve lower-level tests for deterministic state transitions, authorization,
+  and SQLite invariants.
+- Do not store or render secrets, OAuth credentials, `GH_TOKEN`, or model API
+  keys in events, artifacts, logs, or pages.
+- Prefer Genkit facilities, then the Go standard library, before adding
+  dependencies. Pin Genkit dependencies and review upgrades deliberately: the
+  Agents API is beta.
+- Use the repository's `golang-patterns` skill for Go work. Maintain the
+  canonical `make check` validation command and the tracked pre-push hook when
+  adding project tooling.
 
-**Docker's named-volume copy-up means `$HERMES_HOME` is never empty on a
-fresh volume.** A brand-new named volume mounted at `$HERMES_HOME` is
-auto-populated by Docker with the image's own baked-in content at that path
-(documented Docker behavior) — and since `hermes-agent/`/`bin/` are baked in
-(see above), `$HERMES_HOME` is NEVER empty on a genuinely fresh named-volume
-deployment. Don't gate any future first-run detection on directory
-emptiness — if that's needed again, use a dedicated marker file instead.
+## Scope discipline
 
-**`hermes cron create --script` requires the script physically inside
-`~/.hermes/scripts/`, passed as a bare filename.** Absolute paths are
-rejected ("must be relative"); even a symlink pointing outside that directory
-is rejected ("escapes the scripts directory via traversal"). Relevant again
-if/when the deferred backup-cron follow-up (see above) registers a script-only
-cron job.
+The first vertical slice proves real GitHub login, repository registration,
+durable OpenRouter conversation streaming, telemetry, and a test Telegram
+notification. Follow the acceptance criteria in Ticket 1.
 
-**Agent Skills for codex/pi follow the same bake+reseed idiom as the Hermes
-app subtrees, but additive-per-skill instead of atomic-whole-subtree.**
-`skills/<name>/SKILL.md` (open Agent Skills format — same file works
-unmodified in Claude Code, `codex`, and `pi`) is baked into
-`/opt/agent-skills/` at build time (`docker/Dockerfile`); `entrypoint.sh`
-copies any skill missing from `~/.codex/skills/` and `~/.pi/agent/skills/`
-into place on every start. Unlike the hermes-agent reseed, this is
-unconditional on every start (not gated by `HERMES_HOME` state) and per-skill
-existence-checked rather than temp-dir+atomic-`mv`, since skill dirs are tiny
-text files, not a multi-GB venv a crash could leave half-copied. See README
-"Agent skills (codex / pi)".
-
-**`gh auth login --with-token` does not configure git's HTTPS credential
-helper.** Plain `git clone`/`git push` against a private GitHub repo over
-HTTPS needs a separate `gh auth setup-git` call right after login —
-`entrypoint.sh` does this. Without it, a valid `GH_TOKEN` still leaves
-`git clone`/`push` failing with a credential error.
-
-**Non-fatal external call idiom under `set -euo pipefail`.**
-`entrypoint.sh` runs with `set -euo pipefail`, so any unguarded fallible
-command (bad `GH_TOKEN`, an operator-supplied invalid `hermes config set`
-value, a transient network failure) crashes the entire script before
-reaching `exec hermes gateway`. The established fix, applied consistently:
-wrap the call as `if ! cmd; then warn "..."; fi` (or capture its exit
-status) so the script degrades gracefully (log a warning, keep going)
-instead of taking the whole container down. Apply this to every new
-fallible external command added to this script.
-
-**ENTRYPOINT+CMD passthrough convention.** `entrypoint.sh` always runs its
-init sequence (git identity, gh auth, hermes config, ralphex profile) first,
-then: if `docker run <image> <cmd...>` was given extra args, `exec` those
-directly; otherwise `exec hermes gateway` (never bare `hermes`, which
-launches the interactive TUI). This is what makes
-`docker run <image> hermes doctor` / `bash -lc '...'` (the plan's own
-Validation Commands) work as one-off diagnostic invocations.
-
-## CI: build/publish on tag push
-
-`.github/workflows/build-and-push.yml` triggers on any tag push: lints the
-Dockerfile (hadolint), builds the image, runs the plan's own Validation
-Commands (`hermes doctor` + the tool-version one-liner) against the built
-image, and only then pushes `ghcr.io/<owner>/hermestrator:<tag>` +
-`:latest` to GHCR — using the built-in `GITHUB_TOKEN` (`packages: write`
-permission), no PAT needed. Validation runs strictly before the push step,
-so a broken image never reaches the registry. There is still no CI on plain
-branch pushes/PRs — only tags trigger a build.
-
-## Known gaps (see README "Known limitations" for the full, current list)
-
-- No self-backup/restore of `$HERMES_HOME` — deliberately descoped, planned
-  as a separate follow-up (see above).
-- k3s/Kubernetes deployment (StatefulSet/Deployment, manifests, Secrets) is
-  explicitly out of scope for this image/plan — planned separately.
+Do not revive Hermes gateway behavior, its Docker startup wiring, or
+`$HERMES_HOME` backup work. Kubernetes deployment, executor orchestration,
+GitHub issue/PR mutations, approval flows, repository leases, clone lifecycle,
+and Telegram commands belong to later tickets unless the task explicitly
+expands scope.
