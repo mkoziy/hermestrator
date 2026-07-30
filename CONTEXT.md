@@ -12,6 +12,15 @@
 - **Intake session** — the pre-issue conversation that runs
   `grill-with-docs`, resolves vocabulary, and produces a spec and ticket
   candidates.
+- **Intake draft** — inspectable, unpublished discovery output. It may be
+  revised freely and must be discarded safely when abandoned.
+- **Confirmed specification** — a synthesized record of settled discovery
+  decisions. It is immutable for publication purposes until regenerated and
+  reconfirmed by the operator.
+- **Confirmed ticket set** — tracer-bullet vertical slices with explicit
+  blocking edges that the operator has approved for GitHub publication.
+- **ADR proposal** — an intake artifact used only when a consequential,
+  hard-to-reverse decision has a real alternative and trade-off.
 - **Workflow phase** — a deterministic PM state. The model reasons within a
   phase; it does not choose arbitrary phase transitions.
 - **Artifact** — a durable Genkit output such as a spec, ticket, plan,

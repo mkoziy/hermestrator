@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,12 +37,18 @@ type Message struct {
 	CreatedAt  time.Time
 }
 type Conversation struct {
-	RepositoryID string
-	Messages     []Message
-	PendingTurns []PendingTurn
-	HasPending   bool
-	LastReply    Reply
-	Status       Status
+	RepositoryID       string
+	RepositoryEvidence string
+	Messages           []Message
+	PendingTurns       []PendingTurn
+	HasPending         bool
+	LastReply          Reply
+	Status             Status
+}
+type Workspace struct {
+	Conversation
+	Intake    IntakeStatus
+	Artifacts []Artifact
 }
 type PendingTurn struct {
 	TurnID, RepositoryID string
@@ -53,6 +61,82 @@ type Reply struct {
 	CostUSD float64
 }
 type Notification struct{ Text, URL string }
+
+// Publication is a confirmed, English-language GitHub issue candidate. It is
+// intentionally separate from GitHub repository discovery: listing uses the
+// automation identity while publishing is available only after the dashboard
+// has enforced its confirmation gate.
+type Publication struct {
+	Title, Body string
+	BlockedBy   []int
+}
+
+type PublishedIssue struct {
+	Number int
+	URL    string
+}
+
+// Publisher owns the only tracker mutation available in the intake slice.
+// Implementations must not publish an unconfirmed draft.
+type Publisher interface {
+	Publish(context.Context, Repository, []Publication) ([]PublishedIssue, error)
+}
+
+// Intake creates an isolated, read-only discovery clone and promotes it only
+// after issue publication. It never receives executor authority.
+type Intake interface {
+	Start(context.Context, Repository) (string, error)
+	Promote(context.Context, string, PublishedIssue) (string, error)
+	Cleanup(context.Context, string) error
+}
+
+// ContextUpdater is deliberately optional: it is the sole documentation write
+// capability granted to an intake clone, never a production-code writer.
+type ContextUpdater interface {
+	UpdateContext(context.Context, string, string) error
+}
+
+// Inspector supplies read-only repository facts for discovery. It is kept
+// distinct from ContextUpdater so inspection never implies write authority.
+type Inspector interface {
+	Inspect(context.Context, string) (string, error)
+}
+
+type artifactKind string
+
+const (
+	artifactGlossary artifactKind = "glossary"
+	artifactADR      artifactKind = "adr-proposal"
+	artifactSpec     artifactKind = "spec"
+	artifactTickets  artifactKind = "tickets"
+)
+
+type Artifact struct {
+	Kind      artifactKind
+	Body      string
+	Confirmed bool
+	URL       string
+}
+
+type intakeState string
+
+const (
+	intakeDraft      intakeState = "draft"
+	intakeConfirmed  intakeState = "confirmed"
+	intakePublishing intakeState = "publishing"
+	intakePromoting  intakeState = "promoting"
+	intakeAbandoning intakeState = "abandoning"
+	intakePublished  intakeState = "published"
+	intakeAbandoned  intakeState = "abandoned"
+)
+
+type IntakeStatus struct {
+	State           intakeState
+	Path            string
+	MessageStart    int64
+	PublishedIssue  PublishedIssue
+	PublishedIssues []PublishedIssue
+}
 
 // GitHub is deliberately the small automation boundary used by the handler.
 type GitHub interface {
@@ -81,6 +165,8 @@ type Dependencies struct {
 	GitHub       GitHub
 	Model        Model
 	Telegram     Telegram
+	Publisher    Publisher
+	Intake       Intake
 	Store        string
 	AllowedUsers map[string]bool
 	DashboardURL string
@@ -115,7 +201,10 @@ func New(deps Dependencies) (*application, error) {
 		CREATE TABLE IF NOT EXISTS messages (repository_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, tokens INTEGER, cost_usd REAL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS activity (repository_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT, state TEXT NOT NULL DEFAULT 'pending', terminal_reason TEXT);
-		CREATE TABLE IF NOT EXISTS turn_events (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL);`); err != nil {
+		CREATE TABLE IF NOT EXISTS turn_events (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS intakes (repository_id TEXT PRIMARY KEY, state TEXT NOT NULL, clone_path TEXT NOT NULL DEFAULT '', inspection TEXT NOT NULL DEFAULT '', message_start INTEGER NOT NULL DEFAULT 0, issue_number INTEGER, issue_url TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS intake_artifacts (repository_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, confirmed_at TEXT, url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, PRIMARY KEY(repository_id, kind));
+		CREATE TABLE IF NOT EXISTS intake_issues (repository_id TEXT NOT NULL, ticket_index INTEGER NOT NULL, issue_number INTEGER NOT NULL, issue_url TEXT NOT NULL, PRIMARY KEY(repository_id, ticket_index));`); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -150,6 +239,22 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "inspection", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "issue_number", "INTEGER"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "issue_url", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "message_start", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err = recoverDuplicatePendingTurns(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -172,6 +277,12 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("GET /repositories/{id}", a.workspace)
 	mux.HandleFunc("POST /repositories/{id}/conversation", a.converse)
 	mux.HandleFunc("GET /repositories/{id}/conversation/{turn}/stream", a.stream)
+	mux.HandleFunc("POST /repositories/{id}/intake/start", a.startIntake)
+	mux.HandleFunc("POST /repositories/{id}/intake/synthesize", a.synthesizeIntake)
+	mux.HandleFunc("POST /repositories/{id}/intake/adr", a.proposeADR)
+	mux.HandleFunc("POST /repositories/{id}/intake/{artifact}/confirm", a.confirmArtifact)
+	mux.HandleFunc("POST /repositories/{id}/intake/publish", a.publishIntake)
+	mux.HandleFunc("POST /repositories/{id}/intake/abandon", a.abandonIntake)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
 	if err := a.resumePendingTurns(); err != nil {
@@ -352,7 +463,20 @@ func (a *application) workspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.render(w, "workspace", c)
+	intake, err := a.intakeStatus(r.Context(), c.RepositoryID)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	artifacts, err := a.artifacts(r.Context(), c.RepositoryID)
+	if err != nil {
+		http.Error(w, "could not load intake artifacts", http.StatusInternalServerError)
+		return
+	}
+	for _, issue := range intake.PublishedIssues {
+		artifacts = append(artifacts, Artifact{Kind: artifactKind(fmt.Sprintf("GitHub issue #%d", issue.Number)), URL: issue.URL})
+	}
+	a.render(w, "workspace", Workspace{Conversation: c, Intake: intake, Artifacts: artifacts})
 }
 func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -671,17 +795,585 @@ func (a *application) testNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
+	repo, err := a.repository(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), repo.ID)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.State != "" && status.State != intakeAbandoned {
+		http.Error(w, "an intake is already active for this repository", http.StatusConflict)
+		return
+	}
+	path := ""
+	persisted := false
+	defer func() {
+		if !persisted && a.deps.Intake != nil && path != "" {
+			if err := a.deps.Intake.Cleanup(r.Context(), path); err != nil {
+				log.Printf("clean unpersisted intake for repository %q: %s", repo.ID, redactSecrets(err.Error()))
+			}
+		}
+	}()
+	if a.deps.Intake != nil {
+		path, err = a.deps.Intake.Start(r.Context(), repo)
+		if err != nil {
+			log.Printf("start isolated intake for repository %q: %s", repo.ID, redactSecrets(err.Error()))
+			http.Error(w, "could not start isolated intake", http.StatusBadGateway)
+			return
+		}
+	}
+	inspection := ""
+	if inspector, ok := a.deps.Intake.(Inspector); ok && path != "" {
+		inspection, err = inspector.Inspect(r.Context(), path)
+		if err != nil {
+			log.Printf("inspect isolated intake for repository %q: %s", repo.ID, redactSecrets(err.Error()))
+			http.Error(w, "could not inspect isolated intake", http.StatusBadGateway)
+			return
+		}
+	}
+	inspection = redactSecrets(inspection)
+	var messageStart int64
+	if err = a.db.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE repository_id=?`, repo.ID).Scan(&messageStart); err != nil {
+		http.Error(w, "could not prepare intake", http.StatusInternalServerError)
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "could not persist intake", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,state,clone_path,inspection,message_start,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET state=excluded.state,clone_path=excluded.clone_path,inspection=excluded.inspection,message_start=excluded.message_start,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeDraft, path, inspection, messageStart, nil, "", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		http.Error(w, "could not persist intake", http.StatusInternalServerError)
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM intake_artifacts WHERE repository_id=?`, repo.ID); err != nil {
+		http.Error(w, "could not discard previous intake drafts", http.StatusInternalServerError)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "could not persist intake", http.StatusInternalServerError)
+		return
+	}
+	persisted = true
+	a.redirectWorkspace(w, r, repo.ID)
+}
+
+// synthesizeIntake turns already-settled conversation into inspectable drafts;
+// it deliberately does not send another discovery question or mutate GitHub.
+func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
+	repo, err := a.repository(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), repo.ID)
+	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
+		http.Error(w, "start an active intake before synthesizing artifacts", http.StatusConflict)
+		return
+	}
+	conversation, err := a.conversationAfter(r.Context(), repo.ID, status.MessageStart)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !discoveryComplete(conversation) {
+		http.Error(w, "complete one focused discovery exchange before synthesizing artifacts", http.StatusConflict)
+		return
+	}
+	artifacts := synthesizeArtifacts(repo, conversation)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "could not create drafts", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, artifact := range artifacts {
+		if _, err = tx.ExecContext(r.Context(), `INSERT INTO intake_artifacts(repository_id,kind,body,confirmed_at,url,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,confirmed_at=NULL,url='',created_at=excluded.created_at`, repo.ID, artifact.Kind, artifact.Body, nil, "", now); err != nil {
+			http.Error(w, "could not persist drafts", http.StatusInternalServerError)
+			return
+		}
+	}
+	if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=?`, intakeDraft, now, repo.ID); err != nil {
+		http.Error(w, "could not update intake", http.StatusInternalServerError)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "could not save drafts", http.StatusInternalServerError)
+		return
+	}
+	if updater, ok := a.deps.Intake.(ContextUpdater); ok && status.Path != "" {
+		for _, artifact := range artifacts {
+			if artifact.Kind == artifactGlossary {
+				if err = updater.UpdateContext(r.Context(), status.Path, artifact.Body); err != nil {
+					log.Printf("update intake context for repository %q: %s", repo.ID, redactSecrets(err.Error()))
+					http.Error(w, "could not update intake glossary", http.StatusInternalServerError)
+					return
+				}
+				break
+			}
+		}
+	}
+	a.redirectWorkspace(w, r, repo.ID)
+}
+
+func (a *application) confirmArtifact(w http.ResponseWriter, r *http.Request) {
+	id, kind := r.PathValue("id"), artifactKind(r.PathValue("artifact"))
+	if kind != artifactSpec && kind != artifactTickets {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := a.repository(r.Context(), id); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "could not confirm artifact", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(r.Context(), `UPDATE intake_artifacts SET confirmed_at=? WHERE repository_id=? AND kind=? AND EXISTS (SELECT 1 FROM intakes WHERE repository_id=? AND state=?)`, time.Now().UTC().Format(time.RFC3339Nano), id, kind, id, intakeDraft)
+	if err != nil {
+		http.Error(w, "could not confirm artifact", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "artifact draft required before confirmation", http.StatusConflict)
+		return
+	}
+	var confirmations int
+	if err = tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM intake_artifacts WHERE repository_id=? AND kind IN (?,?) AND confirmed_at IS NOT NULL`, id, artifactSpec, artifactTickets).Scan(&confirmations); err != nil {
+		http.Error(w, "could not confirm artifact", http.StatusInternalServerError)
+		return
+	}
+	if confirmations == 2 {
+		if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeConfirmed, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
+			http.Error(w, "could not record intake confirmation", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "could not record intake confirmation", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) proposeADR(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
+		http.Error(w, "an active intake is required for an ADR proposal", http.StatusConflict)
+		return
+	}
+	if err = r.ParseForm(); err != nil {
+		http.Error(w, "invalid ADR proposal", http.StatusBadRequest)
+		return
+	}
+	decision := strings.TrimSpace(redactSecrets(r.Form.Get("decision")))
+	alternative := strings.TrimSpace(redactSecrets(r.Form.Get("alternative")))
+	tradeoff := strings.TrimSpace(redactSecrets(r.Form.Get("tradeoff")))
+	if decision == "" || alternative == "" || tradeoff == "" {
+		http.Error(w, "an ADR needs a decision, alternative, and trade-off", http.StatusBadRequest)
+		return
+	}
+	body := "# ADR proposal\n\n## Decision\n\n" + decision + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff
+	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,confirmed_at=NULL,url='',created_at=excluded.created_at`, id, artifactADR, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		http.Error(w, "could not save ADR proposal", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if a.deps.Publisher == nil {
+		http.Error(w, "GitHub issue publisher is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.State == intakePromoting {
+		a.promotePublishedIntake(w, r, id, status)
+		return
+	}
+	if status.State != intakeConfirmed {
+		http.Error(w, "a confirmed intake is required before publishing", http.StatusConflict)
+		return
+	}
+	if !a.confirmed(r.Context(), id, artifactSpec) || !a.confirmed(r.Context(), id, artifactTickets) {
+		http.Error(w, "a confirmed intake is required before publishing", http.StatusConflict)
+		return
+	}
+	claimed, err := a.claimPublication(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not claim intake publication", http.StatusInternalServerError)
+		return
+	}
+	if !claimed {
+		http.Error(w, "intake publication is already in progress", http.StatusConflict)
+		return
+	}
+	spec, err := a.artifact(r.Context(), id, artifactSpec)
+	if err != nil {
+		_ = a.releasePublication(r.Context(), id)
+		http.Error(w, "specification draft unavailable", http.StatusConflict)
+		return
+	}
+	tickets, err := a.artifact(r.Context(), id, artifactTickets)
+	if err != nil {
+		_ = a.releasePublication(r.Context(), id)
+		http.Error(w, "ticket draft unavailable", http.StatusConflict)
+		return
+	}
+	publications, err := ticketSetPublications(tickets.Body)
+	if err != nil {
+		_ = a.releasePublication(r.Context(), id)
+		http.Error(w, "ticket draft is not publishable", http.StatusConflict)
+		return
+	}
+	published, err := a.publishedIntakeIssues(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load published tickets", http.StatusInternalServerError)
+		return
+	}
+	for index, publication := range publications {
+		if index < len(published) {
+			continue
+		}
+		resolvedBlockers := make([]string, 0, len(publication.BlockedBy))
+		for _, blocker := range publication.BlockedBy {
+			if blocker < 1 || blocker > len(published) {
+				_ = a.deferPublication(r.Context(), id)
+				http.Error(w, "ticket blocker was not published", http.StatusConflict)
+				return
+			}
+			resolvedBlockers = append(resolvedBlockers, "#"+strconv.Itoa(published[blocker-1].Number))
+		}
+		publication.Body = ticketBlockers.ReplaceAllString(publication.Body, "Blocked by: "+strings.Join(resolvedBlockers, ", "))
+		publication.BlockedBy = nil
+		publication.Body = "## Confirmed specification\n\n" + spec.Body + "\n\n## Confirmed ticket\n\n" + publication.Body
+		issues, publishErr := a.deps.Publisher.Publish(r.Context(), repo, []Publication{publication})
+		if len(issues) == 1 {
+			if err = a.recordPublishedTicket(r.Context(), id, index+1, issues[0]); err != nil {
+				http.Error(w, "ticket was published but could not be recorded", http.StatusInternalServerError)
+				return
+			}
+			published = append(published, issues[0])
+		}
+		if publishErr != nil || len(issues) != 1 {
+			_ = a.deferPublication(r.Context(), id)
+			if publishErr != nil {
+				log.Printf("publish intake for repository %q: %s", id, redactSecrets(publishErr.Error()))
+			}
+			http.Error(w, "could not publish GitHub tickets", http.StatusBadGateway)
+			return
+		}
+	}
+	issues := published
+	if err = a.recordPublishedIssues(r.Context(), id, issues); err != nil {
+		http.Error(w, "ticket was published but could not be recorded", http.StatusInternalServerError)
+		return
+	}
+	status.PublishedIssue = issues[0]
+	status.State = intakePromoting
+	a.promotePublishedIntake(w, r, id, status)
+}
+
+func (a *application) recordPublishedTicket(ctx context.Context, id string, ticketIndex int, issue PublishedIssue) error {
+	_, err := a.db.ExecContext(ctx, `INSERT INTO intake_issues(repository_id,ticket_index,issue_number,issue_url) VALUES(?,?,?,?) ON CONFLICT(repository_id,ticket_index) DO NOTHING`, id, ticketIndex, issue.Number, issue.URL)
+	return err
+}
+
+func (a *application) publishedIntakeIssues(ctx context.Context, id string) ([]PublishedIssue, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT issue_number,issue_url FROM intake_issues WHERE repository_id=? ORDER BY ticket_index`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var issues []PublishedIssue
+	for rows.Next() {
+		var issue PublishedIssue
+		if err := rows.Scan(&issue.Number, &issue.URL); err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+func (a *application) claimPublication(ctx context.Context, id string) (bool, error) {
+	result, err := a.db.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakePublishing, time.Now().UTC().Format(time.RFC3339Nano), id, intakeConfirmed)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+func (a *application) releasePublication(ctx context.Context, id string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeConfirmed, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing)
+	return err
+}
+
+func (a *application) deferPublication(ctx context.Context, id string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeConfirmed, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing)
+	return err
+}
+
+func (a *application) recordPublishedIssues(ctx context.Context, id string, issues []PublishedIssue) error {
+	if len(issues) == 0 {
+		return errors.New("at least one published issue is required")
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE intakes SET state=?,issue_number=?,issue_url=?,updated_at=? WHERE repository_id=? AND state=?`, intakePromoting, issues[0].Number, issues[0].URL, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("intake publication state changed before the issue could be recorded")
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE intake_artifacts SET url=? WHERE repository_id=? AND kind=?`, issues[0].URL, id, artifactTickets); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM intake_issues WHERE repository_id=?`, id); err != nil {
+		return err
+	}
+	for index, issue := range issues {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO intake_issues(repository_id,ticket_index,issue_number,issue_url) VALUES(?,?,?,?)`, id, index+1, issue.Number, issue.URL); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *application) promotePublishedIntake(w http.ResponseWriter, r *http.Request, id string, status IntakeStatus) {
+	if status.PublishedIssue.Number <= 0 || status.PublishedIssue.URL == "" {
+		http.Error(w, "published ticket details are unavailable", http.StatusInternalServerError)
+		return
+	}
+	promotedPath := status.Path
+	var err error
+	if a.deps.Intake != nil && status.Path != "" {
+		promotedPath, err = a.deps.Intake.Promote(r.Context(), status.Path, status.PublishedIssue)
+		if err != nil {
+			log.Printf("promote intake for repository %q: %s", id, redactSecrets(err.Error()))
+			http.Error(w, "ticket was published; retry to complete intake promotion", http.StatusInternalServerError)
+			return
+		}
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET state=?,clone_path=?,updated_at=? WHERE repository_id=? AND state=?`, intakePublished, promotedPath, time.Now().UTC().Format(time.RFC3339Nano), id, intakePromoting)
+	if err != nil {
+		log.Printf("record promoted intake workspace for repository %q: %s", id, redactSecrets(err.Error()))
+		http.Error(w, "ticket was published but promotion could not be recorded", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "ticket was published but promotion state changed", http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) abandonIntake(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
+		http.Error(w, "only unpublished intakes can be abandoned", http.StatusConflict)
+		return
+	}
+	claimed, err := a.claimAbandonment(r.Context(), id, status.State)
+	if err != nil {
+		http.Error(w, "could not claim intake abandonment", http.StatusInternalServerError)
+		return
+	}
+	if !claimed {
+		http.Error(w, "intake state changed before abandonment", http.StatusConflict)
+		return
+	}
+	if a.deps.Intake != nil && status.Path != "" {
+		if err = a.deps.Intake.Cleanup(r.Context(), status.Path); err != nil {
+			_ = a.releaseAbandonment(r.Context(), id, status.State)
+			log.Printf("clean abandoned intake for repository %q: %s", id, redactSecrets(err.Error()))
+			http.Error(w, "could not clean abandoned intake", http.StatusInternalServerError)
+			return
+		}
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET state=?,clone_path='',updated_at=? WHERE repository_id=? AND state=?`, intakeAbandoned, time.Now().UTC().Format(time.RFC3339Nano), id, intakeAbandoning)
+	if err != nil {
+		http.Error(w, "could not abandon intake", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "intake state changed before abandonment", http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) claimAbandonment(ctx context.Context, id string, state intakeState) (bool, error) {
+	result, err := a.db.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeAbandoning, time.Now().UTC().Format(time.RFC3339Nano), id, state)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+func (a *application) releaseAbandonment(ctx context.Context, id string, state intakeState) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id, intakeAbandoning)
+	return err
+}
+
+func (a *application) redirectWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	http.Redirect(w, r, "/repositories/"+url.PathEscape(id), http.StatusSeeOther)
+}
+
+func synthesizeArtifacts(repo Repository, conversation Conversation) []Artifact {
+	resolved := grillWithDocs(conversation)
+	return []Artifact{
+		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
+		{Kind: artifactSpec, Body: toSpec(repo, resolved)},
+		{Kind: artifactTickets, Body: toTickets(repo, resolved)},
+	}
+}
+
+// grillWithDocs is the bounded discovery capability. It accepts only settled
+// operator decisions from completed discovery turns; repository evidence stays
+// outside the synthesized artifacts unless the operator adopts it explicitly.
+func grillWithDocs(conversation Conversation) []string {
+	var resolved []string
+	for index, message := range conversation.Messages {
+		if message.Role == "operator" {
+			if index+1 < len(conversation.Messages) && conversation.Messages[index+1].Role == "pm" {
+				resolved = append(resolved, "- "+redactSecrets(message.Text))
+			}
+		}
+	}
+	if len(resolved) == 0 {
+		resolved = []string{"- No operator decisions have been recorded yet."}
+	}
+	return resolved
+}
+
+func discoveryComplete(conversation Conversation) bool {
+	for index, message := range conversation.Messages {
+		if message.Role == "operator" && index+1 < len(conversation.Messages) && conversation.Messages[index+1].Role == "pm" {
+			return true
+		}
+	}
+	return false
+}
+
+func glossaryArtifact(resolved []string) string {
+	return "# Glossary updates\n\n- **Intake draft** — unconfirmed discovery output for a repository.\n- **Confirmed ticket set** — vertical slices approved by the operator before GitHub publication.\n\n## Settled terms\n\n" + strings.Join(resolved, "\n")
+}
+
+func toSpec(repo Repository, resolved []string) string {
+	return "# Spec: " + repo.FullName + " intake\n\n## Resolved conversation\n\n" + strings.Join(resolved, "\n") + "\n\n## Scope\n\nImplement the smallest vertical slice that satisfies the resolved conversation.\n\n## Non-goals\n\nDo not expand beyond the confirmed intake."
+}
+
+func toTickets(repo Repository, resolved []string) string {
+	return "# Ticket set: " + repo.FullName + "\n\n## Ticket 1: deliver the confirmed vertical slice\n\nBlocked by: none\n\n### Acceptance criteria\n\n" + strings.Join(resolved, "\n") + "\n\nThis ticket is intentionally a tracer-bullet slice: it crosses the relevant product seam end to end."
+}
+
+var ticketHeading = regexp.MustCompile(`(?m)^## Ticket ([1-9][0-9]*):\s*(.+)$`)
+var ticketBlockers = regexp.MustCompile(`(?m)^Blocked by:\s*(.+)$`)
+var ticketReference = regexp.MustCompile(`^Ticket ([1-9][0-9]*)$`)
+
+func ticketSetPublications(body string) ([]Publication, error) {
+	matches := ticketHeading.FindAllStringSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		return nil, errors.New("ticket set has no ticket headings")
+	}
+	publications := make([]Publication, 0, len(matches))
+	for index, match := range matches {
+		end := len(body)
+		if index+1 < len(matches) {
+			end = matches[index+1][0]
+		}
+		section := strings.TrimSpace(body[match[0]:end])
+		number, err := strconv.Atoi(body[match[2]:match[3]])
+		if err != nil {
+			return nil, fmt.Errorf("parse ticket number: %w", err)
+		}
+		if number != index+1 {
+			return nil, fmt.Errorf("ticket numbers must be consecutive starting at 1")
+		}
+		title := strings.TrimSpace(body[match[4]:match[5]])
+		if title == "" {
+			return nil, fmt.Errorf("ticket %d has no title", number)
+		}
+		blocker := ticketBlockers.FindStringSubmatch(section)
+		if len(blocker) != 2 {
+			return nil, fmt.Errorf("ticket %d has no blocking edge", number)
+		}
+		publication := Publication{Title: "feat: " + title, Body: section}
+		if strings.TrimSpace(blocker[1]) != "none" {
+			for _, reference := range strings.Split(blocker[1], ",") {
+				parts := ticketReference.FindStringSubmatch(strings.TrimSpace(reference))
+				if len(parts) != 2 {
+					return nil, fmt.Errorf("ticket %d has invalid blocker %q", number, reference)
+				}
+				blockedBy, err := strconv.Atoi(parts[1])
+				if err != nil {
+					return nil, fmt.Errorf("parse blocker for ticket %d: %w", number, err)
+				}
+				if blockedBy >= number {
+					return nil, fmt.Errorf("ticket %d must only depend on an earlier ticket", number)
+				}
+				publication.BlockedBy = append(publication.BlockedBy, blockedBy)
+			}
+		}
+		publications = append(publications, publication)
+	}
+	return publications, nil
+}
 func (a *application) conversation(ctx context.Context, id string) (Conversation, error) {
+	return a.conversationAfter(ctx, id, 0)
+}
+
+func (a *application) conversationAfter(ctx context.Context, id string, messageStart int64) (Conversation, error) {
 	var exists string
 	if err := a.db.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id=?`, id).Scan(&exists); err != nil {
 		return Conversation{}, err
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT role,text,tokens,cost_usd,created_at FROM messages WHERE repository_id=? ORDER BY rowid`, id)
+	rows, err := a.db.QueryContext(ctx, `SELECT role,text,tokens,cost_usd,created_at FROM messages WHERE repository_id=? AND rowid>? ORDER BY rowid`, id, messageStart)
 	if err != nil {
 		return Conversation{}, err
 	}
 	defer func() { _ = rows.Close() }()
 	c := Conversation{RepositoryID: id}
+	if err := a.db.QueryRowContext(ctx, `SELECT inspection FROM intakes WHERE repository_id=?`, id).Scan(&c.RepositoryEvidence); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, fmt.Errorf("load repository inspection: %w", err)
+	}
 	for rows.Next() {
 		var m Message
 		var created string
@@ -718,6 +1410,80 @@ func (a *application) conversation(ctx context.Context, id string) (Conversation
 	c.HasPending = len(c.PendingTurns) > 0
 	return c, pending.Err()
 }
+
+func (a *application) repository(ctx context.Context, id string) (Repository, error) {
+	var repo Repository
+	err := a.db.QueryRowContext(ctx, `SELECT id,full_name FROM repositories WHERE id=?`, id).Scan(&repo.ID, &repo.FullName)
+	if err != nil {
+		return Repository{}, err
+	}
+	return repo, nil
+}
+
+func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus, error) {
+	var status IntakeStatus
+	var number sql.NullInt64
+	err := a.db.QueryRowContext(ctx, `SELECT state,clone_path,message_start,issue_number,issue_url FROM intakes WHERE repository_id=?`, id).Scan(&status.State, &status.Path, &status.MessageStart, &number, &status.PublishedIssue.URL)
+	status.PublishedIssue.Number = int(number.Int64)
+	if errors.Is(err, sql.ErrNoRows) {
+		return IntakeStatus{}, nil
+	}
+	if err != nil {
+		return IntakeStatus{}, err
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT issue_number,issue_url FROM intake_issues WHERE repository_id=? ORDER BY ticket_index`, id)
+	if err != nil {
+		return IntakeStatus{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var issue PublishedIssue
+		if err := rows.Scan(&issue.Number, &issue.URL); err != nil {
+			return IntakeStatus{}, err
+		}
+		status.PublishedIssues = append(status.PublishedIssues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return IntakeStatus{}, err
+	}
+	if len(status.PublishedIssues) == 0 && status.PublishedIssue.Number > 0 {
+		status.PublishedIssues = []PublishedIssue{status.PublishedIssue}
+	}
+	return status, nil
+}
+
+func (a *application) artifacts(ctx context.Context, id string) ([]Artifact, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT kind,body,confirmed_at,url FROM intake_artifacts WHERE repository_id=? ORDER BY CASE kind WHEN 'glossary' THEN 1 WHEN 'adr-proposal' THEN 2 WHEN 'spec' THEN 3 WHEN 'tickets' THEN 4 ELSE 5 END`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var artifacts []Artifact
+	for rows.Next() {
+		var artifact Artifact
+		var confirmed sql.NullString
+		if err := rows.Scan(&artifact.Kind, &artifact.Body, &confirmed, &artifact.URL); err != nil {
+			return nil, err
+		}
+		artifact.Confirmed = confirmed.Valid
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, rows.Err()
+}
+
+func (a *application) artifact(ctx context.Context, id string, kind artifactKind) (Artifact, error) {
+	var artifact Artifact
+	var confirmed sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT kind,body,confirmed_at,url FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, kind).Scan(&artifact.Kind, &artifact.Body, &confirmed, &artifact.URL)
+	artifact.Confirmed = confirmed.Valid
+	return artifact, err
+}
+
+func (a *application) confirmed(ctx context.Context, id string, kind artifactKind) bool {
+	var confirmed sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT confirmed_at FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, kind).Scan(&confirmed)
+	return err == nil && confirmed.Valid
+}
 func (a *application) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := a.templates.ExecuteTemplate(w, name, data); err != nil {
@@ -726,7 +1492,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form><form class="card card-body mt-3" method="post" action="/repositories/{{.RepositoryID}}/intake/adr"><label>Decision <input class="form-control" name="decision" required></label><label>Alternative <input class="form-control" name="alternative" required></label><label>Trade-off <input class="form-control" name="tradeoff" required></label><button class="btn btn-outline-primary mt-2">Propose ADR</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and (or (eq .Kind "spec") (eq .Kind "tickets")) (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
 {{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
 {{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`

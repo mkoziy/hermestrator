@@ -153,7 +153,7 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 				state.LastActivity = "discovery turn in progress"
 				return state
 			})
-			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager. Ask one focused discovery question at a time.")}, session.Messages()...)
+			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager conducting discovery. Ask one focused question at a time. Treat repository evidence as already-resolved facts: do not ask the operator questions that evidence answers. Do not write code, publish issues, or choose a workflow phase.")}, session.Messages()...)
 			messages = append(messages, input.Message)
 			var reason aix.AgentFinishReason
 			for result, err := range genkit.GenerateStream(ctx, g,
@@ -227,6 +227,9 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 		return dashboard.Reply{}, fmt.Errorf("connect Genkit PM agent: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	if conversation.RepositoryEvidence != "" {
+		prompt = "Repository evidence from a read-only isolated clone:\n" + conversation.RepositoryEvidence + "\n\nOperator message:\n" + prompt
+	}
 	if err := conn.SendText(prompt); err != nil {
 		return dashboard.Reply{}, fmt.Errorf("send Genkit PM turn: %w", err)
 	}

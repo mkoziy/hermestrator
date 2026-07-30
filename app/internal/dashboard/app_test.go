@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,39 @@ func (f *fakeTelegram) Notify(_ context.Context, notification Notification) erro
 type failingTelegram struct{ err error }
 
 func (f failingTelegram) Notify(context.Context, Notification) error { return f.err }
+
+type fakePublisher struct {
+	publications []Publication
+	issues       []PublishedIssue
+}
+
+func (f *fakePublisher) Publish(_ context.Context, _ Repository, publications []Publication) ([]PublishedIssue, error) {
+	f.publications = append(f.publications, publications...)
+	return f.issues, nil
+}
+
+type fakeIntake struct {
+	started, promoted, cleaned []string
+	promoteErr                 error
+}
+
+func (f *fakeIntake) Start(_ context.Context, _ Repository) (string, error) {
+	f.started = append(f.started, "/tmp/intake-42")
+	return "/tmp/intake-42", nil
+}
+
+func (f *fakeIntake) Promote(_ context.Context, path string, issue PublishedIssue) (string, error) {
+	f.promoted = append(f.promoted, path)
+	if f.promoteErr != nil {
+		return "", f.promoteErr
+	}
+	return "/tmp/issues/" + strconv.Itoa(issue.Number), nil
+}
+
+func (f *fakeIntake) Cleanup(_ context.Context, path string) error {
+	f.cleaned = append(f.cleaned, path)
+	return nil
+}
 
 func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
 	app := mustApp(t, Dependencies{
@@ -186,6 +220,156 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 	}
 	if !strings.Contains(page.Body.String(), "Elapsed: 12s") || !strings.Contains(page.Body.String(), "awaiting operator") {
 		t.Fatalf("durable agent status missing: %q", page.Body.String())
+	}
+}
+
+func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
+	intake := &fakeIntake{}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: intake, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app := mustApp(t, deps)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("start intake status = %d", response.Code)
+	}
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("synthesize status = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusConflict {
+		t.Fatalf("unconfirmed publish status = %d", response.Code)
+	}
+	for _, artifact := range []string{"spec", "tickets"} {
+		if response := request(t, app, http.MethodPost, "/repositories/42/intake/"+artifact+"/confirm", "", "michael"); response.Code != http.StatusSeeOther {
+			t.Fatalf("confirm %s status = %d", artifact, response.Code)
+		}
+	}
+
+	restarted := mustApp(t, deps)
+	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	for _, want := range []string{"Tracked-work intake", "confirmed", "Glossary updates", "operators can create projects"} {
+		if !strings.Contains(workspace.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, workspace.Body.String())
+		}
+	}
+	if response := request(t, restarted, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("publish status = %d", response.Code)
+	}
+	if len(publisher.publications) != 1 || !strings.HasPrefix(publisher.publications[0].Title, "feat: ") {
+		t.Fatalf("published issues = %#v", publisher.publications)
+	}
+	if len(intake.promoted) != 1 || intake.promoted[0] != "/tmp/intake-42" {
+		t.Fatalf("intake promotion = %#v", intake.promoted)
+	}
+}
+
+func TestAbandonIntakeCleansOnlyUnpublishedDraft(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael")
+	if response.Code != http.StatusSeeOther || len(intake.cleaned) != 1 || intake.cleaned[0] != "/tmp/intake-42" {
+		t.Fatalf("abandon = %d cleaned=%#v", response.Code, intake.cleaned)
+	}
+}
+
+func TestAbandonedIntakeCannotConfirmOrPublishStaleArtifacts(t *testing.T) {
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael")
+
+	for _, path := range []string{"/repositories/42/intake/spec/confirm", "/repositories/42/intake/tickets/confirm", "/repositories/42/intake/publish"} {
+		if response := request(t, app, http.MethodPost, path, "", "michael"); response.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d", path, response.Code)
+		}
+	}
+	if len(publisher.publications) != 0 {
+		t.Fatalf("stale artifacts were published: %#v", publisher.publications)
+	}
+}
+
+func TestIntakeRequiresACompletedDiscoveryExchangeBeforeSynthesis(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusConflict {
+		t.Fatalf("synthesize without discovery status = %d", response.Code)
+	}
+}
+
+func TestIntakeDoesNotCreateAnotherCloneWhileOneIsActive(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	if response.Code != http.StatusConflict || len(intake.started) != 1 {
+		t.Fatalf("second start = %d started=%#v", response.Code, intake.started)
+	}
+}
+
+func TestPublishedIntakeRetriesPromotionWithoutPublishingAnotherIssue(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
+	intake := &fakeIntake{promoteErr: errors.New("workspace unavailable")}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: intake, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app := mustApp(t, deps)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/tickets/confirm", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed promotion = %d", response.Code)
+	}
+	intake.promoteErr = nil
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("retried promotion = %d", response.Code)
+	}
+	if len(publisher.publications) != 1 {
+		t.Fatalf("published %d times", len(publisher.publications))
+	}
+}
+
+func TestDraftIntakeRendersADRProposalForm(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Propose ADR") {
+		t.Fatalf("ADR form missing: %q", workspace.Body.String())
+	}
+}
+
+func TestTicketSetPublicationsPreserveBlockingEdges(t *testing.T) {
+	publications, err := ticketSetPublications("# Ticket set\n\n## Ticket 1: establish the seam\n\nBlocked by: none\n\n## Ticket 2: finish the workflow\n\nBlocked by: Ticket 1")
+	if err != nil {
+		t.Fatalf("parse ticket set: %v", err)
+	}
+	if len(publications) != 2 || publications[0].Title != "feat: establish the seam" || len(publications[1].BlockedBy) != 1 || publications[1].BlockedBy[0] != 1 {
+		t.Fatalf("publications = %#v", publications)
 	}
 }
 

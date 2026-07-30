@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
@@ -21,10 +22,16 @@ func main() {
 	}
 	defer func() { _ = model.Close() }()
 	dashboardURL := envOr("PM_DASHBOARD_URL", "http://localhost:8080")
+	intakeBase := envOr("PM_INTAKE_DIR", filepath.Join(os.TempDir(), "hermestrator-intakes"))
 	app, err := dashboard.New(dashboard.Dependencies{
-		GitHub:       live.GitHub{Token: os.Getenv("GH_TOKEN")},
-		Model:        model,
-		Telegram:     live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
+		GitHub:    live.GitHub{Token: os.Getenv("GH_TOKEN")},
+		Model:     model,
+		Telegram:  live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
+		Publisher: live.GHPublisher{},
+		Intake: live.CloneIntake{
+			BaseDir:      intakeBase,
+			WorkspaceDir: envOr("PM_ISSUE_WORKSPACE_DIR", "issue-workspaces"),
+		},
 		Store:        store,
 		AllowedUsers: live.AllowedUsers(os.Getenv("PM_ALLOWED_GITHUB_USERS")),
 		DashboardURL: dashboardURL,
