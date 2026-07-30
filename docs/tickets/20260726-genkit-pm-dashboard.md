@@ -51,6 +51,19 @@ Add `grill-with-docs`, live `CONTEXT.md` and selective ADR artifacts,
 `to-spec`, tracer-bullet `to-tickets`, GitHub issue publication, and the
 repository-scoped intake workspace.
 
+### Delivery tickets
+
+- [#8](https://github.com/mkoziy/hermestrator/issues/8) — phase-gated,
+  evidence-driven discovery. Blocked by: none.
+- [#9](https://github.com/mkoziy/hermestrator/issues/9) — bounded Genkit
+  intake capabilities and typed artifacts. Blocked by: #8.
+- [#10](https://github.com/mkoziy/hermestrator/issues/10) — ADR eligibility
+  assessment and per-proposal approval under ADR 0002. Blocked by: #9.
+- [#11](https://github.com/mkoziy/hermestrator/issues/11) — dependency graphs
+  for specifications and implementation tickets. Blocked by: #9.
+- [#12](https://github.com/mkoziy/hermestrator/issues/12) — idempotent
+  publication and abandoned-intake recovery. Blocked by: #9 and #11.
+
 ## Ticket 3: Add executor-owned planning and implementation
 
 Issue: https://github.com/mkoziy/hermestrator/issues/4
