@@ -236,6 +236,7 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 		t.Fatalf("start intake status = %d", response.Code)
 	}
 	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
 		t.Fatalf("synthesize status = %d", response.Code)
 	}
@@ -286,6 +287,7 @@ func TestAbandonedIntakeCannotConfirmOrPublishStaleArtifacts(t *testing.T) {
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael")
 
@@ -308,6 +310,25 @@ func TestIntakeRequiresACompletedDiscoveryExchangeBeforeSynthesis(t *testing.T) 
 
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusConflict {
 		t.Fatalf("synthesize without discovery status = %d", response.Code)
+	}
+}
+
+func TestIntakeRequiresExplicitDiscoveryCompletionBeforeSynthesis(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusConflict {
+		t.Fatalf("synthesize with an unanswered discovery question = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("complete discovery = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("synthesize after completion = %d", response.Code)
 	}
 }
 
@@ -380,6 +401,7 @@ func TestPublishedIntakeRetriesPromotionWithoutPublishingAnotherIssue(t *testing
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/tickets/confirm", "", "michael")
@@ -408,6 +430,7 @@ func TestRestartResumesRecordedPartialPublicationWithoutCreatingAnotherIssue(t *
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/tickets/confirm", "", "michael")

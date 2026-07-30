@@ -69,6 +69,7 @@ type Notification struct{ Text, URL string }
 type Publication struct {
 	Title, Body string
 	BlockedBy   []int
+	Key         string
 }
 
 type PublishedIssue struct {
@@ -122,6 +123,7 @@ type intakeState string
 
 const (
 	intakeDraft      intakeState = "draft"
+	intakeReady      intakeState = "ready"
 	intakeConfirmed  intakeState = "confirmed"
 	intakePublishing intakeState = "publishing"
 	intakePromoting  intakeState = "promoting"
@@ -284,6 +286,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("GET /repositories/{id}/conversation/{turn}/stream", a.stream)
 	mux.HandleFunc("POST /repositories/{id}/intake/start", a.startIntake)
 	mux.HandleFunc("POST /repositories/{id}/intake/synthesize", a.synthesizeIntake)
+	mux.HandleFunc("POST /repositories/{id}/intake/complete-discovery", a.completeDiscovery)
 	mux.HandleFunc("POST /repositories/{id}/intake/adr", a.proposeADR)
 	mux.HandleFunc("POST /repositories/{id}/intake/{artifact}/confirm", a.confirmArtifact)
 	mux.HandleFunc("POST /repositories/{id}/intake/publish", a.publishIntake)
@@ -903,8 +906,8 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, err := a.intakeStatus(r.Context(), repo.ID)
-	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
-		http.Error(w, "start an active intake before synthesizing artifacts", http.StatusConflict)
+	if err != nil || status.State != intakeReady {
+		http.Error(w, "complete discovery before synthesizing artifacts", http.StatusConflict)
 		return
 	}
 	conversation, err := a.conversationAfter(r.Context(), repo.ID, status.MessageStart)
@@ -951,6 +954,35 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.redirectWorkspace(w, r, repo.ID)
+}
+
+func (a *application) completeDiscovery(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.repository(r.Context(), id); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil || status.State != intakeDraft {
+		http.Error(w, "an active discovery is required", http.StatusConflict)
+		return
+	}
+	conversation, err := a.conversationAfter(r.Context(), id, status.MessageStart)
+	if err != nil || !discoveryComplete(conversation) {
+		http.Error(w, "complete one focused discovery exchange first", http.StatusConflict)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET state=?,pending_question='',updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft)
+	if err != nil {
+		http.Error(w, "could not complete discovery", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "discovery state changed before completion", http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
 }
 
 func (a *application) confirmArtifact(w http.ResponseWriter, r *http.Request) {
@@ -1104,6 +1136,7 @@ func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		publication.Body = ticketBlockers.ReplaceAllString(publication.Body, "Blocked by: "+strings.Join(resolvedBlockers, ", "))
 		publication.BlockedBy = nil
+		publication.Key = fmt.Sprintf("%s-%d", id, index+1)
 		publication.Body = "## Confirmed specification\n\n" + spec.Body + "\n\n## Confirmed ticket\n\n" + publication.Body
 		issues, publishErr := a.deps.Publisher.Publish(r.Context(), repo, []Publication{publication})
 		if len(issues) == 1 {
@@ -1546,7 +1579,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form><form class="card card-body mt-3" method="post" action="/repositories/{{.RepositoryID}}/intake/adr"><label>Decision <input class="form-control" name="decision" required></label><label>Alternative <input class="form-control" name="alternative" required></label><label>Trade-off <input class="form-control" name="tradeoff" required></label><label><input type="checkbox" name="consequential" value="true" required> Consequential</label><label><input type="checkbox" name="hard_to_reverse" value="true" required> Hard to reverse</label><button class="btn btn-outline-primary mt-2">Propose ADR</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and (or (eq .Kind "spec") (eq .Kind "tickets")) (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form><form class="card card-body mt-3" method="post" action="/repositories/{{.RepositoryID}}/intake/adr"><label>Decision <input class="form-control" name="decision" required></label><label>Alternative <input class="form-control" name="alternative" required></label><label>Trade-off <input class="form-control" name="tradeoff" required></label><label><input type="checkbox" name="consequential" value="true" required> Consequential</label><label><input type="checkbox" name="hard_to_reverse" value="true" required> Hard to reverse</label><button class="btn btn-outline-primary mt-2">Propose ADR</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and (or (eq .Kind "spec") (eq .Kind "tickets")) (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
 {{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
 {{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`

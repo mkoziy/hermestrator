@@ -41,6 +41,24 @@ func TestGHPublisherPublishesBlockersBeforeDependentTickets(t *testing.T) {
 	}
 }
 
+func TestGHPublisherReusesIssueWithPublicationKey(t *testing.T) {
+	var commands [][]string
+	publisher := GHPublisher{Command: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		commands = append(commands, args)
+		return exec.CommandContext(ctx, "printf", "%s", `[{"number":73,"url":"https://github.com/mkoziy/hermestrator/issues/73"}]`)
+	}}
+	issues, err := publisher.Publish(context.Background(), dashboard.Repository{FullName: "mkoziy/hermestrator"}, []dashboard.Publication{{Title: "feat: intake", Body: "English ticket body.", Key: "42-1"}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(issues) != 1 || issues[0].Number != 73 {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if len(commands) != 1 || len(commands[0]) < 2 || commands[0][0] != "search" || commands[0][1] != "issues" {
+		t.Fatalf("commands = %#v", commands)
+	}
+}
+
 func containsArgumentPair(args []string, key, value string) bool {
 	for index := range args {
 		if args[index] == key && index+1 < len(args) && args[index+1] == value {

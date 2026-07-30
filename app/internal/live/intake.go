@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -40,6 +41,17 @@ func (p GHPublisher) Publish(ctx context.Context, repo dashboard.Repository, pub
 		if err != nil {
 			return nil, err
 		}
+		if publication.Key != "" {
+			existing, found, findErr := p.findPublished(ctx, repo, publication.Key)
+			if findErr != nil {
+				return issues, findErr
+			}
+			if found {
+				issues = append(issues, existing)
+				continue
+			}
+			body += "\n\n<!-- hermestrator-publication:" + publication.Key + " -->"
+		}
 		output, err := command(ctx, "gh", "issue", "create", "--repo", repo.FullName, "--title", publication.Title, "--body", body).Output()
 		if err != nil {
 			return issues, fmt.Errorf("create GitHub issue: %w", err)
@@ -56,6 +68,31 @@ func (p GHPublisher) Publish(ctx context.Context, repo dashboard.Repository, pub
 		issues = append(issues, dashboard.PublishedIssue{Number: number, URL: url})
 	}
 	return issues, nil
+}
+
+func (p GHPublisher) findPublished(ctx context.Context, repo dashboard.Repository, key string) (dashboard.PublishedIssue, bool, error) {
+	command := p.Command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	output, err := command(ctx, "gh", "search", "issues", "--repo", repo.FullName, "--match", "body", "--json", "number,url", "--limit", "2", "hermestrator-publication:"+key).Output()
+	if err != nil {
+		return dashboard.PublishedIssue{}, false, fmt.Errorf("find GitHub issue by publication key: %w", err)
+	}
+	var issues []struct {
+		Number int    `json:"number"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(output, &issues); err != nil {
+		return dashboard.PublishedIssue{}, false, fmt.Errorf("decode GitHub publication search: %w", err)
+	}
+	if len(issues) == 0 {
+		return dashboard.PublishedIssue{}, false, nil
+	}
+	if len(issues) > 1 {
+		return dashboard.PublishedIssue{}, false, fmt.Errorf("publication key %q matches multiple GitHub issues", key)
+	}
+	return dashboard.PublishedIssue{Number: issues[0].Number, URL: issues[0].URL}, true, nil
 }
 
 func publicationBody(publication dashboard.Publication, published []dashboard.PublishedIssue) (string, error) {
