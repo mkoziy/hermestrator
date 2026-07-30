@@ -133,6 +133,7 @@ const (
 )
 
 type IntakeStatus struct {
+	ID              string
 	State           intakeState
 	Path            string
 	MessageStart    int64
@@ -205,7 +206,7 @@ func New(deps Dependencies) (*application, error) {
 		CREATE TABLE IF NOT EXISTS activity (repository_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pending_turns (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, prompt TEXT NOT NULL, started_at TEXT, completed_at TEXT, state TEXT NOT NULL DEFAULT 'pending', terminal_reason TEXT);
 		CREATE TABLE IF NOT EXISTS turn_events (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL);
-		CREATE TABLE IF NOT EXISTS intakes (repository_id TEXT PRIMARY KEY, state TEXT NOT NULL, clone_path TEXT NOT NULL DEFAULT '', inspection TEXT NOT NULL DEFAULT '', message_start INTEGER NOT NULL DEFAULT 0, pending_question TEXT NOT NULL DEFAULT '', issue_number INTEGER, issue_url TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS intakes (repository_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, clone_path TEXT NOT NULL DEFAULT '', inspection TEXT NOT NULL DEFAULT '', message_start INTEGER NOT NULL DEFAULT 0, pending_question TEXT NOT NULL DEFAULT '', issue_number INTEGER, issue_url TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS intake_artifacts (repository_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, confirmed_at TEXT, url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, PRIMARY KEY(repository_id, kind));
 		CREATE TABLE IF NOT EXISTS intake_issues (repository_id TEXT NOT NULL, ticket_index INTEGER NOT NULL, issue_number INTEGER NOT NULL, issue_url TEXT NOT NULL, PRIMARY KEY(repository_id, ticket_index));`); err != nil {
 		_ = db.Close()
@@ -259,6 +260,10 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "pending_question", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "intake_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -872,8 +877,9 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	initialQuestion := "What outcome should this work deliver?"
+	intakeID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,state,clone_path,inspection,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET state=excluded.state,clone_path=excluded.clone_path,inspection=excluded.inspection,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeDraft, path, inspection, messageStart, initialQuestion, nil, "", now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,inspection,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,inspection=excluded.inspection,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, inspection, messageStart, initialQuestion, nil, "", now); err != nil {
 		http.Error(w, "could not persist intake", http.StatusInternalServerError)
 		return
 	}
@@ -1136,7 +1142,7 @@ func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		publication.Body = ticketBlockers.ReplaceAllString(publication.Body, "Blocked by: "+strings.Join(resolvedBlockers, ", "))
 		publication.BlockedBy = nil
-		publication.Key = fmt.Sprintf("%s-%d", id, index+1)
+		publication.Key = fmt.Sprintf("%s-%d", status.ID, index+1)
 		publication.Body = "## Confirmed specification\n\n" + spec.Body + "\n\n## Confirmed ticket\n\n" + publication.Body
 		issues, publishErr := a.deps.Publisher.Publish(r.Context(), repo, []Publication{publication})
 		if len(issues) == 1 {
@@ -1272,7 +1278,7 @@ func (a *application) promotePublishedIntake(w http.ResponseWriter, r *http.Requ
 func (a *application) abandonIntake(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	status, err := a.intakeStatus(r.Context(), id)
-	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
+	if err != nil || (status.State != intakeDraft && status.State != intakeReady && status.State != intakeConfirmed) {
 		http.Error(w, "only unpublished intakes can be abandoned", http.StatusConflict)
 		return
 	}
@@ -1510,7 +1516,7 @@ func (a *application) repository(ctx context.Context, id string) (Repository, er
 func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus, error) {
 	var status IntakeStatus
 	var number sql.NullInt64
-	err := a.db.QueryRowContext(ctx, `SELECT state,clone_path,message_start,pending_question,issue_number,issue_url FROM intakes WHERE repository_id=?`, id).Scan(&status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL)
 	status.PublishedIssue.Number = int(number.Int64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil

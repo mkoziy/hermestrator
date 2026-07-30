@@ -332,6 +332,20 @@ func TestIntakeRequiresExplicitDiscoveryCompletionBeforeSynthesis(t *testing.T) 
 	}
 }
 
+func TestReadyIntakeCanBeAbandoned(t *testing.T) {
+	intake := &fakeIntake{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("abandon ready intake = %d", response.Code)
+	}
+}
+
 func TestIntakeStartsWithOnePersistedDiscoveryQuestion(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
