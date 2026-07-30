@@ -311,6 +311,52 @@ func TestIntakeRequiresACompletedDiscoveryExchangeBeforeSynthesis(t *testing.T) 
 	}
 }
 
+func TestIntakeStartsWithOnePersistedDiscoveryQuestion(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "What outcome should this work deliver?") {
+		t.Fatalf("initial discovery question missing: %q", workspace.Body.String())
+	}
+}
+
+func TestTicketSynthesisCreatesDependentTracerBulletsForMultipleDecisions(t *testing.T) {
+	artifacts := synthesizeArtifacts(Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
+		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
+		{Role: "operator", Text: "operators publish confirmed tickets"}, {Role: "pm", Text: "What should happen next?"},
+	}})
+	var tickets string
+	for _, artifact := range artifacts {
+		if artifact.Kind == artifactTickets {
+			tickets = artifact.Body
+		}
+	}
+	if !strings.Contains(tickets, "## Ticket 2:") || !strings.Contains(tickets, "Blocked by: Ticket 1") {
+		t.Fatalf("tickets do not express a dependency graph: %q", tickets)
+	}
+}
+
+func TestNextDiscoveryQuestionKeepsOnlyOneQuestion(t *testing.T) {
+	if got, want := nextDiscoveryQuestion("What should ship first? What can wait?"), "What should ship first?"; got != want {
+		t.Fatalf("pending question = %q, want %q", got, want)
+	}
+}
+
+func TestADRProposalRequiresConsequentialIrreversibleDecision(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/adr", url.Values{"decision": {"Use blue"}, "alternative": {"Use green"}, "tradeoff": {"Blue is nicer"}}.Encode(), "michael")
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("ADR without eligibility gate = %d", response.Code)
+	}
+}
+
 func TestIntakeDoesNotCreateAnotherCloneWhileOneIsActive(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
@@ -347,6 +393,41 @@ func TestPublishedIntakeRetriesPromotionWithoutPublishingAnotherIssue(t *testing
 	}
 	if len(publisher.publications) != 1 {
 		t.Fatalf("published %d times", len(publisher.publications))
+	}
+}
+
+func TestRestartResumesRecordedPartialPublicationWithoutCreatingAnotherIssue(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 99, URL: "https://github.com/mkoziy/hermestrator/issues/99"}}}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: &fakeIntake{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/tickets/confirm", "", "michael")
+	if _, err := app.db.Exec(`UPDATE intakes SET state='publishing' WHERE repository_id='42'; INSERT INTO intake_issues(repository_id,ticket_index,issue_number,issue_url) VALUES('42',1,73,'https://github.com/mkoziy/hermestrator/issues/73')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	if response := request(t, restarted, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("resume publication = %d", response.Code)
+	}
+	if len(publisher.publications) != 0 {
+		t.Fatalf("restart created duplicate issues: %#v", publisher.publications)
 	}
 }
 
