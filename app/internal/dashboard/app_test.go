@@ -468,11 +468,20 @@ func TestIntakeStartsWithOnePersistedDiscoveryQuestion(t *testing.T) {
 }
 
 func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
-	artifacts := synthesizeArtifacts(Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	artifacts, err := app.(*application).synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
 		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators publish confirmed tickets\nBlocked by: Ticket 1"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators document their work"}, {Role: "pm", Text: "What should happen next?"},
 	}})
+	if err != nil {
+		t.Fatalf("synthesizeArtifacts: %v", err)
+	}
 	var tickets string
 	for _, artifact := range artifacts {
 		if artifact.Kind == artifactTickets {
@@ -512,6 +521,72 @@ func TestADRProposalRequiresConsequentialIrreversibleDecision(t *testing.T) {
 	response := request(t, app, http.MethodPost, "/repositories/42/intake/adr", url.Values{"decision": {"Use blue"}, "alternative": {"Use green"}, "tradeoff": {"Blue is nicer"}}.Encode(), "michael")
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("ADR without eligibility gate = %d", response.Code)
+	}
+}
+
+type erroringSynthesizer struct{ err error }
+
+func (e erroringSynthesizer) GrillWithDocs(context.Context, Conversation) ([]string, error) {
+	return nil, e.err
+}
+func (e erroringSynthesizer) ToSpec(context.Context, Repository, []string) (string, error) {
+	return "", e.err
+}
+func (e erroringSynthesizer) ToTickets(context.Context, Repository, []string) (string, error) {
+	return "", e.err
+}
+func (e erroringSynthesizer) AssessADR(context.Context, string) (string, string, error) {
+	return "", "", e.err
+}
+
+func TestSynthesizerDefaultStillSynthesizesArtifactsEndToEnd(t *testing.T) {
+	// No Synthesizer set in Dependencies — New() must default to localSynthesizer.
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("synthesize with default Synthesizer = %d, want %d", response.Code, http.StatusSeeOther)
+	}
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	for _, want := range []string{"spec", "tickets", "operators can create projects"} {
+		if !strings.Contains(workspace.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, workspace.Body.String())
+		}
+	}
+}
+
+func TestErroringSynthesizerReturnsInternalServerError(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Synthesizer:  erroringSynthesizer{err: errors.New("synthesis unavailable")},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("erroring Synthesizer status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	if response.Body.String() != "could not synthesize artifacts\n" {
+		t.Fatalf("erroring Synthesizer body = %q, want %q", response.Body.String(), "could not synthesize artifacts\n")
 	}
 }
 

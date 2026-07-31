@@ -214,20 +214,20 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 **Files:**
 - Modify: `app/internal/dashboard/app.go`
 
-- [ ] add the `Synthesizer` interface (context-taking methods per Technical
+- [x] add the `Synthesizer` interface (context-taking methods per Technical
       Details) near the other port interfaces (~line 104)
-- [ ] add unexported `localSynthesizer struct{}` implementing `Synthesizer`
+- [x] add unexported `localSynthesizer struct{}` implementing `Synthesizer`
       by calling `GrillWithDocs`/`ToSpec`/`ToTickets`/`AssessADR` directly,
       no I/O, returns nil error
-- [ ] add `Synthesizer Synthesizer` field to `Dependencies`
-- [ ] in `New()`, default `deps.Synthesizer` to `localSynthesizer{}` when nil
-- [ ] write a test that `New(Dependencies{})` (no `Synthesizer` set) still
+- [x] add `Synthesizer Synthesizer` field to `Dependencies`
+- [x] in `New()`, default `deps.Synthesizer` to `localSynthesizer{}` when nil
+- [x] write a test that `New(Dependencies{})` (no `Synthesizer` set) still
       synthesizes artifacts correctly end-to-end through the HTTP seam
       (success case)
-- [ ] write a test that a fake `Synthesizer` returning an error from any
+- [x] write a test that a fake `Synthesizer` returning an error from any
       method causes `synthesizeIntake` to respond
       `http.StatusInternalServerError` instead of panicking (error case)
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Route `synthesizeArtifacts` through `deps.Synthesizer`
 
@@ -235,16 +235,16 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] change `synthesizeArtifacts` into `(a *application) synthesizeArtifacts`
+- [x] change `synthesizeArtifacts` into `(a *application) synthesizeArtifacts`
       taking `ctx context.Context` and returning `([]Artifact, error)`,
       calling `a.deps.Synthesizer.GrillWithDocs`/`ToSpec`/`ToTickets`/`AssessADR`
       instead of the package-level functions
-- [ ] update the call site in `synthesizeIntake` (line ~1054) to handle the
+- [x] update the call site in `synthesizeIntake` (line ~1054) to handle the
       new error return
-- [ ] update the direct-call test at `app_test.go:471` to construct an
+- [x] update the direct-call test at `app_test.go:471` to construct an
       `application` (via existing `mustApp` helper) and call the method, or
       drop it in favor of the Task 2 HTTP-seam tests if it becomes redundant
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
 
 ### Task 4: Register Genkit tools in `live.GenkitSynthesizer`
 

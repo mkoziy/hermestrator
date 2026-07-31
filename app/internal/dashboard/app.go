@@ -103,6 +103,32 @@ type Inspector interface {
 	Inspect(context.Context, string) (string, error)
 }
 
+// Synthesizer turns settled discovery output into drafts. Implementations
+// must not call GitHub or grant write authority; see Intake and Publisher.
+type Synthesizer interface {
+	GrillWithDocs(context.Context, Conversation) ([]string, error)
+	ToSpec(context.Context, Repository, []string) (string, error)
+	ToTickets(context.Context, Repository, []string) (string, error)
+	AssessADR(context.Context, string) (assessment, proposal string, err error)
+}
+
+// localSynthesizer calls the exported pure functions directly with no I/O.
+type localSynthesizer struct{}
+
+func (localSynthesizer) GrillWithDocs(_ context.Context, c Conversation) ([]string, error) {
+	return GrillWithDocs(c), nil
+}
+func (localSynthesizer) ToSpec(_ context.Context, r Repository, resolved []string) (string, error) {
+	return ToSpec(r, resolved), nil
+}
+func (localSynthesizer) ToTickets(_ context.Context, r Repository, resolved []string) (string, error) {
+	return ToTickets(r, resolved), nil
+}
+func (localSynthesizer) AssessADR(_ context.Context, decision string) (string, string, error) {
+	assessment, proposal := AssessADR(decision)
+	return assessment, proposal, nil
+}
+
 type artifactKind string
 
 const (
@@ -177,6 +203,7 @@ type Dependencies struct {
 	Store        string
 	AllowedUsers map[string]bool
 	DashboardURL string
+	Synthesizer  Synthesizer
 }
 
 type application struct {
@@ -197,6 +224,9 @@ var errTurnInProgress = errors.New("PM response already in progress")
 func New(deps Dependencies) (*application, error) {
 	if deps.GitHub == nil || deps.Model == nil || deps.Store == "" {
 		return nil, errors.New("dashboard requires GitHub, model, and SQLite store")
+	}
+	if deps.Synthesizer == nil {
+		deps.Synthesizer = localSynthesizer{}
 	}
 	db, err := sql.Open("sqlite", deps.Store)
 	if err != nil {
@@ -1051,7 +1081,11 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "complete one focused discovery exchange before synthesizing artifacts", http.StatusConflict)
 		return
 	}
-	artifacts := synthesizeArtifacts(repo, conversation)
+	artifacts, err := a.synthesizeArtifacts(r.Context(), repo, conversation)
+	if err != nil {
+		http.Error(w, "could not synthesize artifacts", http.StatusInternalServerError)
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -1444,21 +1478,35 @@ func (a *application) redirectWorkspace(w http.ResponseWriter, r *http.Request, 
 	http.Redirect(w, r, "/repositories/"+url.PathEscape(id), http.StatusSeeOther)
 }
 
-func synthesizeArtifacts(repo Repository, conversation Conversation) []Artifact {
-	resolved := GrillWithDocs(conversation)
+func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
+	resolved, err := a.deps.Synthesizer.GrillWithDocs(ctx, conversation)
+	if err != nil {
+		return nil, err
+	}
 	artifacts := []Artifact{
 		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
-		{Kind: artifactSpec, Body: ToSpec(repo, resolved)},
-		{Kind: artifactTickets, Body: ToTickets(repo, resolved)},
 	}
+	spec, err := a.deps.Synthesizer.ToSpec(ctx, repo, resolved)
+	if err != nil {
+		return nil, err
+	}
+	artifacts = append(artifacts, Artifact{Kind: artifactSpec, Body: spec})
+	tickets, err := a.deps.Synthesizer.ToTickets(ctx, repo, resolved)
+	if err != nil {
+		return nil, err
+	}
+	artifacts = append(artifacts, Artifact{Kind: artifactTickets, Body: tickets})
 	for index, decision := range resolved {
-		assessment, proposal := AssessADR(strings.TrimSpace(strings.TrimPrefix(decision, "-")))
+		assessment, proposal, err := a.deps.Synthesizer.AssessADR(ctx, strings.TrimSpace(strings.TrimPrefix(decision, "-")))
+		if err != nil {
+			return nil, err
+		}
 		artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRAssessmentPrefix + strconv.Itoa(index+1)), Body: assessment})
 		if proposal != "" {
 			artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRProposalPrefix + strconv.Itoa(index+1)), Body: proposal})
 		}
 	}
-	return artifacts
+	return artifacts, nil
 }
 
 // AssessADR is a bounded policy capability: an ADR is eligible only when the
