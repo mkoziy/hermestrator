@@ -516,7 +516,7 @@ func TestADRProposalRequiresConsequentialIrreversibleDecision(t *testing.T) {
 }
 
 func TestADREligibilityDoesNotTrustOperatorAttestation(t *testing.T) {
-	assessment, proposal := assessADR("Decision: use blue; Alternative: use green; Trade-off: blue is nicer; Reversal cost: change a color; Consequential: true; Hard to reverse: true")
+	assessment, proposal := AssessADR("Decision: use blue; Alternative: use green; Trade-off: blue is nicer; Reversal cost: change a color; Consequential: true; Hard to reverse: true")
 	if proposal != "" || !strings.Contains(assessment, "Ineligible") {
 		t.Fatalf("self-attested ADR was eligible: assessment=%q proposal=%q", assessment, proposal)
 	}

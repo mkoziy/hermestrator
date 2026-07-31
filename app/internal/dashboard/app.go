@@ -1445,14 +1445,14 @@ func (a *application) redirectWorkspace(w http.ResponseWriter, r *http.Request, 
 }
 
 func synthesizeArtifacts(repo Repository, conversation Conversation) []Artifact {
-	resolved := grillWithDocs(conversation)
+	resolved := GrillWithDocs(conversation)
 	artifacts := []Artifact{
 		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
-		{Kind: artifactSpec, Body: toSpec(repo, resolved)},
-		{Kind: artifactTickets, Body: toTickets(repo, resolved)},
+		{Kind: artifactSpec, Body: ToSpec(repo, resolved)},
+		{Kind: artifactTickets, Body: ToTickets(repo, resolved)},
 	}
 	for index, decision := range resolved {
-		assessment, proposal := assessADR(strings.TrimSpace(strings.TrimPrefix(decision, "-")))
+		assessment, proposal := AssessADR(strings.TrimSpace(strings.TrimPrefix(decision, "-")))
 		artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRAssessmentPrefix + strconv.Itoa(index+1)), Body: assessment})
 		if proposal != "" {
 			artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRProposalPrefix + strconv.Itoa(index+1)), Body: proposal})
@@ -1461,10 +1461,10 @@ func synthesizeArtifacts(repo Repository, conversation Conversation) []Artifact 
 	return artifacts
 }
 
-// assessADR is a bounded policy capability: an ADR is eligible only when the
+// AssessADR is a bounded policy capability: an ADR is eligible only when the
 // settled decision states the alternative, trade-off, and cost of reversal.
 // This keeps the operator from self-attesting eligibility in the dashboard.
-func assessADR(decision string) (string, string) {
+func AssessADR(decision string) (string, string) {
 	fields := make(map[string]string)
 	for _, part := range strings.Split(decision, ";") {
 		name, value, found := strings.Cut(part, ":")
@@ -1501,10 +1501,10 @@ func containsAny(value string, terms ...string) bool {
 	return false
 }
 
-// grillWithDocs is the bounded discovery capability. It accepts only settled
+// GrillWithDocs is the bounded discovery capability. It accepts only settled
 // operator decisions from completed discovery turns; repository evidence stays
 // outside the synthesized artifacts unless the operator adopts it explicitly.
-func grillWithDocs(conversation Conversation) []string {
+func GrillWithDocs(conversation Conversation) []string {
 	var resolved []string
 	for index, message := range conversation.Messages {
 		if message.Role == "operator" {
@@ -1532,11 +1532,11 @@ func glossaryArtifact(resolved []string) string {
 	return "# Glossary updates\n\n- **Intake draft** — unconfirmed discovery output for a repository.\n- **Confirmed ticket set** — vertical slices approved by the operator before GitHub publication.\n\n## Settled terms\n\n" + strings.Join(resolved, "\n")
 }
 
-func toSpec(repo Repository, resolved []string) string {
+func ToSpec(repo Repository, resolved []string) string {
 	return "# Spec: " + repo.FullName + " intake\n\n## Resolved conversation\n\n" + strings.Join(resolved, "\n") + "\n\n## Scope\n\nImplement the smallest vertical slice that satisfies the resolved conversation.\n\n## Non-goals\n\nDo not expand beyond the confirmed intake."
 }
 
-func toTickets(repo Repository, resolved []string) string {
+func ToTickets(repo Repository, resolved []string) string {
 	var tickets strings.Builder
 	fmt.Fprintf(&tickets, "# Ticket set: %s\n", repo.FullName)
 	for index, decision := range resolved {
