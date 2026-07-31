@@ -342,20 +342,34 @@ func (a *application) recoverIntakes() error {
 			continue
 		}
 		if state == intakePublishing {
-			var recorded PublishedIssue
-			err := a.db.QueryRow(`SELECT issue_number,issue_url FROM intake_issues WHERE repository_id=? ORDER BY ticket_index LIMIT 1`, id).Scan(&recorded.Number, &recorded.URL)
-			if errors.Is(err, sql.ErrNoRows) {
+			tickets, artifactErr := a.artifact(context.Background(), id, artifactTickets)
+			if errors.Is(artifactErr, sql.ErrNoRows) {
 				continue
 			}
-			if err != nil {
-				return fmt.Errorf("load partial publication for intake %q: %w", id, err)
+			if artifactErr != nil {
+				return fmt.Errorf("load ticket set for intake %q: %w", id, artifactErr)
 			}
-			if _, err := a.db.Exec(`UPDATE intakes SET state=?,issue_number=?,issue_url=?,updated_at=? WHERE repository_id=? AND state=?`, intakePromoting, recorded.Number, recorded.URL, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing); err != nil {
+			expected, parseErr := ticketSetPublications(tickets.Body)
+			if parseErr != nil {
+				return fmt.Errorf("parse ticket set for intake %q: %w", id, parseErr)
+			}
+			recorded, recordErr := a.publishedIntakeIssues(context.Background(), id)
+			if recordErr != nil {
+				return fmt.Errorf("load partial publication for intake %q: %w", id, recordErr)
+			}
+			if len(recorded) < len(expected) {
+				continue
+			}
+			if len(recorded) != len(expected) {
+				return fmt.Errorf("intake %q has more recorded issues than confirmed tickets", id)
+			}
+			first := recorded[0]
+			if _, err := a.db.Exec(`UPDATE intakes SET state=?,issue_number=?,issue_url=?,updated_at=? WHERE repository_id=? AND state=?`, intakePromoting, first.Number, first.URL, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing); err != nil {
 				return fmt.Errorf("reconcile partial publication for intake %q: %w", id, err)
 			}
 			state = intakePromoting
-			issueNumber = sql.NullInt64{Int64: int64(recorded.Number), Valid: true}
-			issueURL = recorded.URL
+			issueNumber = sql.NullInt64{Int64: int64(first.Number), Valid: true}
+			issueURL = first.URL
 		}
 		if !issueNumber.Valid || issueNumber.Int64 < 1 || issueURL == "" {
 			return fmt.Errorf("promoting intake %q lacks published issue details", id)
