@@ -304,13 +304,13 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify `grillWithDocs`/`toSpec`/`toTickets`/`assessADR` behavior is
+- [x] verify `grillWithDocs`/`toSpec`/`toTickets`/`assessADR` behavior is
       byte-for-byte unchanged for existing inputs (Task 1-3 tests still pass
       unmodified in assertions, only call syntax changed)
-- [ ] verify production wiring (`main.go`) builds and starts against the
+- [x] verify production wiring (`main.go`) builds and starts against the
       Genkit-backed `Synthesizer`
-- [ ] run `make check` from repo root — must be clean
-- [ ] confirm no `dashboard` package file imports
+- [x] run `make check` from repo root — must be clean
+- [x] confirm no `dashboard` package file imports
       `github.com/firebase/genkit/*` (keeps the HTTP-seam test philosophy in
       CLAUDE.md intact)
 
