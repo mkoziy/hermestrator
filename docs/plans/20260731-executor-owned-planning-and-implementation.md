@@ -341,14 +341,14 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/preflight.go`
 - Create: `app/internal/live/preflight_test.go`
 
-- [ ] implement a check that confirms workspace paths exist, required tools
+- [x] implement a check that confirms workspace paths exist, required tools
       (`ralphex`/`codex`/`pi`/`gh`) are resolvable, remote git state matches
       expectations, and the generated plan file has the expected structure
-- [ ] surface failures as a typed result blocking progression to critique
-- [ ] write tests for the all-clear case
-- [ ] write tests for each failure mode (missing tool, remote mismatch,
+- [x] surface failures as a typed result blocking progression to critique
+- [x] write tests for the all-clear case
+- [x] write tests for each failure mode (missing tool, remote mismatch,
       malformed plan)
-- [ ] run tests — must pass before task 9
+- [x] run tests — must pass before task 9
 
 ### Task 9: Plan critique gate
 
