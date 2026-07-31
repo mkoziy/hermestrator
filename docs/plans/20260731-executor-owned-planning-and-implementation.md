@@ -206,19 +206,19 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/dashboard/executor.go`
 - Create: `app/internal/dashboard/executor_test.go`
 
-- [ ] define `ExecutorKind` (`Ralphex`, `Codex`, `Pi`, `VerificationOnly`)
+- [x] define `ExecutorKind` (`Ralphex`, `Codex`, `Pi`, `VerificationOnly`)
       and `ExecutorSelection{Kind, Rationale}` in `executor.go`
-- [ ] implement `SelectExecutor(scope, repoPolicy, priorFailures)
+- [x] implement `SelectExecutor(scope, repoPolicy, priorFailures)
       ExecutorSelection` as deterministic Go logic; `priorFailures` is a
       plain `[]FailureRecord{Kind, Reason}` slice the caller supplies —
       task 14 is what actually populates it from persisted run history, so
       keep the type minimal here and don't invent a fetch mechanism in this
       task
-- [ ] write table-driven tests covering each selection branch (success
+- [x] write table-driven tests covering each selection branch (success
       cases)
-- [ ] write tests for ambiguous/conflicting inputs falling back to
+- [x] write tests for ambiguous/conflicting inputs falling back to
       `VerificationOnly` (error/edge cases)
-- [ ] run tests — must pass before task 2
+- [x] run tests — must pass before task 2
 
 ### Task 2: Surface executor selection before planning begins
 
