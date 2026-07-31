@@ -486,14 +486,14 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 
 ### Task 16: Verify acceptance criteria
 
-- [ ] verify every checkbox in issue #4's acceptance criteria against the
+- [x] verify every checkbox in issue #4's acceptance criteria against the
       implementation
-- [ ] verify concurrency: two issues on different repositories can execute
+- [x] verify concurrency: two issues on different repositories can execute
       simultaneously; two on the same repository cannot
-- [ ] run `make check` in `app/` — must be clean
-- [ ] confirm no code path reads `docker/ralphex-wrapper.sh` or
+- [x] run `make check` in `app/` — must be clean
+- [x] confirm no code path reads `docker/ralphex-wrapper.sh` or
       `docker/ralphex-headless-plan.sh`
-- [ ] confirm test coverage includes success, failure, hang, cancellation,
+- [x] confirm test coverage includes success, failure, hang, cancellation,
       partial output, and resume, per the issue's testing requirement
 
 ### Task 17: Update documentation

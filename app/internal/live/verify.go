@@ -114,7 +114,7 @@ func linesToString(lines []LineEvent) string {
 	for _, l := range lines {
 		// Include stream label so the operator can distinguish
 		// stdout from stderr when diagnosing failures.
-		sb.WriteString(fmt.Sprintf("[%s] %s\n", l.Stream, l.Text))
+		fmt.Fprintf(&sb, "[%s] %s\n", l.Stream, l.Text)
 	}
 	return sb.String()
 }
