@@ -252,32 +252,32 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 - Create: `app/internal/live/synthesis.go`
 - Create: `app/internal/live/synthesis_test.go`
 
-- [ ] define `specInput{Repo dashboard.Repository; Resolved []string}` and
+- [x] define `specInput{Repo dashboard.Repository; Resolved []string}` and
       `ticketsInput` (same shape) and `adrResult{Assessment, Proposal string}`
       request/response types
-- [ ] define `GenkitSynthesizer` struct holding the 4 `*aix.Tool[...]` fields
-- [ ] implement `NewGenkitSynthesizer(g *genkit.Genkit) *GenkitSynthesizer`,
+- [x] define `GenkitSynthesizer` struct holding the 4 `*aix.Tool[...]` fields
+- [x] implement `NewGenkitSynthesizer(g *genkit.Genkit) *GenkitSynthesizer`,
       registering `pm_grill_with_docs`, `pm_to_spec`, `pm_to_tickets`,
       `pm_assess_adr` via `genkitx.DefineTool`, each `fn` delegating to the
       matching exported `dashboard` function
-- [ ] add an unexported `decodeToolResult[T any](result any) (T, error)`
+- [x] add an unexported `decodeToolResult[T any](result any) (T, error)`
       helper that `json.Marshal`s `result` then `json.Unmarshal`s into `T`,
       returning a wrapped error (not a panic) on either failure
-- [ ] implement the 4 `Synthesizer` interface methods on `*GenkitSynthesizer`
+- [x] implement the 4 `Synthesizer` interface methods on `*GenkitSynthesizer`
       via `tool.RunRaw(ctx, input)` followed by `decodeToolResult[Out]` — do
       **not** type-assert the `RunRaw` result directly (it's JSON-decoded
       `any`, e.g. `[]interface{}`/`map[string]interface{}`, not the concrete
       type; see Technical Details)
-- [ ] write a test using `genkit.Init(ctx, genkit.WithExperimental())` (same
+- [x] write a test using `genkit.Init(ctx, genkit.WithExperimental())` (same
       pattern as `adapters_test.go:159`) that registers the tools and asserts
       `reflect.DeepEqual` between each method's output and calling the
       matching `dashboard` function directly — deep-equal, not just
       non-nil/type checks, so the decode step is actually verified (success
       cases; this is what would have caught the `RunRaw` JSON round-trip
       mismatch)
-- [ ] write a test asserting a `RunRaw` error or a `decodeToolResult` decode
+- [x] write a test asserting a `RunRaw` error or a `decodeToolResult` decode
       failure surfaces as a Go `error` rather than panicking (error case)
-- [ ] run tests — must pass before task 5
+- [x] run tests — must pass before task 5
 
 ### Task 5: Wire `GenkitSynthesizer` into the running server
 
