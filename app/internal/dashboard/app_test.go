@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -90,6 +91,22 @@ func (f *fakeTelegram) Notify(_ context.Context, notification Notification) erro
 type failingTelegram struct{ err error }
 
 func (f failingTelegram) Notify(context.Context, Notification) error { return f.err }
+
+type fakeExecutorRunner struct {
+	lines     []string
+	exitCode  int
+	duration  time.Duration
+	cancelled bool
+}
+
+func (f *fakeExecutorRunner) Run(_ context.Context, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	for _, line := range f.lines {
+		if err := onLine(line); err != nil {
+			return ExecutorRunResult{}, err
+		}
+	}
+	return ExecutorRunResult{ExitCode: f.exitCode, Duration: f.duration, Cancelled: f.cancelled}, nil
+}
 
 type fakePublisher struct {
 	publications []Publication
@@ -1329,11 +1346,13 @@ func TestExecutorSelectionSurvivesRestart(t *testing.T) {
 }
 
 func TestApprovalUnlocksExecution(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"task 1 done", "task 2 done"}, exitCode: 0, duration: 150 * time.Millisecond}
 	app := mustApp(t, Dependencies{
-		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
-		Model:        fakeModel{},
-		Store:        t.TempDir() + "/pm.db",
-		AllowedUsers: map[string]bool{"michael": true},
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
 	})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
@@ -1366,19 +1385,21 @@ func TestApprovalUnlocksExecution(t *testing.T) {
 		t.Fatalf("workspace missing Run button after approval: %q", workspace.Body.String())
 	}
 
-	// Execution now succeeds.
+	// Execution now succeeds and redirects to workspace.
 	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
-	if runResponse.Code != http.StatusAccepted {
-		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusAccepted)
+	if runResponse.Code != http.StatusSeeOther {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusSeeOther)
 	}
 }
 
 func TestExecutionRejectedPreApproval(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"ok"}, exitCode: 0}
 	app := mustApp(t, Dependencies{
-		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
-		Model:        fakeModel{},
-		Store:        t.TempDir() + "/pm.db",
-		AllowedUsers: map[string]bool{"michael": true},
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
 	})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
@@ -1418,7 +1439,86 @@ func TestExecutionRejectedPreApproval(t *testing.T) {
 		t.Fatalf("approve status = %d, want %d", approveResponse.Code, http.StatusSeeOther)
 	}
 	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
-	if runResponse.Code != http.StatusAccepted {
-		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusAccepted)
+	if runResponse.Code != http.StatusSeeOther {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusSeeOther)
+	}
+}
+
+func TestExecutorOutputRedactsSecretsBeforeRendering(t *testing.T) {
+	// A fake executor that outputs a Telegram bot token pattern.
+	secretToken := "123456789:AAabcdefghijklmnopqrstuvwxyz123456789"
+	runner := &fakeExecutorRunner{
+		lines:    []string{"using token " + secretToken, "task complete"},
+		exitCode: 0,
+		duration: 200 * time.Millisecond,
+	}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Run the executor and check the workspace page.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+
+	// The raw secret must never appear.
+	if strings.Contains(workspace.Body.String(), secretToken) {
+		t.Fatalf("executor output leaked secret token: %q", workspace.Body.String())
+	}
+	// The redacted placeholder must appear instead.
+	if !strings.Contains(workspace.Body.String(), "[redacted]") {
+		t.Fatalf("executor output missing [redacted] placeholder: %q", workspace.Body.String())
+	}
+	// The non-secret output line must still be visible.
+	if !strings.Contains(workspace.Body.String(), "task complete") {
+		t.Fatalf("non-secret executor output missing: %q", workspace.Body.String())
+	}
+}
+
+func TestExecutorRunRendersHeartbeatDurationAndExitStatus(t *testing.T) {
+	runner := &fakeExecutorRunner{
+		lines:    []string{"building...", "testing...", "done"},
+		exitCode: 0,
+		duration: 3500 * time.Millisecond,
+	}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+
+	// Duration must be visible.
+	if !strings.Contains(workspace.Body.String(), "3.5s") {
+		t.Fatalf("executor duration not rendered: %q", workspace.Body.String())
+	}
+	// Exit code must be visible.
+	if !strings.Contains(workspace.Body.String(), "Exit code: 0") {
+		t.Fatalf("executor exit code not rendered: %q", workspace.Body.String())
+	}
+	// Completed state must be visible.
+	if !strings.Contains(workspace.Body.String(), "State: completed") {
+		t.Fatalf("executor completed state not rendered: %q", workspace.Body.String())
+	}
+	// Output artifact must contain the lines.
+	if !strings.Contains(workspace.Body.String(), "building...") {
+		t.Fatalf("executor output lines not rendered: %q", workspace.Body.String())
 	}
 }

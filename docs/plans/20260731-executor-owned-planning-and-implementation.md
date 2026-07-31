@@ -393,14 +393,14 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Modify: `app/internal/dashboard/app_test.go`
 - Modify: `app/internal/live/process.go`
 
-- [ ] pipe `ProcessRunner` output through `redaction.Secrets` before storage
+- [x] pipe `ProcessRunner` output through `redaction.Secrets` before storage
       and route it to the dashboard as heartbeat/duration/exit-status/
       artifact updates, extending the existing `Artifact` type/rendering
-- [ ] write a test asserting a secret-looking value in executor output never
+- [x] write a test asserting a secret-looking value in executor output never
       reaches the rendered page (success case, security-relevant)
-- [ ] write a test asserting heartbeat/duration/exit status render correctly
+- [x] write a test asserting heartbeat/duration/exit status render correctly
       for a completed run
-- [ ] run tests — must pass before task 12
+- [x] run tests — must pass before task 12
 
 ### Task 12: Cancellation
 

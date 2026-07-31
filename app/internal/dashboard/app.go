@@ -140,6 +140,7 @@ const (
 	artifactTickets             artifactKind = "tickets"
 	artifactADRAssessmentPrefix              = "adr-assessment-"
 	artifactADRProposalPrefix                = "adr-proposal-"
+	artifactExecutorOutput      artifactKind = "executor-output"
 )
 
 type Artifact struct {
@@ -166,9 +167,12 @@ const (
 type executorState string
 
 const (
-	executorSelected executorState = "selected"
-	executorPlanned  executorState = "planned"
-	executorApproved executorState = "approved"
+	executorSelected  executorState = "selected"
+	executorPlanned   executorState = "planned"
+	executorApproved  executorState = "approved"
+	executorRunning   executorState = "running"
+	executorCompleted executorState = "completed"
+	executorFailed    executorState = "failed"
 )
 
 type IntakeStatus struct {
@@ -182,11 +186,30 @@ type IntakeStatus struct {
 	ExecutorKind      string
 	ExecutorRationale string
 	ExecutorState     executorState
+	ExecutorHeartbeat string
+	ExecutorDuration  time.Duration
+	ExecutorExitCode  int
+	ExecutorCancelled bool
+	ExecutorCompleted bool
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
 type GitHub interface {
 	Repositories(context.Context) ([]Repository, error)
+}
+
+// ExecutorRunner executes a subprocess and streams output line-by-line.
+// The callback receives sanitised lines; the caller must not persist
+// raw executor output before redaction.
+type ExecutorRunner interface {
+	Run(ctx context.Context, onLine func(line string) error, name string, args ...string) (ExecutorRunResult, error)
+}
+
+// ExecutorRunResult captures the final state of an executor run.
+type ExecutorRunResult struct {
+	ExitCode  int
+	Duration  time.Duration
+	Cancelled bool
 }
 
 // Model is implemented by the Genkit/OpenRouter adapter in production and faked at the HTTP seam.
@@ -208,15 +231,16 @@ type Telegram interface {
 }
 
 type Dependencies struct {
-	GitHub       GitHub
-	Model        Model
-	Telegram     Telegram
-	Publisher    Publisher
-	Intake       Intake
-	Store        string
-	AllowedUsers map[string]bool
-	DashboardURL string
-	Synthesizer  Synthesizer
+	GitHub         GitHub
+	Model          Model
+	Telegram       Telegram
+	Publisher      Publisher
+	Intake         Intake
+	Store          string
+	AllowedUsers   map[string]bool
+	DashboardURL   string
+	Synthesizer    Synthesizer
+	ExecutorRunner ExecutorRunner
 }
 
 type application struct {
@@ -322,6 +346,22 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "executor_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "executor_heartbeat", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "executor_duration_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "executor_exit_code", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "executor_cancelled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1612,10 +1652,71 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor run requires operator approval", http.StatusConflict)
 		return
 	}
-	// Execution is implemented in Tasks 6/7; for now this gate enforces
-	// the approval pre-condition.
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte("execution acknowledged (stub)"))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(r.Context(),
+		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
+		string(executorRunning), now, now, id, string(executorApproved)); err != nil {
+		http.Error(w, "could not start executor", http.StatusInternalServerError)
+		return
+	}
+	if a.deps.ExecutorRunner == nil {
+		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Collect sanitised output lines for storage.
+	var outputLines []string
+	nowTime := time.Now()
+	onLine := func(line string) error {
+		line = redactSecrets(line)
+		outputLines = append(outputLines, line)
+		// Update heartbeat so the dashboard can show the run is alive.
+		heartbeat := time.Now().UTC().Format(time.RFC3339Nano)
+		_, _ = a.db.ExecContext(r.Context(),
+			`UPDATE intakes SET executor_heartbeat=? WHERE repository_id=? AND executor_state=?`,
+			heartbeat, id, string(executorRunning))
+		return nil
+	}
+	result, runErr := a.deps.ExecutorRunner.Run(r.Context(), onLine, "echo", "stub")
+	duration := time.Since(nowTime)
+	terminalState := executorCompleted
+	if runErr != nil || result.ExitCode != 0 {
+		terminalState = executorFailed
+	}
+	// Store sanitised output as an artifact.
+	outputBody := "# Executor output\n\n"
+	for _, line := range outputLines {
+		outputBody += line + "\n"
+	}
+	outputBody += fmt.Sprintf("\n---\nExit code: %d\nDuration: %v\nCancelled: %v\n", result.ExitCode, result.Duration, result.Cancelled)
+	now = time.Now().UTC().Format(time.RFC3339Nano)
+	tx, txErr := a.db.BeginTx(r.Context(), nil)
+	if txErr != nil {
+		http.Error(w, "could not store executor output", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(),
+		`INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,created_at=excluded.created_at`,
+		id, artifactExecutorOutput, outputBody, now); err != nil {
+		http.Error(w, "could not store executor output", http.StatusInternalServerError)
+		return
+	}
+	durationNs := duration.Nanoseconds()
+	cancelledInt := 0
+	if result.Cancelled {
+		cancelledInt = 1
+	}
+	if _, err := tx.ExecContext(r.Context(),
+		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,executor_duration_ns=?,executor_exit_code=?,executor_cancelled=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
+		string(terminalState), now, durationNs, result.ExitCode, cancelledInt, now, id, string(executorRunning)); err != nil {
+		http.Error(w, "could not record executor result", http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "could not persist executor result", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
 }
 
 func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
@@ -1891,8 +1992,13 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var status IntakeStatus
 	var number sql.NullInt64
 	var executorStateStr string
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr)
+	var durationNs int64
+	var cancelledInt int
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt)
 	status.ExecutorState = executorState(executorStateStr)
+	status.ExecutorDuration = time.Duration(durationNs)
+	status.ExecutorCancelled = cancelledInt != 0
+	status.ExecutorCompleted = status.ExecutorState == executorCompleted || status.ExecutorState == executorFailed
 	status.PublishedIssue.Number = int(number.Int64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil
@@ -1976,7 +2082,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "publishing"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry confirmed ticket publication</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and .NeedsConfirmation (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><section class="card mb-3" aria-labelledby="executor-title"><div class="card-body"><h2 id="executor-title" class="card-title">Implementation</h2>{{if .ExecutorSelection}}<p>Executor: {{.ExecutorSelection.Kind}} &mdash; {{.ExecutorSelection.Rationale}}</p>{{if eq .Intake.ExecutorState "selected"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/plan"><button class="btn btn-primary">Start planning</button></form>{{else if eq .Intake.ExecutorState "planned"}}<p>State: planned &mdash; awaiting operator approval</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/approve"><button class="btn btn-success">Approve plan</button></form>{{else if eq .Intake.ExecutorState "approved"}}<p>State: approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/run"><button class="btn btn-primary">Run</button></form>{{end}}{{else}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/select"><button class="btn btn-outline-primary">Select executor</button></form>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "publishing"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry confirmed ticket publication</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and .NeedsConfirmation (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><section class="card mb-3" aria-labelledby="executor-title"><div class="card-body"><h2 id="executor-title" class="card-title">Implementation</h2>{{if .ExecutorSelection}}<p>Executor: {{.ExecutorSelection.Kind}} &mdash; {{.ExecutorSelection.Rationale}}</p>{{if eq .Intake.ExecutorState "selected"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/plan"><button class="btn btn-primary">Start planning</button></form>{{else if eq .Intake.ExecutorState "planned"}}<p>State: planned &mdash; awaiting operator approval</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/approve"><button class="btn btn-success">Approve plan</button></form>{{else if eq .Intake.ExecutorState "approved"}}<p>State: approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/run"><button class="btn btn-primary">Run</button></form>{{else if eq .Intake.ExecutorState "running"}}<p>State: running &mdash; heartbeat: {{.Intake.ExecutorHeartbeat}}</p>{{else if .Intake.ExecutorCompleted}}<p>State: {{.Intake.ExecutorState}}</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}{{end}}{{else}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/select"><button class="btn btn-outline-primary">Select executor</button></form>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
 {{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
 {{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`
