@@ -285,6 +285,37 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 	}
 }
 
+func TestConfirmingOnlyOneRequiredArtifactDoesNotConfirmIntake(t *testing.T) {
+	app, err := New(Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"ship a dashboard"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	if _, err := app.db.Exec(`DELETE FROM intake_artifacts WHERE repository_id='42' AND kind='tickets'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("confirm specification = %d", response.Code)
+	}
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if strings.Contains(workspace.Body.String(), "State: confirmed") {
+		t.Fatalf("intake became confirmed without a ticket set: %q", workspace.Body.String())
+	}
+}
+
 func TestAbandonIntakeCleansOnlyUnpublishedDraft(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
@@ -621,6 +652,39 @@ func TestRestartResumesRecordedPartialPublicationWithoutCreatingAnotherIssue(t *
 	}
 	if len(publisher.publications) != 0 {
 		t.Fatalf("restart created duplicate issues: %#v", publisher.publications)
+	}
+}
+
+func TestRestartRecoversPromotionAfterCloneWasMovedBeforeStateWasRecorded(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	intake := &fakeIntake{}
+	deps := Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       intake,
+		Store:        database,
+		AllowedUsers: map[string]bool{"michael": true},
+	}
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO repositories(id,full_name) VALUES('42','mkoziy/hermestrator');
+		INSERT INTO intakes(repository_id,intake_id,state,clone_path,issue_number,issue_url,updated_at) VALUES('42','intake-42','promoting','/tmp/intake-42',73,'https://github.com/mkoziy/hermestrator/issues/73','2026-07-31T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	defer func() { _ = restarted.Close() }()
+	workspacePage := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if workspacePage.Code != http.StatusOK || !strings.Contains(workspacePage.Body.String(), "State: published") {
+		t.Fatalf("recovered promotion = %d %q", workspacePage.Code, workspacePage.Body.String())
 	}
 }
 

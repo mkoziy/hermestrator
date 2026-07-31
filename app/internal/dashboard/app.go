@@ -1752,12 +1752,15 @@ type rowQueryer interface {
 }
 
 func allRequiredArtifactsConfirmed(ctx context.Context, db rowQueryer, id string) (bool, error) {
-	var unconfirmed int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM intake_artifacts WHERE repository_id=? AND (kind IN (?,?) OR kind LIKE ?) AND confirmed_at IS NULL`, id, artifactSpec, artifactTickets, artifactADRProposalPrefix+"%").Scan(&unconfirmed)
+	var required, unconfirmed int
+	err := db.QueryRowContext(ctx, `SELECT
+		COUNT(CASE WHEN kind IN (?,?) THEN 1 END),
+		COUNT(CASE WHEN (kind IN (?,?) OR kind LIKE ?) AND confirmed_at IS NULL THEN 1 END)
+		FROM intake_artifacts WHERE repository_id=?`, artifactSpec, artifactTickets, artifactSpec, artifactTickets, artifactADRProposalPrefix+"%", id).Scan(&required, &unconfirmed)
 	if err != nil {
 		return false, err
 	}
-	return unconfirmed == 0, nil
+	return required == 2 && unconfirmed == 0, nil
 }
 func (a *application) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -148,3 +148,26 @@ func TestCloneIntakeInspectionRefusesSymlinkedEvidence(t *testing.T) {
 		t.Fatal("inspection through a symlink unexpectedly succeeded")
 	}
 }
+
+func TestCloneIntakePromotionIsRetrySafeAfterTheCloneWasMoved(t *testing.T) {
+	base := t.TempDir()
+	workspace := t.TempDir()
+	path := filepath.Join(base, "intake-promote")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	intake := CloneIntake{BaseDir: base, WorkspaceDir: workspace}
+	issue := dashboard.PublishedIssue{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}
+
+	promoted, err := intake.Promote(context.Background(), path, issue)
+	if err != nil {
+		t.Fatalf("initial promotion: %v", err)
+	}
+	retried, err := intake.Promote(context.Background(), path, issue)
+	if err != nil {
+		t.Fatalf("retry promotion: %v", err)
+	}
+	if retried != promoted {
+		t.Fatalf("retry promoted path = %q, want %q", retried, promoted)
+	}
+}

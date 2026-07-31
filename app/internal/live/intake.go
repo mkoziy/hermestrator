@@ -150,18 +150,28 @@ func (i CloneIntake) Promote(_ context.Context, path string, issue dashboard.Pub
 	if i.WorkspaceDir == "" {
 		return "", fmt.Errorf("issue workspace directory is required")
 	}
+	if issue.Number < 1 {
+		return "", fmt.Errorf("published issue number is required")
+	}
+	target := filepath.Join(i.WorkspaceDir, "issues", strconv.Itoa(issue.Number))
+	if info, err := os.Lstat(target); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("issue workspace %q is not a directory", target)
+		}
+		if _, sourceErr := os.Lstat(path); os.IsNotExist(sourceErr) {
+			return target, nil
+		} else if sourceErr != nil {
+			return "", fmt.Errorf("inspect intake workspace: %w", sourceErr)
+		}
+		return "", fmt.Errorf("issue workspace %q already exists", target)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect issue workspace: %w", err)
+	}
 	if err := i.validateChild(path); err != nil {
 		return "", err
 	}
-	target := filepath.Join(i.WorkspaceDir, "issues", strconv.Itoa(issue.Number))
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return "", fmt.Errorf("create issue workspace parent: %w", err)
-	}
-	if _, err := os.Lstat(target); !os.IsNotExist(err) {
-		if err == nil {
-			return "", fmt.Errorf("issue workspace %q already exists", target)
-		}
-		return "", fmt.Errorf("inspect issue workspace: %w", err)
 	}
 	if err := os.Rename(path, target); err != nil {
 		return "", fmt.Errorf("promote intake workspace: %w", err)
