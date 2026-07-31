@@ -128,6 +128,7 @@ func NewImplementationRunStore(path string) (*ImplementationRunStore, error) {
 		CREATE TABLE IF NOT EXISTS implementation_runs (
 			run_id          TEXT PRIMARY KEY,
 			repository_id   TEXT NOT NULL,
+			issue_number    INTEGER NOT NULL,
 			executor_kind   TEXT NOT NULL,
 			state           TEXT NOT NULL DEFAULT 'active',
 			failure_reason  TEXT NOT NULL DEFAULT '',
@@ -150,13 +151,16 @@ const (
 	runStateFailed    = "failed"
 )
 
-// Acquire inserts an active run row for repositoryID. It returns a unique
+// Acquire inserts an active run row for repositoryID and issueNumber. It returns a unique
 // run ID and an error. If another active run already exists for the same
 // repository, Acquire returns an error because the partial unique index
 // prevents a second active row.
-func (s *ImplementationRunStore) Acquire(ctx context.Context, repositoryID string, kind dashboard.ExecutorKind) (string, error) {
+func (s *ImplementationRunStore) Acquire(ctx context.Context, repositoryID string, issueNumber int, kind dashboard.ExecutorKind) (string, error) {
 	if strings.TrimSpace(repositoryID) == "" {
 		return "", fmt.Errorf("repository ID is required")
+	}
+	if issueNumber < 1 {
+		return "", fmt.Errorf("issue number is required")
 	}
 	if kind == "" {
 		return "", fmt.Errorf("executor kind is required")
@@ -164,8 +168,8 @@ func (s *ImplementationRunStore) Acquire(ctx context.Context, repositoryID strin
 	runID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO implementation_runs(run_id, repository_id, executor_kind, state, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
-		runID, repositoryID, string(kind), runStateActive, now, now)
+		`INSERT INTO implementation_runs(run_id, repository_id, issue_number, executor_kind, state, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,
+		runID, repositoryID, issueNumber, string(kind), runStateActive, now, now)
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			return "", fmt.Errorf("repository %q already has an active implementation run", repositoryID)
@@ -242,6 +246,7 @@ func (s *ImplementationRunStore) RecentFailures(ctx context.Context, repositoryI
 type ActiveRun struct {
 	RunID        string
 	RepositoryID string
+	IssueNumber  int
 	ExecutorKind string
 	CreatedAt    string
 }
@@ -249,7 +254,7 @@ type ActiveRun struct {
 // ListActive returns all implementation runs currently in the active state.
 func (s *ImplementationRunStore) ListActive(ctx context.Context) ([]ActiveRun, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT run_id, repository_id, executor_kind, created_at FROM implementation_runs WHERE state=? ORDER BY created_at ASC`,
+		`SELECT run_id, repository_id, issue_number, executor_kind, created_at FROM implementation_runs WHERE state=? ORDER BY created_at ASC`,
 		runStateActive)
 	if err != nil {
 		return nil, fmt.Errorf("list active implementation runs: %w", err)
@@ -258,7 +263,7 @@ func (s *ImplementationRunStore) ListActive(ctx context.Context) ([]ActiveRun, e
 	var runs []ActiveRun
 	for rows.Next() {
 		var r ActiveRun
-		if err := rows.Scan(&r.RunID, &r.RepositoryID, &r.ExecutorKind, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.RunID, &r.RepositoryID, &r.IssueNumber, &r.ExecutorKind, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan active run: %w", err)
 		}
 		runs = append(runs, r)

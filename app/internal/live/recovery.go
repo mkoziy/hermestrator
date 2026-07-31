@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
@@ -162,13 +163,8 @@ func RecoverLocks(ctx context.Context, store *ImplementationRunStore, classifier
 		}
 
 		// Process is not confirmed alive. Classify the workspace and
-		// release the lock.
-		workspacePath := filepath.Join(workspaceRoot, run.RepositoryID)
-		// Issue workspaces are keyed by issue number, but at the lock
-		// level we use repository ID. We need to find the workspace
-		// for this repository. The workspace root may contain
-		// issue-number subdirectories. For now, classify based on
-		// whether any workspace for this repo exists.
+		// release the lock. Use the issue number to construct the workspace path.
+		workspacePath := filepath.Join(workspaceRoot, strconv.Itoa(run.IssueNumber))
 		state, classErr := classifier.Classify(ctx, workspacePath, false)
 		if classErr != nil {
 			// Workspace doesn't exist or is corrupt — release with

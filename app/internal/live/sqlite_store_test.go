@@ -50,7 +50,7 @@ func TestImplementationRunStoreAcquireFailsOnSecondAcquireForSameRepo(t *testing
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	runID, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID, err := store.Acquire(ctx, "repo-1", 1, "ralphex")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestImplementationRunStoreAcquireFailsOnSecondAcquireForSameRepo(t *testing
 		t.Fatal("expected a non-empty run ID")
 	}
 
-	_, err = store.Acquire(ctx, "repo-1", "codex")
+	_, err = store.Acquire(ctx, "repo-1", 2, "codex")
 	if err == nil {
 		t.Fatal("second acquire for same repo should fail on unique constraint")
 	}
@@ -72,7 +72,7 @@ func TestImplementationRunStoreAcquireSucceedsForDifferentRepos(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	runID1, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID1, err := store.Acquire(ctx, "repo-1", 1, "ralphex")
 	if err != nil {
 		t.Fatalf("acquire repo-1: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestImplementationRunStoreAcquireSucceedsForDifferentRepos(t *testing.T) {
 		t.Fatal("expected a non-empty run ID for repo-1")
 	}
 
-	runID2, err := store.Acquire(ctx, "repo-2", "codex")
+	runID2, err := store.Acquire(ctx, "repo-2", 1, "codex")
 	if err != nil {
 		t.Fatalf("acquire repo-2: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestImplementationRunStoreReleaseAndReacquire(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	runID1, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID1, err := store.Acquire(ctx, "repo-1", 1, "ralphex")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestImplementationRunStoreReleaseAndReacquire(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 
-	runID2, err := store.Acquire(ctx, "repo-1", "codex")
+	runID2, err := store.Acquire(ctx, "repo-1", 2, "codex")
 	if err != nil {
 		t.Fatalf("re-acquire after release: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestImplementationRunStoreRecentFailures(t *testing.T) {
 	ctx := context.Background()
 
 	// Acquire and release a failed run.
-	runID1, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID1, err := store.Acquire(ctx, "repo-1", 1, "ralphex")
 	if err != nil {
 		t.Fatalf("acquire run 1: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestImplementationRunStoreRecentFailures(t *testing.T) {
 	}
 
 	// Acquire and release another failed run with a different executor.
-	runID2, err := store.Acquire(ctx, "repo-1", "codex")
+	runID2, err := store.Acquire(ctx, "repo-1", 2, "codex")
 	if err != nil {
 		t.Fatalf("acquire run 2: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestImplementationRunStoreRecentFailures(t *testing.T) {
 	}
 
 	// Acquire and release a completed run (should NOT appear in results).
-	runID3, err := store.Acquire(ctx, "repo-1", "pi")
+	runID3, err := store.Acquire(ctx, "repo-1", 3, "pi")
 	if err != nil {
 		t.Fatalf("acquire run 3: %v", err)
 	}
@@ -191,12 +191,17 @@ func TestImplementationRunStoreAcquireRejectsEmptyInputs(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	_, err = store.Acquire(ctx, "", "ralphex")
+	_, err = store.Acquire(ctx, "", 1, "ralphex")
 	if err == nil {
 		t.Fatal("Acquire with empty repository ID should fail")
 	}
 
-	_, err = store.Acquire(ctx, "repo-1", "")
+	_, err = store.Acquire(ctx, "repo-1", 0, "ralphex")
+	if err == nil {
+		t.Fatal("Acquire with invalid issue number should fail")
+	}
+
+	_, err = store.Acquire(ctx, "repo-1", 1, "")
 	if err == nil {
 		t.Fatal("Acquire with empty executor kind should fail")
 	}
@@ -210,7 +215,7 @@ func TestImplementationRunStoreReleaseRejectsInvalidStates(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	runID, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID, err := store.Acquire(ctx, "repo-1", 1, "ralphex")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}

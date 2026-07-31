@@ -240,17 +240,17 @@ func TestRecoverLocksReleasesCrashOrphanedLock(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	// Acquire a lock for repo-1.
-	runID, err := store.Acquire(ctx, "repo-1", "ralphex")
+	// Acquire a lock for repo-1, issue 42.
+	runID, err := store.Acquire(ctx, "repo-1", 42, "ralphex")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 
 	// Create the workspace directory as a real git repo so the
-	// classifier can inspect it.
+	// classifier can inspect it. Workspace is keyed by issue number.
 	dir := t.TempDir()
 	wsRoot := filepath.Join(dir, "workspaces")
-	repoPath := filepath.Join(wsRoot, "repo-1")
+	repoPath := filepath.Join(wsRoot, "42")
 	setupGitRepo(t, repoPath)
 
 	classifier := WorkspaceClassifier{
@@ -266,7 +266,7 @@ func TestRecoverLocksReleasesCrashOrphanedLock(t *testing.T) {
 
 	// The lock should now be released, so a subsequent acquire for the
 	// same repository should succeed.
-	runID2, err := store.Acquire(ctx, "repo-1", "codex")
+	runID2, err := store.Acquire(ctx, "repo-1", 43, "codex")
 	if err != nil {
 		t.Fatalf("re-acquire after recovery: %v (original runID=%s)", err, runID)
 	}
@@ -286,14 +286,14 @@ func TestRecoverLocksKeepsAliveProcessLock(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
-	runID, err := store.Acquire(ctx, "repo-1", "ralphex")
+	runID, err := store.Acquire(ctx, "repo-1", 42, "ralphex")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 
 	dir := t.TempDir()
 	wsRoot := filepath.Join(dir, "workspaces")
-	repoPath := filepath.Join(wsRoot, "repo-1")
+	repoPath := filepath.Join(wsRoot, "42")
 	setupGitRepo(t, repoPath)
 
 	classifier := WorkspaceClassifier{
@@ -308,7 +308,7 @@ func TestRecoverLocksKeepsAliveProcessLock(t *testing.T) {
 	}
 
 	// The lock should still be held.
-	_, err = store.Acquire(ctx, "repo-1", "codex")
+	_, err = store.Acquire(ctx, "repo-1", 43, "codex")
 	if err == nil {
 		t.Fatal("expected acquire to fail because alive lock is still held")
 	}
