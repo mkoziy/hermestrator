@@ -148,7 +148,7 @@ func TestImplementationRunStoreRecentFailures(t *testing.T) {
 		t.Fatalf("release run 2: %v", err)
 	}
 
-	// Acquire and release a completed run (should appear in results).
+	// Acquire and release a completed run (should NOT appear in results).
 	runID3, err := store.Acquire(ctx, "repo-1", "pi")
 	if err != nil {
 		t.Fatalf("acquire run 3: %v", err)
@@ -161,19 +161,16 @@ func TestImplementationRunStoreRecentFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recent failures: %v", err)
 	}
-	if len(records) != 3 {
-		t.Fatalf("expected 3 records, got %d", len(records))
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records (failed runs only), got %d", len(records))
 	}
 
-	// Most recent first.
-	if records[0].Kind != "pi" {
-		t.Fatalf("most recent should be pi, got %s", records[0].Kind)
+	// Most recent first (only failed runs; completed "pi" run excluded).
+	if records[0].Kind != "codex" || records[0].Reason != "out of memory" {
+		t.Fatalf("most recent should be codex, got kind=%s reason=%s", records[0].Kind, records[0].Reason)
 	}
-	if records[1].Kind != "codex" || records[1].Reason != "out of memory" {
+	if records[1].Kind != "ralphex" || records[1].Reason != "connection timeout" {
 		t.Fatalf("second record mismatch: kind=%s reason=%s", records[1].Kind, records[1].Reason)
-	}
-	if records[2].Kind != "ralphex" || records[2].Reason != "connection timeout" {
-		t.Fatalf("third record mismatch: kind=%s reason=%s", records[2].Kind, records[2].Reason)
 	}
 
 	// Different repository returns no records.

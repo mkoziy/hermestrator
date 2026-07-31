@@ -201,8 +201,12 @@ func (s *ImplementationRunStore) Release(ctx context.Context, runID string, term
 	return nil
 }
 
-// RecentFailures returns up to limit most recent terminal runs
-// (completed or failed) for repositoryID, ordered by most recent first.
+// RecentFailures returns up to limit most recent failed runs
+// (state = 'failed') for repositoryID, ordered by most recent first.
+// Only failed runs are returned because callers feed these into
+// SelectExecutor's priorFailures to avoid re-selecting executors that
+// have already failed. Completed (successful) runs are intentionally
+// excluded.
 func (s *ImplementationRunStore) RecentFailures(ctx context.Context, repositoryID string, limit int) ([]dashboard.FailureRecord, error) {
 	if strings.TrimSpace(repositoryID) == "" {
 		return nil, fmt.Errorf("repository ID is required")
@@ -211,8 +215,8 @@ func (s *ImplementationRunStore) RecentFailures(ctx context.Context, repositoryI
 		limit = 10
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT executor_kind, failure_reason FROM implementation_runs WHERE repository_id=? AND state IN (?,?) ORDER BY created_at DESC LIMIT ?`,
-		repositoryID, runStateCompleted, runStateFailed, limit)
+		`SELECT executor_kind, failure_reason FROM implementation_runs WHERE repository_id=? AND state=? ORDER BY created_at DESC LIMIT ?`,
+		repositoryID, runStateFailed, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query recent failures: %w", err)
 	}
