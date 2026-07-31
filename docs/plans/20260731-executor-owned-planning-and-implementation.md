@@ -443,25 +443,25 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Modify: `app/internal/live/sqlite_store.go`
 - Modify: `app/internal/live/sqlite_store_test.go`
 
-- [ ] add an `implementation_runs` table (repository_id, executor kind,
+- [x] add an `implementation_runs` table (repository_id, executor kind,
       state, failure_reason, timestamps) with a partial unique index scoped
       to `(repository_id) WHERE state IN (...active states...)`, mirroring
       `one_active_pending_turn_per_repository` (app.go:308) — no separate
       in-memory map
-- [ ] add acquire (insert row) / release (mark terminal, recording
+- [x] add acquire (insert row) / release (mark terminal, recording
       failure_reason on failure) helpers; call acquire before task 4's
       clone starts and release on terminal state or cancellation
-- [ ] add a query returning recent terminal runs (kind + failure_reason)
+- [x] add a query returning recent terminal runs (kind + failure_reason)
       for a repository, feeding `SelectExecutor`'s `priorFailures` input
       (task 1) — this is the only place that input is populated
-- [ ] write a test asserting a second acquire for the same repo fails on the
+- [x] write a test asserting a second acquire for the same repo fails on the
       unique constraint while the first is held (success case for the
       lock's core guarantee)
-- [ ] write a test asserting concurrent acquires for different repositories
+- [x] write a test asserting concurrent acquires for different repositories
       both succeed
-- [ ] write a test asserting release + re-acquire for the same repository
+- [x] write a test asserting release + re-acquire for the same repository
       succeeds (lock isn't stuck after a completed/cancelled run)
-- [ ] run tests — must pass before task 15
+- [x] run tests — must pass before task 15
 
 ### Task 15: Restart recovery classification
 
