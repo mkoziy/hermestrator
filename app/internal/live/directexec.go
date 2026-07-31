@@ -47,6 +47,7 @@ func (e *DirectExecutor) Run(ctx context.Context, kind dashboard.ExecutorKind, w
 	if runner == nil {
 		runner = &ProcessRunner{Command: exec.CommandContext}
 	}
+	runner.Dir = workspacePath
 
 	result, err := runner.Run(ctx, nil, name, args...)
 	if err != nil {

@@ -29,7 +29,7 @@ func TestRalphexExecutorInvocationShape(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "/pm/execution-profiles/default", "/workspace/42/plan.md")
+	_, err := executor.Run(context.Background(), "/workspace/42", "/pm/execution-profiles/default", "/workspace/42/plan.md")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRalphexExecutorNoPlanFileWrite(t *testing.T) {
 		},
 	}
 
-	_, err = executor.Run(context.Background(), "/pm/config", planPath)
+	_, err = executor.Run(context.Background(), workspace, "/pm/config", planPath)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestRalphexExecutorMissingConfigDir(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "", "/workspace/plan.md")
+	_, err := executor.Run(context.Background(), "/workspace", "", "/workspace/plan.md")
 	if err == nil {
 		t.Fatal("Run = nil, want error for missing config-dir")
 	}
@@ -133,7 +133,7 @@ func TestRalphexExecutorMissingPlanPath(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "/pm/config", "")
+	_, err := executor.Run(context.Background(), "/workspace", "/pm/config", "")
 	if err == nil {
 		t.Fatal("Run = nil, want error for missing plan path")
 	}
@@ -153,7 +153,7 @@ func TestRalphexExecutorStreamingOutput(t *testing.T) {
 		},
 	}
 
-	result, err := executor.Run(context.Background(), "/pm/config", "/workspace/plan.md")
+	result, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRalphexExecutorNonZeroExit(t *testing.T) {
 		},
 	}
 
-	result, err := executor.Run(context.Background(), "/pm/config", "/workspace/plan.md")
+	result, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestRalphexExecutorNeverCallsRalphexPlan(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "/pm/config", "/workspace/plan.md")
+	_, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

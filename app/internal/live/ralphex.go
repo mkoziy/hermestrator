@@ -27,7 +27,7 @@ type RalphexExecutor struct {
 // planPath using the PM-owned execution profile at configDir. It returns
 // the final RunResult (exit code, duration, captured lines, cancellation
 // status) so callers can surface execution telemetry in the dashboard.
-func (e *RalphexExecutor) Run(ctx context.Context, configDir, planPath string) (*RunResult, error) {
+func (e *RalphexExecutor) Run(ctx context.Context, workspacePath, configDir, planPath string) (*RunResult, error) {
 	if configDir == "" {
 		return nil, fmt.Errorf("ralphex execution: config-dir is required")
 	}
@@ -39,6 +39,7 @@ func (e *RalphexExecutor) Run(ctx context.Context, configDir, planPath string) (
 	if runner == nil {
 		runner = &ProcessRunner{Command: exec.CommandContext}
 	}
+	runner.Dir = workspacePath
 
 	result, err := runner.Run(ctx, nil, "ralphex", "--config-dir", configDir, planPath)
 	if err != nil {

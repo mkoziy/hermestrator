@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -41,6 +42,9 @@ type ProcessRunner struct {
 	// production uses exec.CommandContext. The runner adjusts
 	// cmd.SysProcAttr before starting the child.
 	Command func(ctx context.Context, name string, args ...string) *exec.Cmd
+	// Dir is the working directory for the subprocess. When empty, the
+	// subprocess inherits the parent's working directory.
+	Dir string
 }
 
 // Run starts name with args, streams stdout and stderr line-by-line to onLine,
@@ -56,6 +60,13 @@ func (r *ProcessRunner) Run(ctx context.Context, onLine func(LineEvent) error, n
 	}
 
 	cmd := command(ctx, name, args...)
+
+	// Set the working directory if specified and exists.
+	if r.Dir != "" {
+		if _, err := os.Stat(r.Dir); err == nil {
+			cmd.Dir = r.Dir
+		}
+	}
 
 	// Put the child in its own process group so a single signal kills the
 	// entire tree, not just the direct child.
