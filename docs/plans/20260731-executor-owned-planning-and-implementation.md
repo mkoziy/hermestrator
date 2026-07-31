@@ -241,19 +241,19 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/process.go`
 - Create: `app/internal/live/process_test.go`
 
-- [ ] implement a `ProcessRunner` with an injectable `Command func(context.Context,
+- [x] implement a `ProcessRunner` with an injectable `Command func(context.Context,
       string, ...string) *exec.Cmd` field, streaming stdout/stderr line-by-line
       to a callback, tracking heartbeat and duration, and returning exit status
-- [ ] start the child in its own process group by setting
+- [x] start the child in its own process group by setting
       `cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}` on the
       `*exec.Cmd` returned by the injected `Command` (context cancellation
       alone only kills the direct child, not its descendants), and
       implement cancellation via `syscall.Kill(-pgid, ...)` on the group
-- [ ] write tests for success (using `printf`) and non-zero exit (`sh -c
+- [x] write tests for success (using `printf`) and non-zero exit (`sh -c
       'exit 1'`)
-- [ ] write tests for hang + cancellation (`sleep`) and partial-output
+- [x] write tests for hang + cancellation (`sleep`) and partial-output
       capture before cancel
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
 
 ### Task 4: Per-issue clone workspace lifecycle
 
