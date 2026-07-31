@@ -98,6 +98,7 @@ func (f *fakePublisher) Publish(_ context.Context, _ Repository, publications []
 type fakeIntake struct {
 	started, promoted, cleaned []string
 	promoteErr                 error
+	updateErr                  error
 }
 
 func (f *fakeIntake) Start(_ context.Context, _ Repository) (string, error) {
@@ -117,6 +118,8 @@ func (f *fakeIntake) Cleanup(_ context.Context, path string) error {
 	f.cleaned = append(f.cleaned, path)
 	return nil
 }
+
+func (f *fakeIntake) UpdateContext(context.Context, string, string) error { return f.updateErr }
 
 func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
 	app := mustApp(t, Dependencies{
@@ -332,6 +335,37 @@ func TestIntakeRequiresExplicitDiscoveryCompletionBeforeSynthesis(t *testing.T) 
 	}
 }
 
+func TestConversationCannotReopenCompletedDiscovery(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"ship a dashboard"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+
+	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"reopen discovery"}}.Encode(), "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("conversation after discovery completion = %d", response.Code)
+	}
+}
+
+func TestFailedContextWriteRevertsSynthesisArtifacts(t *testing.T) {
+	intake := &fakeIntake{updateErr: errors.New("disk unavailable")}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"ship a dashboard"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed context write = %d", response.Code)
+	}
+	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if strings.Contains(page.Body.String(), "Glossary updates") || !strings.Contains(page.Body.String(), "State: ready") {
+		t.Fatalf("partial synthesis persisted: %q", page.Body.String())
+	}
+}
+
 func TestReadyIntakeCanBeAbandoned(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
@@ -389,6 +423,35 @@ func TestADRProposalRequiresConsequentialIrreversibleDecision(t *testing.T) {
 	response := request(t, app, http.MethodPost, "/repositories/42/intake/adr", url.Values{"decision": {"Use blue"}, "alternative": {"Use green"}, "tradeoff": {"Blue is nicer"}}.Encode(), "michael")
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("ADR without eligibility gate = %d", response.Code)
+	}
+}
+
+func TestEligibleADRIsAssessedAutomaticallyAndRequiresItsOwnConfirmation(t *testing.T) {
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	decision := "Decision: use SQLite for intake state; Alternative: use Postgres; Trade-off: SQLite limits concurrent writers; Reversal cost: migration of durable sessions; Consequential: true; Hard to reverse: true"
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {decision}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+
+	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	for _, want := range []string{"ADR eligibility assessment", "ADR proposal", "use SQLite for intake state"} {
+		if !strings.Contains(page.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, page.Body.String())
+		}
+	}
+	for _, artifact := range []string{"spec", "tickets"} {
+		_ = request(t, app, http.MethodPost, "/repositories/42/intake/"+artifact+"/confirm", "", "michael")
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusConflict {
+		t.Fatalf("published without ADR confirmation = %d", response.Code)
+	}
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/adr-proposal-1/confirm", "", "michael")
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("published after ADR confirmation = %d", response.Code)
 	}
 }
 
@@ -460,15 +523,15 @@ func TestRestartResumesRecordedPartialPublicationWithoutCreatingAnotherIssue(t *
 		t.Fatal(err)
 	}
 	defer func() { _ = restarted.Close() }()
-	if response := request(t, restarted, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
-		t.Fatalf("resume publication = %d", response.Code)
+	if response := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "State: published") {
+		t.Fatalf("recovered publication = %d %q", response.Code, response.Body.String())
 	}
 	if len(publisher.publications) != 0 {
 		t.Fatalf("restart created duplicate issues: %#v", publisher.publications)
 	}
 }
 
-func TestDraftIntakeRendersADRProposalForm(t *testing.T) {
+func TestDraftIntakeDoesNotLetOperatorSelfAttestAnADR(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
@@ -476,8 +539,8 @@ func TestDraftIntakeRendersADRProposalForm(t *testing.T) {
 	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
 
 	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
-	if !strings.Contains(workspace.Body.String(), "Propose ADR") {
-		t.Fatalf("ADR form missing: %q", workspace.Body.String())
+	if strings.Contains(workspace.Body.String(), "Propose ADR") {
+		t.Fatalf("ADR self-attestation form rendered: %q", workspace.Body.String())
 	}
 }
 

@@ -106,17 +106,19 @@ type Inspector interface {
 type artifactKind string
 
 const (
-	artifactGlossary artifactKind = "glossary"
-	artifactADR      artifactKind = "adr-proposal"
-	artifactSpec     artifactKind = "spec"
-	artifactTickets  artifactKind = "tickets"
+	artifactGlossary            artifactKind = "glossary"
+	artifactSpec                artifactKind = "spec"
+	artifactTickets             artifactKind = "tickets"
+	artifactADRAssessmentPrefix              = "adr-assessment-"
+	artifactADRProposalPrefix                = "adr-proposal-"
 )
 
 type Artifact struct {
-	Kind      artifactKind
-	Body      string
-	Confirmed bool
-	URL       string
+	Kind              artifactKind
+	Body              string
+	Confirmed         bool
+	NeedsConfirmation bool
+	URL               string
 }
 
 type intakeState string
@@ -282,6 +284,11 @@ func New(deps Dependencies) (*application, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &application{deps: deps, db: db, templates: t, ctx: ctx, cancel: cancel}
+	if err := a.recoverIntakes(); err != nil {
+		cancel()
+		_ = db.Close()
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.root)
 	mux.HandleFunc("GET /repositories", a.repositories)
@@ -304,6 +311,66 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// recoverIntakes completes only local, already-authorized work after a
+// restart. It never publishes new GitHub issues: publication retry remains the
+// idempotent publisher's responsibility.
+func (a *application) recoverIntakes() error {
+	rows, err := a.db.Query(`SELECT repository_id,state,clone_path,issue_number,issue_url FROM intakes WHERE state IN (?,?,?)`, intakePublishing, intakePromoting, intakeAbandoning)
+	if err != nil {
+		return fmt.Errorf("list interrupted intakes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, path, issueURL string
+		var state intakeState
+		var issueNumber sql.NullInt64
+		if err := rows.Scan(&id, &state, &path, &issueNumber, &issueURL); err != nil {
+			return fmt.Errorf("scan interrupted intake: %w", err)
+		}
+		if state == intakeAbandoning {
+			if a.deps.Intake != nil && path != "" {
+				if err := a.deps.Intake.Cleanup(context.Background(), path); err != nil {
+					return fmt.Errorf("clean interrupted intake %q: %w", id, err)
+				}
+			}
+			if _, err := a.db.Exec(`UPDATE intakes SET state=?,clone_path='',updated_at=? WHERE repository_id=? AND state=?`, intakeAbandoned, time.Now().UTC().Format(time.RFC3339Nano), id, intakeAbandoning); err != nil {
+				return fmt.Errorf("record abandoned intake recovery %q: %w", id, err)
+			}
+			continue
+		}
+		if state == intakePublishing {
+			var recorded PublishedIssue
+			err := a.db.QueryRow(`SELECT issue_number,issue_url FROM intake_issues WHERE repository_id=? ORDER BY ticket_index LIMIT 1`, id).Scan(&recorded.Number, &recorded.URL)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("load partial publication for intake %q: %w", id, err)
+			}
+			if _, err := a.db.Exec(`UPDATE intakes SET state=?,issue_number=?,issue_url=?,updated_at=? WHERE repository_id=? AND state=?`, intakePromoting, recorded.Number, recorded.URL, time.Now().UTC().Format(time.RFC3339Nano), id, intakePublishing); err != nil {
+				return fmt.Errorf("reconcile partial publication for intake %q: %w", id, err)
+			}
+			state = intakePromoting
+			issueNumber = sql.NullInt64{Int64: int64(recorded.Number), Valid: true}
+			issueURL = recorded.URL
+		}
+		if !issueNumber.Valid || issueNumber.Int64 < 1 || issueURL == "" {
+			return fmt.Errorf("promoting intake %q lacks published issue details", id)
+		}
+		promotedPath := path
+		if a.deps.Intake != nil && path != "" {
+			promotedPath, err = a.deps.Intake.Promote(context.Background(), path, PublishedIssue{Number: int(issueNumber.Int64), URL: issueURL})
+			if err != nil {
+				return fmt.Errorf("promote interrupted intake %q: %w", id, err)
+			}
+		}
+		if _, err := a.db.Exec(`UPDATE intakes SET state=?,clone_path=?,updated_at=? WHERE repository_id=? AND state=?`, intakePublished, promotedPath, time.Now().UTC().Format(time.RFC3339Nano), id, intakePromoting); err != nil {
+			return fmt.Errorf("record promoted intake recovery %q: %w", id, err)
+		}
+	}
+	return rows.Err()
 }
 
 func (a *application) root(w http.ResponseWriter, r *http.Request) {
@@ -502,6 +569,15 @@ func (a *application) converse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	intake, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if intake.State != "" && intake.State != intakeDraft {
+		http.Error(w, "discovery is complete; synthesize or publish the existing intake", http.StatusConflict)
+		return
+	}
 	c, err := a.conversation(r.Context(), id)
 	if err != nil {
 		http.NotFound(w, r)
@@ -951,6 +1027,9 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		for _, artifact := range artifacts {
 			if artifact.Kind == artifactGlossary {
 				if err = updater.UpdateContext(r.Context(), status.Path, artifact.Body); err != nil {
+					if revertErr := a.revertSynthesis(r.Context(), repo.ID); revertErr != nil {
+						log.Printf("revert failed intake synthesis for repository %q: %s", repo.ID, redactSecrets(revertErr.Error()))
+					}
 					log.Printf("update intake context for repository %q: %s", repo.ID, redactSecrets(err.Error()))
 					http.Error(w, "could not update intake glossary", http.StatusInternalServerError)
 					return
@@ -960,6 +1039,21 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.redirectWorkspace(w, r, repo.ID)
+}
+
+func (a *application) revertSynthesis(ctx context.Context, id string) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM intake_artifacts WHERE repository_id=?`, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *application) completeDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -993,7 +1087,7 @@ func (a *application) completeDiscovery(w http.ResponseWriter, r *http.Request) 
 
 func (a *application) confirmArtifact(w http.ResponseWriter, r *http.Request) {
 	id, kind := r.PathValue("id"), artifactKind(r.PathValue("artifact"))
-	if kind != artifactSpec && kind != artifactTickets {
+	if !requiresConfirmation(kind) {
 		http.NotFound(w, r)
 		return
 	}
@@ -1017,12 +1111,12 @@ func (a *application) confirmArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "artifact draft required before confirmation", http.StatusConflict)
 		return
 	}
-	var confirmations int
-	if err = tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM intake_artifacts WHERE repository_id=? AND kind IN (?,?) AND confirmed_at IS NOT NULL`, id, artifactSpec, artifactTickets).Scan(&confirmations); err != nil {
+	allConfirmed, err := allRequiredArtifactsConfirmed(r.Context(), tx, id)
+	if err != nil {
 		http.Error(w, "could not confirm artifact", http.StatusInternalServerError)
 		return
 	}
-	if confirmations == 2 {
+	if allConfirmed {
 		if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeConfirmed, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
 			http.Error(w, "could not record intake confirmation", http.StatusInternalServerError)
 			return
@@ -1036,33 +1130,7 @@ func (a *application) confirmArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) proposeADR(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	status, err := a.intakeStatus(r.Context(), id)
-	if err != nil || (status.State != intakeDraft && status.State != intakeConfirmed) {
-		http.Error(w, "an active intake is required for an ADR proposal", http.StatusConflict)
-		return
-	}
-	if err = r.ParseForm(); err != nil {
-		http.Error(w, "invalid ADR proposal", http.StatusBadRequest)
-		return
-	}
-	decision := strings.TrimSpace(redactSecrets(r.Form.Get("decision")))
-	alternative := strings.TrimSpace(redactSecrets(r.Form.Get("alternative")))
-	tradeoff := strings.TrimSpace(redactSecrets(r.Form.Get("tradeoff")))
-	if r.Form.Get("consequential") != "true" || r.Form.Get("hard_to_reverse") != "true" {
-		http.Error(w, "an ADR requires a consequential, hard-to-reverse decision", http.StatusUnprocessableEntity)
-		return
-	}
-	if decision == "" || alternative == "" || tradeoff == "" {
-		http.Error(w, "an ADR needs a decision, alternative, and trade-off", http.StatusBadRequest)
-		return
-	}
-	body := "# ADR proposal\n\n## Decision\n\n" + decision + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff
-	if _, err = a.db.ExecContext(r.Context(), `INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,confirmed_at=NULL,url='',created_at=excluded.created_at`, id, artifactADR, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		http.Error(w, "could not save ADR proposal", http.StatusInternalServerError)
-		return
-	}
-	a.redirectWorkspace(w, r, id)
+	http.Error(w, "ADR proposals are created only by the PM eligibility assessment", http.StatusUnprocessableEntity)
 }
 
 func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
@@ -1089,7 +1157,8 @@ func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a confirmed intake is required before publishing", http.StatusConflict)
 		return
 	}
-	if !a.confirmed(r.Context(), id, artifactSpec) || !a.confirmed(r.Context(), id, artifactTickets) {
+	allConfirmed, err := allRequiredArtifactsConfirmed(r.Context(), a.db, id)
+	if err != nil || !allConfirmed {
 		http.Error(w, "a confirmed intake is required before publishing", http.StatusConflict)
 		return
 	}
@@ -1332,11 +1401,41 @@ func (a *application) redirectWorkspace(w http.ResponseWriter, r *http.Request, 
 
 func synthesizeArtifacts(repo Repository, conversation Conversation) []Artifact {
 	resolved := grillWithDocs(conversation)
-	return []Artifact{
+	artifacts := []Artifact{
 		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
 		{Kind: artifactSpec, Body: toSpec(repo, resolved)},
 		{Kind: artifactTickets, Body: toTickets(repo, resolved)},
 	}
+	for index, decision := range resolved {
+		assessment, proposal := assessADR(strings.TrimSpace(strings.TrimPrefix(decision, "-")))
+		artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRAssessmentPrefix + strconv.Itoa(index+1)), Body: assessment})
+		if proposal != "" {
+			artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRProposalPrefix + strconv.Itoa(index+1)), Body: proposal})
+		}
+	}
+	return artifacts
+}
+
+// assessADR is a bounded policy capability: an ADR is eligible only when the
+// settled decision states the alternative, trade-off, and cost of reversal.
+// This keeps the operator from self-attesting eligibility in the dashboard.
+func assessADR(decision string) (string, string) {
+	fields := make(map[string]string)
+	for _, part := range strings.Split(decision, ";") {
+		name, value, found := strings.Cut(part, ":")
+		if found {
+			fields[strings.ToLower(strings.TrimSpace(name))] = strings.TrimSpace(value)
+		}
+	}
+	chosen, alternative := fields["decision"], fields["alternative"]
+	tradeoff, reversalCost := fields["trade-off"], fields["reversal cost"]
+	consequential, hardToReverse := fields["consequential"] == "true", fields["hard to reverse"] == "true"
+	if chosen == "" || alternative == "" || tradeoff == "" || reversalCost == "" || !consequential || !hardToReverse {
+		return "# ADR eligibility assessment\n\n## Decision\n\n" + decision + "\n\n## Criteria\n\n- Consequential: " + strconv.FormatBool(consequential) + "\n- Hard to reverse: " + strconv.FormatBool(hardToReverse) + "\n- Alternative, trade-off, and reversal cost recorded: " + strconv.FormatBool(chosen != "" && alternative != "" && tradeoff != "" && reversalCost != "") + "\n\n## Result\n\nIneligible. The PM cannot establish every ADR criterion from this settled decision.", ""
+	}
+	assessment := "# ADR eligibility assessment\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost + "\n\n## Result\n\nEligible: this is a consequential, hard-to-reverse decision with a real trade-off."
+	proposal := "# ADR proposal\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost
+	return assessment, proposal
 }
 
 // grillWithDocs is the bounded discovery capability. It accepts only settled
@@ -1559,6 +1658,7 @@ func (a *application) artifacts(ctx context.Context, id string) ([]Artifact, err
 			return nil, err
 		}
 		artifact.Confirmed = confirmed.Valid
+		artifact.NeedsConfirmation = requiresConfirmation(artifact.Kind)
 		artifacts = append(artifacts, artifact)
 	}
 	return artifacts, rows.Err()
@@ -1572,10 +1672,21 @@ func (a *application) artifact(ctx context.Context, id string, kind artifactKind
 	return artifact, err
 }
 
-func (a *application) confirmed(ctx context.Context, id string, kind artifactKind) bool {
-	var confirmed sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT confirmed_at FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, kind).Scan(&confirmed)
-	return err == nil && confirmed.Valid
+func requiresConfirmation(kind artifactKind) bool {
+	return kind == artifactSpec || kind == artifactTickets || strings.HasPrefix(string(kind), artifactADRProposalPrefix)
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func allRequiredArtifactsConfirmed(ctx context.Context, db rowQueryer, id string) (bool, error) {
+	var unconfirmed int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM intake_artifacts WHERE repository_id=? AND (kind IN (?,?) OR kind LIKE ?) AND confirmed_at IS NULL`, id, artifactSpec, artifactTickets, artifactADRProposalPrefix+"%").Scan(&unconfirmed)
+	if err != nil {
+		return false, err
+	}
+	return unconfirmed == 0, nil
 }
 func (a *application) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1585,7 +1696,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form><form class="card card-body mt-3" method="post" action="/repositories/{{.RepositoryID}}/intake/adr"><label>Decision <input class="form-control" name="decision" required></label><label>Alternative <input class="form-control" name="alternative" required></label><label>Trade-off <input class="form-control" name="tradeoff" required></label><label><input type="checkbox" name="consequential" value="true" required> Consequential</label><label><input type="checkbox" name="hard_to_reverse" value="true" required> Hard to reverse</label><button class="btn btn-outline-primary mt-2">Propose ADR</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and (or (eq .Kind "spec") (eq .Kind "tickets")) (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and .NeedsConfirmation (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
 {{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
 {{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`
