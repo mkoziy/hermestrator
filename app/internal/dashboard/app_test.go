@@ -99,6 +99,7 @@ type fakeIntake struct {
 	started, promoted, cleaned []string
 	promoteErr                 error
 	updateErr                  error
+	inspection                 string
 }
 
 func (f *fakeIntake) Start(_ context.Context, _ Repository) (string, error) {
@@ -120,6 +121,8 @@ func (f *fakeIntake) Cleanup(_ context.Context, path string) error {
 }
 
 func (f *fakeIntake) UpdateContext(context.Context, string, string) error { return f.updateErr }
+
+func (f *fakeIntake) Inspect(context.Context, string) (string, error) { return f.inspection, nil }
 
 func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
 	app := mustApp(t, Dependencies{
@@ -190,7 +193,10 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 		Store:        database,
 		AllowedUsers: map[string]bool{"michael": true},
 	}
-	app := mustApp(t, deps)
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	repos := request(t, app, http.MethodGet, "/repositories", "", "michael")
 	if !strings.Contains(repos.Body.String(), "mkoziy/hermestrator") {
@@ -213,7 +219,10 @@ func TestOperatorCanSelectRepositoryAndContinueConversationAfterRestart(t *testi
 		t.Fatalf("ordinary turn notified Telegram: %#v", telegram.notifications)
 	}
 
-	restarted := mustApp(t, deps)
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
 	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
 	if !strings.Contains(page.Body.String(), "a dashboard") || !strings.Contains(page.Body.String(), "What outcome") {
 		t.Fatalf("durable conversation missing: %q", page.Body.String())
@@ -392,10 +401,11 @@ func TestIntakeStartsWithOnePersistedDiscoveryQuestion(t *testing.T) {
 	}
 }
 
-func TestTicketSynthesisCreatesDependentTracerBulletsForMultipleDecisions(t *testing.T) {
+func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
 	artifacts := synthesizeArtifacts(Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
 		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
-		{Role: "operator", Text: "operators publish confirmed tickets"}, {Role: "pm", Text: "What should happen next?"},
+		{Role: "operator", Text: "operators publish confirmed tickets\nBlocked by: Ticket 1"}, {Role: "pm", Text: "What should happen next?"},
+		{Role: "operator", Text: "operators document their work"}, {Role: "pm", Text: "What should happen next?"},
 	}})
 	var tickets string
 	for _, artifact := range artifacts {
@@ -403,7 +413,7 @@ func TestTicketSynthesisCreatesDependentTracerBulletsForMultipleDecisions(t *tes
 			tickets = artifact.Body
 		}
 	}
-	if !strings.Contains(tickets, "## Ticket 2:") || !strings.Contains(tickets, "Blocked by: Ticket 1") {
+	if !strings.Contains(tickets, "## Ticket 2:") || !strings.Contains(tickets, "Blocked by: Ticket 1") || !strings.Contains(tickets, "## Ticket 3: operators document their work\n\nBlocked by: none") {
 		t.Fatalf("tickets do not express a dependency graph: %q", tickets)
 	}
 }
@@ -468,6 +478,34 @@ func TestIntakeDoesNotCreateAnotherCloneWhileOneIsActive(t *testing.T) {
 	}
 }
 
+func TestIntakePersistsInspectableRepositoryEvidence(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	intake := &fakeIntake{inspection: "# README.md\n\nThe project already uses SQLite."}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	for _, want := range []string{"Repository evidence", "project already uses SQLite"} {
+		if !strings.Contains(page.Body.String(), want) {
+			t.Fatalf("workspace missing %q: %q", want, page.Body.String())
+		}
+	}
+}
+
 func TestPublishedIntakeRetriesPromotionWithoutPublishingAnotherIssue(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
 	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
@@ -528,6 +566,46 @@ func TestRestartResumesRecordedPartialPublicationWithoutCreatingAnotherIssue(t *
 	}
 	if len(publisher.publications) != 0 {
 		t.Fatalf("restart created duplicate issues: %#v", publisher.publications)
+	}
+}
+
+func TestRestartAllowsIdempotentRetryWhenPublicationWasNotRecorded(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 99, URL: "https://github.com/mkoziy/hermestrator/issues/99"}}}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: &fakeIntake{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/spec/confirm", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/tickets/confirm", "", "michael")
+	if _, err := app.db.Exec(`UPDATE intakes SET state='publishing' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Retry confirmed ticket publication") {
+		t.Fatalf("publishing intake did not offer retry: %q", workspace.Body.String())
+	}
+	if response := request(t, restarted, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("retry publication = %d", response.Code)
+	}
+	if len(publisher.publications) != 1 {
+		t.Fatalf("published %d times", len(publisher.publications))
 	}
 }
 
