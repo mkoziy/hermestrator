@@ -234,6 +234,37 @@ func (s *ImplementationRunStore) RecentFailures(ctx context.Context, repositoryI
 	return records, nil
 }
 
+// ActiveRun is a lightweight record of an in-flight implementation run.
+type ActiveRun struct {
+	RunID        string
+	RepositoryID string
+	ExecutorKind string
+	CreatedAt    string
+}
+
+// ListActive returns all implementation runs currently in the active state.
+func (s *ImplementationRunStore) ListActive(ctx context.Context) ([]ActiveRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT run_id, repository_id, executor_kind, created_at FROM implementation_runs WHERE state=? ORDER BY created_at ASC`,
+		runStateActive)
+	if err != nil {
+		return nil, fmt.Errorf("list active implementation runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var runs []ActiveRun
+	for rows.Next() {
+		var r ActiveRun
+		if err := rows.Scan(&r.RunID, &r.RepositoryID, &r.ExecutorKind, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan active run: %w", err)
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active runs: %w", err)
+	}
+	return runs, nil
+}
+
 // isUniqueConstraintError returns true when err is an SQLite
 // UNIQUE constraint violation.
 func isUniqueConstraintError(err error) bool {

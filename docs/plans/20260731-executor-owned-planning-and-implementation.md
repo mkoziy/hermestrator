@@ -469,20 +469,20 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/recovery.go`
 - Create: `app/internal/live/recovery_test.go`
 
-- [ ] implement classification of each known in-flight issue workspace into
+- [x] implement classification of each known in-flight issue workspace into
       `NoChanges | UncommittedChanges | LocalCommits | RemoteBranchExists |
       ExecutorFailed` from git status/log and last-known process state
-- [ ] as part of the same startup pass, reconcile task 14's repository lock:
+- [x] as part of the same startup pass, reconcile task 14's repository lock:
       any lock row whose owning run has no confirmed-alive process gets
       released (or transitioned to a terminal state derived from the git
       classification above) — an unclean PM crash must not leave a
       repository permanently locked
-- [ ] write table-driven tests covering each of the five states
-- [ ] write a test for an ambiguous/corrupt workspace surfacing an explicit
+- [x] write table-driven tests covering each of the five states
+- [x] write a test for an ambiguous/corrupt workspace surfacing an explicit
       error rather than guessing a state
-- [ ] write a test asserting a crash-orphaned lock is released during
+- [x] write a test asserting a crash-orphaned lock is released during
       recovery, allowing a subsequent acquire for the same repository
-- [ ] run tests — must pass before task 16
+- [x] run tests — must pass before task 16
 
 ### Task 16: Verify acceptance criteria
 

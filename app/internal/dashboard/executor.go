@@ -165,6 +165,24 @@ type IssueClone interface {
 	Cleanup(context.Context, string) error
 }
 
+// RecoveryState classifies an in-flight issue workspace after a restart.
+type RecoveryState string
+
+const (
+	RecoveryNoChanges          RecoveryState = "no-changes"
+	RecoveryUncommittedChanges RecoveryState = "uncommitted-changes"
+	RecoveryLocalCommits       RecoveryState = "local-commits"
+	RecoveryRemoteBranchExists RecoveryState = "remote-branch-exists"
+	RecoveryExecutorFailed     RecoveryState = "executor-failed"
+)
+
+// WorkspaceClassifier inspects a workspace directory and returns its
+// recovery state. The processFailed flag, when true, indicates the last
+// known executor process terminated abnormally.
+type WorkspaceClassifier interface {
+	Classify(ctx context.Context, workspacePath string, processFailed bool) (RecoveryState, error)
+}
+
 func rationaleFor(k ExecutorKind, scope string, repoPolicy ExecutorKind) string {
 	if repoPolicy != "" {
 		return fmt.Sprintf("repository policy prefers %s", k)
