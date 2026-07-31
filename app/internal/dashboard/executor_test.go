@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -150,5 +151,97 @@ func TestSelectExecutor_NilPriorFailures(t *testing.T) {
 	result := SelectExecutor("medium", "", nil)
 	if result.Kind != Codex {
 		t.Errorf("expected Codex for medium scope, got %q", result.Kind)
+	}
+}
+
+func TestValidatePlan_ValidPlan(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "minimal valid plan",
+			content: `# Plan: Example plan
+
+### Task 1: Do the thing
+
+Some description.
+`,
+		},
+		{
+			name: "plan with multiple tasks",
+			content: `# Plan: Multi-task plan
+
+### Task 1: First
+
+### Task 2: Second
+
+### Task 3: Third
+`,
+		},
+		{
+			name: "title line with extra whitespace",
+			content: `  # Plan: Something
+
+### Task 1: Do it
+`,
+		},
+		{
+			name: "task section indented",
+			content: `# Plan: Example
+
+  ### Task 5: Indented task
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidatePlan(tt.content); err != nil {
+				t.Errorf("ValidatePlan = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidatePlan_InvalidPlan(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "empty content",
+			content: "",
+		},
+		{
+			name:    "no title line",
+			content: "### Task 1: Do something\n\nDescription.\n",
+		},
+		{
+			name:    "no task sections",
+			content: "# Plan: My plan\n\nJust a description, no tasks.\n",
+		},
+		{
+			name:    "wrong title format",
+			content: "## Plan: Wrong level\n\n### Task 1: Do it\n",
+		},
+		{
+			name:    "wrong task format",
+			content: "# Plan: My plan\n\n### Task: Missing number\n",
+		},
+		{
+			name:    "bold instead of heading",
+			content: "**Plan:** Not a heading\n\n**Task 1:** Not a heading either\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePlan(tt.content)
+			if err == nil {
+				t.Fatal("ValidatePlan = nil, want error")
+			}
+			if !errors.Is(err, ErrPlanInvalidStructure) {
+				t.Errorf("error = %v, want ErrPlanInvalidStructure", err)
+			}
+		})
 	}
 }

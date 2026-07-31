@@ -278,24 +278,24 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/planning.go`
 - Create: `app/internal/live/planning_test.go`
 
-- [ ] define the plan contract once here: the plan file path (relative to
+- [x] define the plan contract once here: the plan file path (relative to
       the issue workspace) and the minimal structural markers a valid plan
       must have (a `# Plan:` title line, one or more `### Task N:`
       sections) — export it so tasks 6/7/8 reference the same
       constant/type instead of redefining it
-- [ ] implement a planning call that reads a PM-owned planning profile
+- [x] implement a planning call that reads a PM-owned planning profile
       (model, effort, sandbox — the PM's own simple format; not ralphex's
       `read_cfg` schema, and not stored under the existing `./ralphex/`
       tree per issue #4's constraints) and invokes `codex exec` or `pi -p`
       directly via `ProcessRunner` with a bounded planning prompt, writing
       the result to the plan contract path
-- [ ] validate the produced output against the plan contract before
+- [x] validate the produced output against the plan contract before
       returning success; treat a structurally invalid plan as an error
-- [ ] write tests for successful plan generation via the codex path (fake
+- [x] write tests for successful plan generation via the codex path (fake
       `codex` via injected `Command`)
-- [ ] write tests for successful plan generation via the pi path (fake `pi`)
-- [ ] write a test for a structurally invalid plan output being rejected
-- [ ] run tests — must pass before task 6
+- [x] write tests for successful plan generation via the pi path (fake `pi`)
+- [x] write a test for a structurally invalid plan output being rejected
+- [x] run tests — must pass before task 6
 
 ### Task 6: Ralphex direct invocation for execution
 

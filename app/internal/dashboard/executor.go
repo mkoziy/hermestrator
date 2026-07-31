@@ -2,7 +2,10 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
 // ExecutorKind identifies which executor drives implementation for a ticket.
@@ -118,6 +121,40 @@ func indexInChain(k ExecutorKind, chain []ExecutorKind) int {
 	}
 	// Unknown kinds start at the end of the chain (VerificationOnly).
 	return len(chain) - 1
+}
+
+// PlanFileName is the standard plan file path relative to the issue
+// workspace root. Tasks 6, 7, and 8 reference this instead of
+// redefining it.
+const PlanFileName = "plan.md"
+
+// ErrPlanInvalidStructure is returned when a generated plan does not
+// satisfy the required structural markers.
+var ErrPlanInvalidStructure = errors.New("generated plan does not satisfy the required structure")
+
+var planTitleRE = regexp.MustCompile(`^# Plan:`)
+var planTaskRE = regexp.MustCompile(`^### Task \d+:`)
+
+// ValidatePlan checks that content satisfies the minimal structural markers
+// a valid generated plan must have: a "# Plan:" title line and one or more
+// "### Task N:" sections.
+func ValidatePlan(content string) error {
+	lines := strings.Split(content, "\n")
+	hasTitle := false
+	hasTask := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if planTitleRE.MatchString(trimmed) {
+			hasTitle = true
+		}
+		if planTaskRE.MatchString(trimmed) {
+			hasTask = true
+		}
+		if hasTitle && hasTask {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: hasTitle=%v hasTask=%v", ErrPlanInvalidStructure, hasTitle, hasTask)
 }
 
 // IssueClone creates an isolated clone for implementation work, keyed by
