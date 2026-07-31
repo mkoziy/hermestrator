@@ -323,17 +323,17 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/directexec.go`
 - Create: `app/internal/live/directexec_test.go`
 
-- [ ] implement a direct-execution call: when `SelectExecutor` (task 1)
+- [x] implement a direct-execution call: when `SelectExecutor` (task 1)
       picked `Codex` or `Pi` rather than `Ralphex`, hand the plan file from
       task 5 to `codex exec` or `pi -p` directly as a bounded task via
       `ProcessRunner`, skipping ralphex's orchestration entirely
-- [ ] write tests for direct Codex execution using the task-5 plan file
+- [x] write tests for direct Codex execution using the task-5 plan file
       (fake `codex` via injected `Command`)
-- [ ] write tests for direct Pi execution using the task-5 plan file (fake
+- [x] write tests for direct Pi execution using the task-5 plan file (fake
       `pi`)
-- [ ] write a test asserting `ralphex` is never invoked on this path
+- [x] write a test asserting `ralphex` is never invoked on this path
       (negative assertion)
-- [ ] run tests — must pass before task 8
+- [x] run tests — must pass before task 8
 
 ### Task 8: Pre-critique repository and plan verification
 
