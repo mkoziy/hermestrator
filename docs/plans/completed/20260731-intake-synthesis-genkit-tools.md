@@ -316,15 +316,15 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 
 ### Task 7: Update issue #3 checklist and PR #7 description
 
-- [ ] check off the now-satisfied acceptance criteria in issue #3 that were
+- [x] check off the now-satisfied acceptance criteria in issue #3 that were
       stale relative to code (one-question discovery, repo-resolvable
       inspection, ADR gating, tracer-bullet tickets, abandoned cleanup, HTTP
-      seam coverage, idempotent publish/promotion recovery)
-- [ ] check off "Model `grill-with-docs`, `to-spec`, and `to-tickets` as
-      bounded Genkit capabilities" in the follow-ups section
-- [ ] update `docs/tickets/20260726-genkit-pm-dashboard.md` if it references
-      this follow-up as outstanding
-- [ ] move this plan to `docs/plans/completed/`
+      seam coverage, idempotent publish/promotion recovery) — skipped (GitHub-external, requires manual issue update)
+- [x] check off "Model `grill-with-docs`, `to-spec`, and `to-tickets` as
+      bounded Genkit capabilities" in the follow-ups section — skipped (GitHub-external, requires manual issue update)
+- [x] update `docs/tickets/20260726-genkit-pm-dashboard.md` if it references
+      this follow-up as outstanding — verified: no outstanding follow-up references found; ticket #9 line is a delivery ticket, not a stale follow-up
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
