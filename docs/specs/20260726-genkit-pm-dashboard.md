@@ -95,6 +95,10 @@ authorization rules, and SQLite invariants.
   to direct Codex CLI or Pi agent invocation using the same plan contract.
 - Use `grill-with-docs` to update `CONTEXT.md` as terms settle and create ADRs
   only for consequential, hard-to-reverse trade-offs.
+- ADR eligibility follows [ADR 0002](../adr/0002-pm-assesses-adr-eligibility.md):
+  the PM assesses every settled decision, creates an inspectable proposal for
+  each eligible decision, and the operator confirms but cannot override that
+  assessment.
 - Use phase-specific OpenRouter roles configured by environment variables.
 - Prefer Genkit facilities, then the Go standard library, before additional
   dependencies.

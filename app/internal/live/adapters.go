@@ -104,8 +104,9 @@ func githubNextPage(header string) string {
 
 // OpenRouterModel makes Genkit model calls through OpenRouter's OpenAI-compatible API.
 type OpenRouterModel struct {
-	agent *aix.Agent[PMState]
-	store *SQLiteSessionStore[PMState]
+	agent  *aix.Agent[PMState]
+	store  *SQLiteSessionStore[PMState]
+	genkit *genkit.Genkit
 }
 
 // PMState is durable agent-owned state for a repository discovery session.
@@ -137,7 +138,7 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*
 		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
 	})
 	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryContext), aix.WithSessionStore(store))
-	return &OpenRouterModel{agent: agent, store: store}, nil
+	return &OpenRouterModel{agent: agent, store: store, genkit: g}, nil
 }
 
 func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[struct{}, string]) aix.AgentFunc[PMState] {
@@ -153,7 +154,7 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 				state.LastActivity = "discovery turn in progress"
 				return state
 			})
-			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager. Ask one focused discovery question at a time.")}, session.Messages()...)
+			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager conducting discovery. Ask one focused question at a time. Treat repository evidence as already-resolved facts: do not ask the operator questions that evidence answers. Do not write code, publish issues, or choose a workflow phase.")}, session.Messages()...)
 			messages = append(messages, input.Message)
 			var reason aix.AgentFinishReason
 			for result, err := range genkit.GenerateStream(ctx, g,
@@ -196,6 +197,10 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 
 func redactSecrets(value string) string { return redaction.Secrets(value) }
 
+// Genkit returns the underlying *genkit.Genkit instance so callers can
+// register additional tools in the same registry.
+func (m *OpenRouterModel) Genkit() *genkit.Genkit { return m.genkit }
+
 func (m *OpenRouterModel) Close() error { return m.store.Close() }
 
 func (m *OpenRouterModel) Status(ctx context.Context, repositoryID string) (dashboard.Status, error) {
@@ -227,6 +232,9 @@ func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Con
 		return dashboard.Reply{}, fmt.Errorf("connect Genkit PM agent: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	if conversation.RepositoryEvidence != "" {
+		prompt = "Repository evidence from a read-only isolated clone:\n" + conversation.RepositoryEvidence + "\n\nOperator message:\n" + prompt
+	}
 	if err := conn.SendText(prompt); err != nil {
 		return dashboard.Reply{}, fmt.Errorf("send Genkit PM turn: %w", err)
 	}
