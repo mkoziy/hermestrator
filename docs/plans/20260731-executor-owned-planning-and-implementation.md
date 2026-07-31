@@ -303,19 +303,19 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/ralphex.go`
 - Create: `app/internal/live/ralphex_test.go`
 
-- [ ] implement an execution call invoking `ralphex --config-dir <PM-owned
+- [x] implement an execution call invoking `ralphex --config-dir <PM-owned
       execution profile dir> <plan-file>` (the plan from task 5) via
       `ProcessRunner`, streaming output — this is ralphex's real
       non-interactive execution path (task/review/finalize phases); the PM
       never calls `ralphex --plan` or bare `ralphex`
-- [ ] assert (by construction — no file-write call in this path) that the
+- [x] assert (by construction — no file-write call in this path) that the
       PM never writes or patches the plan file once execution starts
-- [ ] write a test asserting the execution invocation shape:
+- [x] write a test asserting the execution invocation shape:
       `--config-dir` set to the execution profile, plan file as the
       positional argument
-- [ ] write a test proving no plan-file write occurs on the PM side during
+- [x] write a test proving no plan-file write occurs on the PM side during
       execution (e.g. assert the plan file's mtime/content is unchanged)
-- [ ] run tests — must pass before task 7
+- [x] run tests — must pass before task 7
 
 ### Task 7: Codex/Pi direct execution
 
