@@ -395,6 +395,35 @@ func TestReadyIntakeCanBeAbandoned(t *testing.T) {
 	}
 }
 
+func TestRestartCompletesInterruptedAbandonedIntakeCleanup(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	intake := &fakeIntake{}
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	if _, err := app.db.Exec(`UPDATE intakes SET state='abandoning' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(page.Body.String(), "State: abandoned") || len(intake.cleaned) != 1 {
+		t.Fatalf("abandoned intake recovery = %q cleaned=%#v", page.Body.String(), intake.cleaned)
+	}
+}
+
 func TestIntakeStartsWithOnePersistedDiscoveryQuestion(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
