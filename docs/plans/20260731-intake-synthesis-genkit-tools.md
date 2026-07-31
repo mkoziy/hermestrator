@@ -285,21 +285,22 @@ and set `deps.Synthesizer` alongside the existing `deps.Model`.
 - Modify: `app/internal/live/adapters.go`
 - Modify: `app/cmd/pm/main.go`
 
-- [ ] add a `Genkit() *genkit.Genkit` accessor on `OpenRouterModel` returning
+- [x] add a `Genkit() *genkit.Genkit` accessor on `OpenRouterModel` returning
       the `g` created in `NewOpenRouterModel` (store it on the struct)
-- [ ] in `main.go`, after constructing the `OpenRouterModel`, set
+- [x] in `main.go`, after constructing the `OpenRouterModel`, set
       `deps.Synthesizer = live.NewGenkitSynthesizer(model.Genkit())`
-- [ ] write/extend a `main.go` smoke check only if one already exists for
+- [x] write/extend a `main.go` smoke check only if one already exists for
       dependency wiring; otherwise rely on Task 4's tests plus `make check`
       (no test framework currently covers `main.go` wiring — do not add one
       for this alone)
-- [ ] add one HTTP-seam test in `app_test.go` that builds `Dependencies` with
+- [x] add one HTTP-seam test in `synthesis_test.go` (live package, to avoid
+      circular import) that builds `Dependencies` with
       `Synthesizer: live.NewGenkitSynthesizer(<a genkit.Init'd instance>)`
       instead of the `localSynthesizer{}` default, and drives
       `POST /repositories/{id}/intake/synthesize` end to end — every other
       seam test exercises only `localSynthesizer`, so without this the
       production `RunRaw`/decode path is never covered by an integration test
-- [ ] run full suite — must pass before task 6: `cd app && go test ./...`
+- [x] run full suite — must pass before task 6: `cd app && go test ./...`
 
 ### Task 6: Verify acceptance criteria
 

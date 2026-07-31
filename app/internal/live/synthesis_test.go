@@ -2,7 +2,11 @@ package live
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/firebase/genkit/go/genkit"
@@ -118,6 +122,101 @@ func TestGenkitSynthesizerAssessADRIneligible(t *testing.T) {
 	}
 	if proposal != "" {
 		t.Fatalf("expected empty proposal for ineligible decision, got %q", proposal)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTTP-seam integration test: full synthesizeIntake path through
+// GenkitSynthesizer (Task 5). This is the only test that exercises the
+// production RunRaw/decode path end to end via the HTTP handler.
+// ---------------------------------------------------------------------------
+
+type fakeGitHub struct{ repos []dashboard.Repository }
+
+func (f fakeGitHub) Repositories(context.Context) ([]dashboard.Repository, error) {
+	return f.repos, nil
+}
+
+type fakeModel struct{}
+
+func (fakeModel) Reply(_ context.Context, _ dashboard.Conversation, prompt string) (dashboard.Reply, error) {
+	return dashboard.Reply{Text: "What outcome would make " + prompt + " successful?"}, nil
+}
+
+func (fakeModel) Status(context.Context, string) (dashboard.Status, error) {
+	return dashboard.Status{Phase: "discovery", ModelRole: "discovery"}, nil
+}
+
+type fakeIntake struct {
+	started    []string
+	inspection string
+}
+
+func (f *fakeIntake) Start(_ context.Context, _ dashboard.Repository) (string, error) {
+	f.started = append(f.started, "/tmp/intake-42")
+	return "/tmp/intake-42", nil
+}
+
+func (f *fakeIntake) Promote(_ context.Context, _ string, _ dashboard.PublishedIssue) (string, error) {
+	return "", nil
+}
+
+func (f *fakeIntake) Cleanup(_ context.Context, _ string) error { return nil }
+
+func (f *fakeIntake) Inspect(context.Context, string) (string, error) { return f.inspection, nil }
+
+func TestGenkitSynthesizerEndToEndViaHTTPSynthesize(t *testing.T) {
+	g := genkit.Init(context.Background(), genkit.WithExperimental())
+	synth := NewGenkitSynthesizer(g)
+
+	app, err := dashboard.New(dashboard.Dependencies{
+		GitHub:       fakeGitHub{repos: []dashboard.Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Synthesizer:  synth,
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := func(method, target, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, target, strings.NewReader(body))
+		r.Header.Set("X-PM-User", "michael")
+		if body != "" {
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, r)
+		return w
+	}
+
+	// Set up: list repos and select one.
+	_ = req(http.MethodGet, "/repositories", "")
+	_ = req(http.MethodPost, "/repositories/42", "")
+
+	// Start an intake.
+	resp := req(http.MethodPost, "/repositories/42/intake/start", "")
+	if resp.Code != http.StatusSeeOther {
+		t.Fatalf("start intake: %d", resp.Code)
+	}
+
+	// Complete discovery.
+	resp = req(http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"operators can create projects"}}.Encode())
+	if resp.Code != http.StatusSeeOther && resp.Code != http.StatusOK {
+		t.Fatalf("converse: %d %q", resp.Code, resp.Body.String())
+	}
+	resp = req(http.MethodPost, "/repositories/42/intake/complete-discovery", "")
+	if resp.Code != http.StatusSeeOther {
+		t.Fatalf("complete discovery: %d", resp.Code)
+	}
+
+	// Synthesize — this is the call that exercises GenkitSynthesizer.RunRaw.
+	resp = req(http.MethodPost, "/repositories/42/intake/synthesize", "")
+	if resp.Code != http.StatusSeeOther {
+		t.Fatalf("synthesize through GenkitSynthesizer: %d %q", resp.Code, resp.Body.String())
 	}
 }
 

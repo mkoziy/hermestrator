@@ -474,7 +474,11 @@ func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
 		Store:        t.TempDir() + "/pm.db",
 		AllowedUsers: map[string]bool{"michael": true},
 	})
-	artifacts, err := app.(*application).synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not *application")
+	}
+	artifacts, err := a.synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
 		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators publish confirmed tickets\nBlocked by: Ticket 1"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators document their work"}, {Role: "pm", Text: "What should happen next?"},

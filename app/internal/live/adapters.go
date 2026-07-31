@@ -104,8 +104,9 @@ func githubNextPage(header string) string {
 
 // OpenRouterModel makes Genkit model calls through OpenRouter's OpenAI-compatible API.
 type OpenRouterModel struct {
-	agent *aix.Agent[PMState]
-	store *SQLiteSessionStore[PMState]
+	agent  *aix.Agent[PMState]
+	store  *SQLiteSessionStore[PMState]
+	genkit *genkit.Genkit
 }
 
 // PMState is durable agent-owned state for a repository discovery session.
@@ -137,7 +138,7 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*
 		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
 	})
 	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryContext), aix.WithSessionStore(store))
-	return &OpenRouterModel{agent: agent, store: store}, nil
+	return &OpenRouterModel{agent: agent, store: store, genkit: g}, nil
 }
 
 func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[struct{}, string]) aix.AgentFunc[PMState] {
@@ -195,6 +196,10 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 }
 
 func redactSecrets(value string) string { return redaction.Secrets(value) }
+
+// Genkit returns the underlying *genkit.Genkit instance so callers can
+// register additional tools in the same registry.
+func (m *OpenRouterModel) Genkit() *genkit.Genkit { return m.genkit }
 
 func (m *OpenRouterModel) Close() error { return m.store.Close() }
 

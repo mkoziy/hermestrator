@@ -24,10 +24,11 @@ func main() {
 	dashboardURL := envOr("PM_DASHBOARD_URL", "http://localhost:8080")
 	intakeBase := envOr("PM_INTAKE_DIR", filepath.Join(os.TempDir(), "hermestrator-intakes"))
 	app, err := dashboard.New(dashboard.Dependencies{
-		GitHub:    live.GitHub{Token: os.Getenv("GH_TOKEN")},
-		Model:     model,
-		Telegram:  live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
-		Publisher: live.GHPublisher{},
+		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
+		Model:       model,
+		Telegram:    live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
+		Publisher:   live.GHPublisher{},
+		Synthesizer: live.NewGenkitSynthesizer(model.Genkit()),
 		Intake: live.CloneIntake{
 			BaseDir:      intakeBase,
 			WorkspaceDir: envOr("PM_ISSUE_WORKSPACE_DIR", "issue-workspaces"),

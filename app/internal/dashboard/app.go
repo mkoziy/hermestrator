@@ -1681,7 +1681,7 @@ func (a *application) conversationAfter(ctx context.Context, id string, messageS
 		return Conversation{}, err
 	}
 	defer func() { _ = rows.Close() }()
-	c := Conversation{RepositoryID: id}
+	c := Conversation{RepositoryID: id, PendingTurns: []PendingTurn{}, Messages: []Message{}}
 	if err := a.db.QueryRowContext(ctx, `SELECT inspection FROM intakes WHERE repository_id=?`, id).Scan(&c.RepositoryEvidence); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, fmt.Errorf("load repository inspection: %w", err)
 	}
