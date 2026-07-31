@@ -1694,8 +1694,10 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		outputLines = append(outputLines, line)
 		outputLinesMu.Unlock()
 		// Update heartbeat so the dashboard can show the run is alive.
+		// Use application context (not r.Context()) so heartbeats persist
+		// even if the HTTP client disconnects.
 		heartbeat := time.Now().UTC().Format(time.RFC3339Nano)
-		_, _ = a.db.ExecContext(r.Context(),
+		_, _ = a.db.ExecContext(a.ctx,
 			`UPDATE intakes SET executor_heartbeat=? WHERE repository_id=? AND executor_state=?`,
 			heartbeat, id, string(executorRunning))
 		return nil
@@ -1715,13 +1717,17 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	}
 	outputBody += fmt.Sprintf("\n---\nExit code: %d\nDuration: %v\nCancelled: %v\n", result.ExitCode, result.Duration, result.Cancelled)
 	now = time.Now().UTC().Format(time.RFC3339Nano)
-	tx, txErr := a.db.BeginTx(r.Context(), nil)
+	// Use application context (not r.Context()) for terminal state writes.
+	// This ensures the executor state transitions to terminal even if the
+	// HTTP client disconnects during the run. Without this, a disconnected
+	// client would leave the executor permanently stuck in "running" state.
+	tx, txErr := a.db.BeginTx(a.ctx, nil)
 	if txErr != nil {
 		http.Error(w, "could not store executor output", http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(r.Context(),
+	if _, err := tx.ExecContext(a.ctx,
 		`INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,created_at=excluded.created_at`,
 		id, artifactExecutorOutput, outputBody, now); err != nil {
 		http.Error(w, "could not store executor output", http.StatusInternalServerError)
@@ -1732,7 +1738,7 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	if result.Cancelled {
 		cancelledInt = 1
 	}
-	if _, err := tx.ExecContext(r.Context(),
+	if _, err := tx.ExecContext(a.ctx,
 		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,executor_duration_ns=?,executor_exit_code=?,executor_cancelled=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
 		string(terminalState), now, durationNs, result.ExitCode, cancelledInt, now, id, string(executorRunning)); err != nil {
 		http.Error(w, "could not record executor result", http.StatusInternalServerError)

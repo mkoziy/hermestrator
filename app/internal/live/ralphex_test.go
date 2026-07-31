@@ -29,7 +29,9 @@ func TestRalphexExecutorInvocationShape(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "/workspace/42", "/pm/execution-profiles/default", "/workspace/42/plan.md")
+	workspace := t.TempDir()
+	planPath := filepath.Join(workspace, "plan.md")
+	_, err := executor.Run(context.Background(), workspace, "/pm/execution-profiles/default", planPath)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -46,8 +48,8 @@ func TestRalphexExecutorInvocationShape(t *testing.T) {
 	if invokedArgs[1] != "/pm/execution-profiles/default" {
 		t.Errorf("args[1] = %q, want /pm/execution-profiles/default", invokedArgs[1])
 	}
-	if invokedArgs[2] != "/workspace/42/plan.md" {
-		t.Errorf("args[2] = %q, want /workspace/42/plan.md", invokedArgs[2])
+	if invokedArgs[2] != planPath {
+		t.Errorf("args[2] = %q, want %q", invokedArgs[2], planPath)
 	}
 }
 
@@ -153,7 +155,9 @@ func TestRalphexExecutorStreamingOutput(t *testing.T) {
 		},
 	}
 
-	result, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
+	workspace := t.TempDir()
+	planPath := filepath.Join(workspace, "plan.md")
+	result, err := executor.Run(context.Background(), workspace, "/pm/config", planPath)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -180,7 +184,9 @@ func TestRalphexExecutorNonZeroExit(t *testing.T) {
 		},
 	}
 
-	result, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
+	workspace := t.TempDir()
+	planPath := filepath.Join(workspace, "plan.md")
+	result, err := executor.Run(context.Background(), workspace, "/pm/config", planPath)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -207,7 +213,9 @@ func TestRalphexExecutorNeverCallsRalphexPlan(t *testing.T) {
 		},
 	}
 
-	_, err := executor.Run(context.Background(), "/workspace", "/pm/config", "/workspace/plan.md")
+	workspace := t.TempDir()
+	planPath := filepath.Join(workspace, "plan.md")
+	_, err := executor.Run(context.Background(), workspace, "/pm/config", planPath)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

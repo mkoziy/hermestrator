@@ -25,7 +25,8 @@ func TestVerificationRunnerAllPassing(t *testing.T) {
 		{Name: "go test", Command: "go", Args: []string{"test", "./..."}},
 	}
 
-	result, err := runner.Run(context.Background(), "/tmp/workspace", checks)
+	workspace := t.TempDir()
+	result, err := runner.Run(context.Background(), workspace, checks)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -71,7 +72,8 @@ func TestVerificationRunnerFailingCheckBlocksReadyForPR(t *testing.T) {
 		{Name: "go test -race", Command: "go", Args: []string{"test", "-race", "./..."}},
 	}
 
-	result, err := runner.Run(context.Background(), "/tmp/workspace", checks)
+	workspace := t.TempDir()
+	result, err := runner.Run(context.Background(), workspace, checks)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -124,7 +126,8 @@ func TestVerificationRunnerCancelledCheckBlocksReadyForPR(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	result, err := runner.Run(ctx, "/tmp/workspace", checks)
+	workspace := t.TempDir()
+	result, err := runner.Run(ctx, workspace, checks)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -152,7 +155,8 @@ func TestVerificationOnlySkipsPlanningAndExecution(t *testing.T) {
 		},
 	}
 
-	result, err := VerifyWorkspaceForPR(context.Background(), "/tmp/workspace", runner.Runner)
+	workspace := t.TempDir()
+	result, err := VerifyWorkspaceForPR(context.Background(), workspace, runner.Runner)
 	if err != nil {
 		t.Fatalf("VerifyWorkspaceForPR: %v", err)
 	}
@@ -202,7 +206,8 @@ func TestVerificationRunnerMissingBinary(t *testing.T) {
 		{Name: "broken check", Command: "/nonexistent/binary-that-does-not-exist", Args: nil},
 	}
 
-	_, err := runner.Run(context.Background(), "/tmp/workspace", checks)
+	workspace := t.TempDir()
+	_, err := runner.Run(context.Background(), workspace, checks)
 	if err == nil {
 		t.Fatal("Run = nil, want error for missing binary")
 	}
@@ -217,7 +222,8 @@ func TestVerificationRunnerEmptyChecks(t *testing.T) {
 		},
 	}
 
-	result, err := runner.Run(context.Background(), "/tmp/workspace", nil)
+	workspace := t.TempDir()
+	result, err := runner.Run(context.Background(), workspace, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -249,7 +255,8 @@ func TestVerificationRunnerAllChecksRunEvenOnFailure(t *testing.T) {
 		{Name: "check 3", Command: "sh", Args: []string{"-c", "exit 1"}},
 	}
 
-	result, err := runner.Run(context.Background(), "/tmp/workspace", checks)
+	workspace := t.TempDir()
+	result, err := runner.Run(context.Background(), workspace, checks)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -310,7 +317,8 @@ func TestVerifyWorkspaceForPRConvenience(t *testing.T) {
 		},
 	}
 
-	result, err := VerifyWorkspaceForPR(context.Background(), "/tmp/ws", runner)
+	wsDir := t.TempDir()
+	result, err := VerifyWorkspaceForPR(context.Background(), wsDir, runner)
 	if err != nil {
 		t.Fatalf("VerifyWorkspaceForPR: %v", err)
 	}

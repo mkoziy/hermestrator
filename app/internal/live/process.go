@@ -61,11 +61,15 @@ func (r *ProcessRunner) Run(ctx context.Context, onLine func(LineEvent) error, n
 
 	cmd := command(ctx, name, args...)
 
-	// Set the working directory if specified and exists.
+	// Set the working directory if specified. Return an error if the directory
+	// doesn't exist to prevent silent fallback to the current directory.
 	if r.Dir != "" {
-		if _, err := os.Stat(r.Dir); err == nil {
-			cmd.Dir = r.Dir
+		if info, err := os.Stat(r.Dir); err != nil {
+			return nil, fmt.Errorf("process runner working directory %q: %w", r.Dir, err)
+		} else if !info.IsDir() {
+			return nil, fmt.Errorf("process runner working directory %q is not a directory", r.Dir)
 		}
+		cmd.Dir = r.Dir
 	}
 
 	// Put the child in its own process group so a single signal kills the
