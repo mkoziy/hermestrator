@@ -1242,3 +1242,88 @@ func requestHTMX(t *testing.T, app http.Handler, method, target, body, user stri
 	app.ServeHTTP(w, r)
 	return w
 }
+
+func TestExecutorSelectionIsVisiblePrePlan(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Before selection, the workspace shows the "Select executor" button.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Select executor") {
+		t.Fatalf("workspace missing executor selection trigger: %q", workspace.Body.String())
+	}
+	if strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("planning button visible before executor selection: %q", workspace.Body.String())
+	}
+
+	// Select executor and verify it is rendered.
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("executor select status = %d, want %d", response.Code, http.StatusSeeOther)
+	}
+
+	workspace = request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("planning button not visible after executor selection: %q", workspace.Body.String())
+	}
+	// Rationale must be visible to the operator.
+	if !strings.Contains(workspace.Body.String(), "medium scope") {
+		t.Fatalf("executor rationale not visible: %q", workspace.Body.String())
+	}
+}
+
+func TestPlanningRejectedBeforeExecutorSelection(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Planning must fail before executor is selected.
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("plan before selection status = %d, want %d", response.Code, http.StatusConflict)
+	}
+	if !strings.Contains(response.Body.String(), "executor must be selected") {
+		t.Fatalf("plan before selection message = %q", response.Body.String())
+	}
+
+	// After selection, planning is accepted.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	response = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("plan after selection status = %d, want %d", response.Code, http.StatusAccepted)
+	}
+}
+
+func TestExecutorSelectionSurvivesRestart(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	deps := Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        database,
+		AllowedUsers: map[string]bool{"michael": true},
+	}
+	app := mustApp(t, deps)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+
+	restarted := mustApp(t, deps)
+	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("executor selection not durable across restart: %q", workspace.Body.String())
+	}
+	if !strings.Contains(workspace.Body.String(), "medium scope") {
+		t.Fatalf("executor rationale not durable across restart: %q", workspace.Body.String())
+	}
+}

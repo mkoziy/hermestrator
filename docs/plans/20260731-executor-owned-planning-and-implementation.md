@@ -226,14 +226,14 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add a handler/fragment that renders `ExecutorSelection` (kind +
+- [x] add a handler/fragment that renders `ExecutorSelection` (kind +
       rationale) to the operator before any planning call is made
-- [ ] wire `SelectExecutor` into the existing per-issue workflow state
-- [ ] write an `httptest` case asserting the rationale is visible pre-plan
+- [x] wire `SelectExecutor` into the existing per-issue workflow state
+- [x] write an `httptest` case asserting the rationale is visible pre-plan
       (success case)
-- [ ] write a test asserting planning cannot start before selection is
+- [x] write a test asserting planning cannot start before selection is
       rendered (error/edge case)
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Generic streaming process runner
 
