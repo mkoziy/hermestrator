@@ -108,6 +108,29 @@ func (f *fakeExecutorRunner) Run(_ context.Context, onLine func(string) error, _
 	return ExecutorRunResult{ExitCode: f.exitCode, Duration: f.duration, Cancelled: f.cancelled}, nil
 }
 
+// hangExecutorRunner emits the given lines and then blocks until context
+// cancellation, simulating a long-running executor. Used for cancel tests.
+type hangExecutorRunner struct {
+	lines []string
+	mu    sync.Mutex
+	run   bool
+}
+
+func (h *hangExecutorRunner) Run(ctx context.Context, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	h.mu.Lock()
+	h.run = true
+	h.mu.Unlock()
+
+	start := time.Now()
+	for _, line := range h.lines {
+		if err := onLine(line); err != nil {
+			return ExecutorRunResult{}, err
+		}
+	}
+	<-ctx.Done()
+	return ExecutorRunResult{ExitCode: -1, Duration: time.Since(start), Cancelled: true}, nil
+}
+
 type fakePublisher struct {
 	publications []Publication
 	issues       []PublishedIssue
@@ -1520,5 +1543,103 @@ func TestExecutorRunRendersHeartbeatDurationAndExitStatus(t *testing.T) {
 	// Output artifact must contain the lines.
 	if !strings.Contains(workspace.Body.String(), "building...") {
 		t.Fatalf("executor output lines not rendered: %q", workspace.Body.String())
+	}
+}
+
+func TestCancelMidRunTerminatesProcessAndPreservesPartialOutput(t *testing.T) {
+	hang := &hangExecutorRunner{lines: []string{"starting build", "compiling..."}}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: hang,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Start executor in a goroutine - it will hang after emitting its lines.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	}()
+
+	// Wait for the executor to enter running state (heartbeat appears).
+	var running bool
+	for i := 0; i < 50; i++ {
+		workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+		if strings.Contains(workspace.Body.String(), "State: running") {
+			running = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !running {
+		t.Fatal("executor never entered running state")
+	}
+
+	// Cancel the run.
+	cancelResp := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+	if cancelResp.Code != http.StatusSeeOther {
+		t.Fatalf("cancel status = %d, want %d", cancelResp.Code, http.StatusSeeOther)
+	}
+
+	// Wait for executorRun goroutine to finish.
+	runResp := <-done
+	if runResp.Code != http.StatusSeeOther {
+		t.Fatalf("run status after cancel = %d, want %d", runResp.Code, http.StatusSeeOther)
+	}
+
+	// Verify the workspace shows it was cancelled.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Run was cancelled") {
+		t.Fatalf("workspace missing cancellation indicator: %q", workspace.Body.String())
+	}
+	// Partial output must be preserved.
+	if !strings.Contains(workspace.Body.String(), "starting build") {
+		t.Fatalf("partial output 'starting build' not preserved: %q", workspace.Body.String())
+	}
+	if !strings.Contains(workspace.Body.String(), "compiling...") {
+		t.Fatalf("partial output 'compiling...' not preserved: %q", workspace.Body.String())
+	}
+}
+
+func TestCancelAfterCompleteIsNoOp(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"ok"}, exitCode: 0}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Run to completion.
+	runResp := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResp.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want %d", runResp.Code, http.StatusSeeOther)
+	}
+
+	// Cancel after complete must not error.
+	cancelResp := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+	if cancelResp.Code != http.StatusSeeOther {
+		t.Fatalf("cancel after complete status = %d, want %d", cancelResp.Code, http.StatusSeeOther)
+	}
+
+	// Workspace still shows completed (not cancelled) state.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "State: completed") {
+		t.Fatalf("workspace state changed after cancel of completed run: %q", workspace.Body.String())
+	}
+	if strings.Contains(workspace.Body.String(), "Run was cancelled") {
+		t.Fatalf("completed run incorrectly shows cancellation: %q", workspace.Body.String())
 	}
 }

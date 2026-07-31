@@ -409,14 +409,14 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Modify: `app/internal/dashboard/app_test.go`
 - Modify: `app/internal/live/process_test.go`
 
-- [ ] add an operator-triggered cancel handler that cancels the executor's
+- [x] add an operator-triggered cancel handler that cancels the executor's
       context, relying on task 3's process-group signal
-- [ ] write a test with a hanging fake executor (`sleep`) cancelled mid-run,
+- [x] write a test with a hanging fake executor (`sleep`) cancelled mid-run,
       asserting the process group is terminated and partial output is
       preserved
-- [ ] write a test asserting cancellation of an already-finished run is a
+- [x] write a test asserting cancellation of an already-finished run is a
       no-op, not an error
-- [ ] run tests — must pass before task 13
+- [x] run tests — must pass before task 13
 
 ### Task 13: Verification gate before PR creation
 
