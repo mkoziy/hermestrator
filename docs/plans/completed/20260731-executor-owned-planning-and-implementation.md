@@ -498,11 +498,13 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 
 ### Task 17: Update documentation
 
-- [ ] update `app/README.md` if the new workspace-root/config-dir layout
+- [x] update `app/README.md` if the new workspace-root/config-dir layout
       needs operator-facing documentation
-- [ ] update `CLAUDE.md` only if a genuinely new project-wide pattern was
-      introduced beyond what's already documented there
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `CLAUDE.md` only if a genuinely new project-wide pattern was
+      introduced beyond what's already documented there (reviewed — no new
+      project-wide patterns; existing docs already cover executor
+      invocation, separate config dirs, and no Hermes reuse)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
