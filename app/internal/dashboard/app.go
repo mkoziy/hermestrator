@@ -163,6 +163,14 @@ const (
 	intakeAbandoned  intakeState = "abandoned"
 )
 
+type executorState string
+
+const (
+	executorSelected executorState = "selected"
+	executorPlanned  executorState = "planned"
+	executorApproved executorState = "approved"
+)
+
 type IntakeStatus struct {
 	ID                string
 	State             intakeState
@@ -173,6 +181,7 @@ type IntakeStatus struct {
 	PublishedIssues   []PublishedIssue
 	ExecutorKind      string
 	ExecutorRationale string
+	ExecutorState     executorState
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -312,6 +321,10 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "executor_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err = recoverDuplicatePendingTurns(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -348,6 +361,8 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/intake/abandon", a.abandonIntake)
 	mux.HandleFunc("POST /repositories/{id}/executor/select", a.executorSelect)
 	mux.HandleFunc("POST /repositories/{id}/executor/plan", a.executorPlan)
+	mux.HandleFunc("POST /repositories/{id}/executor/approve", a.executorApprove)
+	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
 	if err := a.resumePendingTurns(); err != nil {
@@ -1515,8 +1530,8 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 	selection := SelectExecutor("medium", "", nil)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,updated_at=excluded.updated_at`,
-		id, "", string(selection.Kind), selection.Rationale, now); err != nil {
+		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,updated_at=excluded.updated_at`,
+		id, "", string(selection.Kind), selection.Rationale, string(executorSelected), now); err != nil {
 		http.Error(w, "could not store executor selection", http.StatusInternalServerError)
 		return
 	}
@@ -1534,10 +1549,73 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor must be selected before planning begins", http.StatusConflict)
 		return
 	}
+	if status.ExecutorState != executorSelected {
+		http.Error(w, "executor is not in the correct state for planning", http.StatusConflict)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(r.Context(),
+		`UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
+		string(executorPlanned), now, id, string(executorSelected)); err != nil {
+		http.Error(w, "could not record planning state", http.StatusInternalServerError)
+		return
+	}
 	// Planning is implemented in Task 5; for now this gate enforces the
 	// pre-condition and returns an accepted acknowledgement.
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("planning acknowledged (stub)"))
+}
+
+func (a *application) executorApprove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.repository(r.Context(), id); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorPlanned {
+		http.Error(w, "a planned executor run is required before approval", http.StatusConflict)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := a.db.ExecContext(r.Context(),
+		`UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
+		string(executorApproved), now, id, string(executorPlanned))
+	if err != nil {
+		http.Error(w, "could not record approval", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before approval could be recorded", http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorKind == "" {
+		http.Error(w, "executor must be selected before execution", http.StatusConflict)
+		return
+	}
+	if status.ExecutorState != executorApproved {
+		http.Error(w, "executor run requires operator approval", http.StatusConflict)
+		return
+	}
+	// Execution is implemented in Tasks 6/7; for now this gate enforces
+	// the approval pre-condition.
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte("execution acknowledged (stub)"))
 }
 
 func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
@@ -1812,7 +1890,9 @@ func (a *application) repository(ctx context.Context, id string) (Repository, er
 func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus, error) {
 	var status IntakeStatus
 	var number sql.NullInt64
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale)
+	var executorStateStr string
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr)
+	status.ExecutorState = executorState(executorStateStr)
 	status.PublishedIssue.Number = int(number.Int64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil
@@ -1896,7 +1976,7 @@ func (a *application) render(w http.ResponseWriter, name string, data any) {
 }
 
 const pageTemplate = `{{define "repositories"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><h1 class="mb-3">Repositories</h1>{{range .}}<form class="mb-2" method="post" action="/repositories/{{.ID}}"><button class="btn btn-primary">{{.FullName}}</button></form>{{end}}</main></body></html>{{end}}
-{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "publishing"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry confirmed ticket publication</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and .NeedsConfirmation (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><section class="card mb-3" aria-labelledby="executor-title"><div class="card-body"><h2 id="executor-title" class="card-title">Implementation</h2>{{if .ExecutorSelection}}<p>Executor: {{.ExecutorSelection.Kind}} &mdash; {{.ExecutorSelection.Rationale}}</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/plan"><button class="btn btn-primary">Start planning</button></form>{{else}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/select"><button class="btn btn-outline-primary">Select executor</button></form>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
+{{define "workspace"}}<!doctype html><html><head><script src="https://unpkg.com/htmx.org@2.0.4"></script><script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script><script>document.addEventListener("htmx:configRequest",function(e){var m=document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);if(m)e.detail.headers["X-XSRF-TOKEN"]=decodeURIComponent(m[1])})</script><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css"></head><body class="p-4"><main class="container-xl"><aside id="pm-status" class="card mb-3" role="status" aria-live="polite"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}}{{if .LastReply.Text}} · Tokens: {{.LastReply.Tokens}} · Cost: {{printf "%.4f" .LastReply.CostUSD}}{{end}}</div></aside><section id="conversation" class="card mb-3"><div class="card-body">{{range .Messages}}<article class="mb-2"><strong>{{.Role}}:</strong> {{.Text}}</article>{{end}}{{range .PendingTurns}}{{template "stream-start" .}}{{end}}</div></section><form class="card card-body mb-3" method="post" action="/repositories/{{.RepositoryID}}/conversation" hx-post="/repositories/{{.RepositoryID}}/conversation" hx-target="#conversation .card-body" hx-swap="beforeend" hx-disabled-elt="#pm-send"><label class="form-label" for="pm-message">Message the PM</label><input id="pm-message" class="form-control mb-2" name="message"><button id="pm-send" class="btn btn-primary"{{if .HasPending}} disabled{{end}}>Send</button></form><section class="card mb-3" aria-labelledby="intake-title"><div class="card-body"><h2 id="intake-title" class="card-title">Tracked-work intake</h2><p>State: {{if .Intake.State}}{{.Intake.State}}{{else}}not started{{end}}</p>{{if not .Intake.State}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/start"><button class="btn btn-outline-primary">Start isolated intake</button></form>{{else if eq .Intake.State "draft"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/complete-discovery"><button class="btn btn-outline-primary">Complete discovery</button></form><form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/abandon"><button class="btn btn-outline-danger">Abandon intake</button></form>{{else if eq .Intake.State "ready"}}<form class="d-inline" method="post" action="/repositories/{{.RepositoryID}}/intake/synthesize"><button class="btn btn-outline-primary">Synthesize drafts</button></form>{{else if eq .Intake.State "confirmed"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Publish confirmed tickets to GitHub</button></form>{{else if eq .Intake.State "publishing"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry confirmed ticket publication</button></form>{{else if eq .Intake.State "promoting"}}<form method="post" action="/repositories/{{.RepositoryID}}/intake/publish"><button class="btn btn-primary">Retry intake promotion</button></form>{{end}}{{range .Artifacts}}<article class="card card-sm mt-3"><div class="card-body"><h3 class="h4">{{.Kind}}{{if .Confirmed}} <span class="badge bg-green">confirmed</span>{{end}}</h3><pre class="mb-2 text-wrap">{{.Body}}</pre>{{if .URL}}<a href="{{.URL}}">Published GitHub issue</a>{{end}}{{if and .NeedsConfirmation (not .Confirmed)}}<form method="post" action="/repositories/{{$.RepositoryID}}/intake/{{.Kind}}/confirm"><button class="btn btn-outline-primary">Confirm {{.Kind}}</button></form>{{end}}</div></article>{{end}}</div></section><section class="card mb-3" aria-labelledby="executor-title"><div class="card-body"><h2 id="executor-title" class="card-title">Implementation</h2>{{if .ExecutorSelection}}<p>Executor: {{.ExecutorSelection.Kind}} &mdash; {{.ExecutorSelection.Rationale}}</p>{{if eq .Intake.ExecutorState "selected"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/plan"><button class="btn btn-primary">Start planning</button></form>{{else if eq .Intake.ExecutorState "planned"}}<p>State: planned &mdash; awaiting operator approval</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/approve"><button class="btn btn-success">Approve plan</button></form>{{else if eq .Intake.ExecutorState "approved"}}<p>State: approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/run"><button class="btn btn-primary">Run</button></form>{{end}}{{else}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/select"><button class="btn btn-outline-primary">Select executor</button></form>{{end}}</div></section><form method="post" action="/notifications/test"><button class="btn btn-outline-secondary">Test Telegram notification</button></form></main></body></html>{{end}}
 {{define "turn"}}<article class="card card-body mb-2"><strong>pm:</strong> {{.Reply.Text}}</article><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}
 {{define "stream-start"}}<div id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-ext="sse" sse-connect="/repositories/{{.RepositoryID}}/conversation/{{.TurnID}}/stream" sse-swap="chunk,done,error" sse-close="done" hx-swap="innerHTML"><strong>pm:</strong> Thinking…</div>{{if .Sending}}<button id="pm-send" class="btn btn-primary" disabled hx-swap-oob="outerHTML">Sending…</button>{{end}}{{end}}
 {{define "streamed-turn"}}<article id="pending-turn-{{.TurnID}}" class="card card-body mb-2" hx-swap-oob="outerHTML"><strong>pm:</strong> {{.Reply.Text}}</article><button id="pm-send" class="btn btn-primary" hx-swap-oob="outerHTML">Send</button><aside id="pm-status" class="card mb-3" role="status" aria-live="polite" hx-swap-oob="true"><div class="card-body">Phase: {{.Status.Phase}} · Model role: {{.Status.ModelRole}} · Elapsed: {{.Status.Elapsed}} · Recent activity: {{.Status.RecentActivity}} · Tokens: {{.Reply.Tokens}} · Cost: {{printf "%.4f" .Reply.CostUSD}}</div></aside>{{end}}`

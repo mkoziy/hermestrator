@@ -1327,3 +1327,98 @@ func TestExecutorSelectionSurvivesRestart(t *testing.T) {
 		t.Fatalf("executor rationale not durable across restart: %q", workspace.Body.String())
 	}
 }
+
+func TestApprovalUnlocksExecution(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Select executor and plan.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	planResponse := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if planResponse.Code != http.StatusAccepted {
+		t.Fatalf("plan status = %d, want %d", planResponse.Code, http.StatusAccepted)
+	}
+
+	// Execution must fail before approval.
+	runResponse := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run before approval status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run before approval message = %q", runResponse.Body.String())
+	}
+
+	// Approve the plan.
+	approveResponse := request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+	if approveResponse.Code != http.StatusSeeOther {
+		t.Fatalf("approve status = %d, want %d", approveResponse.Code, http.StatusSeeOther)
+	}
+
+	// After approval, the workspace shows the Run button.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), ">Run<") {
+		t.Fatalf("workspace missing Run button after approval: %q", workspace.Body.String())
+	}
+
+	// Execution now succeeds.
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusAccepted {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusAccepted)
+	}
+}
+
+func TestExecutionRejectedPreApproval(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Execution before executor selection.
+	runResponse := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run before selection status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "executor must be selected") {
+		t.Fatalf("run before selection message = %q", runResponse.Body.String())
+	}
+
+	// Execution after selection but before planning.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run after selection status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run after selection message = %q", runResponse.Body.String())
+	}
+
+	// Execution after planning but before approval.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run after plan status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run after plan message = %q", runResponse.Body.String())
+	}
+
+	// Approve and then execution works.
+	approveResponse := request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+	if approveResponse.Code != http.StatusSeeOther {
+		t.Fatalf("approve status = %d, want %d", approveResponse.Code, http.StatusSeeOther)
+	}
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusAccepted {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusAccepted)
+	}
+}

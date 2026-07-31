@@ -378,13 +378,13 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add an approval handler following the existing publication-confirmation
+- [x] add an approval handler following the existing publication-confirmation
       pattern; implementation cannot start until this fires
-- [ ] block the execution entry point (task 6/7 callers) on approval state
-- [ ] write an `httptest` case for approval unlocking execution (success)
-- [ ] write an `httptest` case asserting execution is rejected pre-approval
+- [x] block the execution entry point (task 6/7 callers) on approval state
+- [x] write an `httptest` case for approval unlocking execution (success)
+- [x] write an `httptest` case asserting execution is rejected pre-approval
       (error/edge case)
-- [ ] run tests — must pass before task 11
+- [x] run tests — must pass before task 11
 
 ### Task 11: Stream sanitized executor output into the dashboard
 
