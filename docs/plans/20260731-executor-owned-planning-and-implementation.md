@@ -424,18 +424,18 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/verify.go`
 - Create: `app/internal/live/verify_test.go`
 
-- [ ] implement a verification run of the target repo's canonical
+- [x] implement a verification run of the target repo's canonical
       build/test/strict-lint/race-sensitive checks via `ProcessRunner`,
       gating a `ReadyForPR` boolean (PR creation itself stays out of scope
       per issue #4)
-- [ ] wire the `VerificationOnly` selection (task 1) to call this gate
+- [x] wire the `VerificationOnly` selection (task 1) to call this gate
       directly against the cloned workspace, skipping planning/critique/
       execution entirely
-- [ ] write a test for an all-passing verification run
-- [ ] write a test for a failing check blocking `ReadyForPR`
-- [ ] write a test asserting `VerificationOnly` selection reaches this gate
+- [x] write a test for an all-passing verification run
+- [x] write a test for a failing check blocking `ReadyForPR`
+- [x] write a test asserting `VerificationOnly` selection reaches this gate
       without any planning/execution call happening
-- [ ] run tests — must pass before task 14
+- [x] run tests — must pass before task 14
 
 ### Task 14: Repository concurrency lock
 
