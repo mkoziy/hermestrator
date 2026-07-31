@@ -29,6 +29,12 @@ func (fakeModel) Status(context.Context, string) (Status, error) {
 	return Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "12s", RecentActivity: "awaiting operator"}, nil
 }
 
+type multipleQuestionModel struct{ fakeModel }
+
+func (multipleQuestionModel) Reply(context.Context, Conversation, string) (Reply, error) {
+	return Reply{Text: "Which operator should own this work? What deadline applies?"}, nil
+}
+
 type streamingFakeModel struct{ fakeModel }
 
 func (streamingFakeModel) Stream(_ context.Context, _ Conversation, _ string, emit func(string) error) (Reply, error) {
@@ -421,6 +427,19 @@ func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
 func TestNextDiscoveryQuestionKeepsOnlyOneQuestion(t *testing.T) {
 	if got, want := nextDiscoveryQuestion("What should ship first? What can wait?"), "What should ship first?"; got != want {
 		t.Fatalf("pending question = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoveryRendersAndPersistsOnlyOneQuestionPerTurn(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: multipleQuestionModel{}, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"start discovery"}}.Encode(), "michael")
+
+	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if strings.Contains(page.Body.String(), "What deadline applies?") || !strings.Contains(page.Body.String(), "Which operator should own this work?") {
+		t.Fatalf("discovery rendered more than one question: %q", page.Body.String())
 	}
 }
 

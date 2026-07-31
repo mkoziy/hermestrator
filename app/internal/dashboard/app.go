@@ -802,7 +802,12 @@ func (a *application) recordTurnEvent(ctx context.Context, turnID, event, data s
 func (a *application) reply(ctx context.Context, c Conversation, prompt string, emit func(string) error) (Reply, error) {
 	if stream, ok := a.deps.Model.(StreamingModel); ok {
 		var text strings.Builder
+		var question singleQuestionStream
 		reply, err := stream.Stream(ctx, c, prompt, func(chunk string) error {
+			chunk = question.write(chunk)
+			if chunk == "" {
+				return nil
+			}
 			text.WriteString(chunk)
 			if emit == nil {
 				return nil
@@ -812,12 +817,35 @@ func (a *application) reply(ctx context.Context, c Conversation, prompt string, 
 		if err == nil && reply.Text == "" {
 			reply.Text = text.String()
 		}
-		reply.Text = redactSecrets(reply.Text)
+		reply.Text = discoveryReply(redactSecrets(reply.Text))
 		return reply, err
 	}
 	reply, err := a.deps.Model.Reply(ctx, c, prompt)
-	reply.Text = redactSecrets(reply.Text)
+	reply.Text = discoveryReply(redactSecrets(reply.Text))
 	return reply, err
+}
+
+type singleQuestionStream struct{ complete bool }
+
+func (s *singleQuestionStream) write(chunk string) string {
+	if s.complete {
+		return ""
+	}
+	if end := strings.Index(chunk, "?"); end >= 0 {
+		s.complete = true
+		return chunk[:end+1]
+	}
+	return chunk
+}
+
+// discoveryReply makes the workflow boundary observable and durable: a turn
+// may contain context, but it can leave the operator with only one question.
+func discoveryReply(reply string) string {
+	first := strings.Index(reply, "?")
+	if first < 0 {
+		return strings.TrimSpace(reply)
+	}
+	return strings.TrimSpace(reply[:first+1])
 }
 
 func (a *application) completeTurn(ctx context.Context, id string, reply Reply) (Status, error) {
