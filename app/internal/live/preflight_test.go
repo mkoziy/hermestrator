@@ -336,7 +336,7 @@ func TestPreflightRemoteMatches(t *testing.T) {
 		{"git@github.com:mkoziy/hermestrator", "mkoziy/hermestrator", true},
 		{"https://github.com/other/repo.git", "mkoziy/hermestrator", false},
 		{"git@github.com:other/repo.git", "mkoziy/hermestrator", false},
-		{"https://gitlab.com/mkoziy/hermestrator.git", "mkoziy/hermestrator", true},  // path still matches
+		{"https://gitlab.com/mkoziy/hermestrator.git", "mkoziy/hermestrator", true}, // path still matches
 		{"file:///local/path", "mkoziy/hermestrator", false},
 	}
 

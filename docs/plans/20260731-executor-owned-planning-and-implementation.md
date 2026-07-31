@@ -356,21 +356,21 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/critique.go`
 - Create: `app/internal/live/critique_test.go`
 
-- [ ] implement a bounded Genkit agent (shape matching `discoveryAgent` in
+- [x] implement a bounded Genkit agent (shape matching `discoveryAgent` in
       `adapters.go`) that evaluates premise, logic, blind spots, effort, and
       execution risk against the generated plan
-- [ ] on material findings, re-invoke task 5's planning call (the sole plan
+- [x] on material findings, re-invoke task 5's planning call (the sole plan
       generator, regardless of selected executor) instead of editing the
       plan
-- [ ] cap regeneration at a fixed number of rounds (e.g. 3); once exceeded,
+- [x] cap regeneration at a fixed number of rounds (e.g. 3); once exceeded,
       surface the run as blocked, awaiting-operator instead of looping
       silently — critique is a quality gate, not an infinite retry engine
-- [ ] write tests with a fake model returning "approved" (success case)
-- [ ] write tests with a fake model returning material findings, asserting
+- [x] write tests with a fake model returning "approved" (success case)
+- [x] write tests with a fake model returning material findings, asserting
       regeneration is triggered and no plan file is hand-edited
-- [ ] write a test asserting the round cap surfaces a blocked state instead
+- [x] write a test asserting the round cap surfaces a blocked state instead
       of regenerating indefinitely
-- [ ] run tests — must pass before task 10
+- [x] run tests — must pass before task 10
 
 ### Task 10: Mandatory operator approval gate
 
