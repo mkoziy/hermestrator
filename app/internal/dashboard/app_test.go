@@ -484,6 +484,13 @@ func TestADRProposalRequiresConsequentialIrreversibleDecision(t *testing.T) {
 	}
 }
 
+func TestADREligibilityDoesNotTrustOperatorAttestation(t *testing.T) {
+	assessment, proposal := assessADR("Decision: use blue; Alternative: use green; Trade-off: blue is nicer; Reversal cost: change a color; Consequential: true; Hard to reverse: true")
+	if proposal != "" || !strings.Contains(assessment, "Ineligible") {
+		t.Fatalf("self-attested ADR was eligible: assessment=%q proposal=%q", assessment, proposal)
+	}
+}
+
 func TestEligibleADRIsAssessedAutomaticallyAndRequiresItsOwnConfirmation(t *testing.T) {
 	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})

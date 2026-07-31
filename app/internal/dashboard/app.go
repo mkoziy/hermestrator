@@ -1460,13 +1460,31 @@ func assessADR(decision string) (string, string) {
 	}
 	chosen, alternative := fields["decision"], fields["alternative"]
 	tradeoff, reversalCost := fields["trade-off"], fields["reversal cost"]
-	consequential, hardToReverse := fields["consequential"] == "true", fields["hard to reverse"] == "true"
+	consequential, hardToReverse := consequentialDecision(chosen, tradeoff, reversalCost), hardToReverseDecision(reversalCost)
 	if chosen == "" || alternative == "" || tradeoff == "" || reversalCost == "" || !consequential || !hardToReverse {
 		return "# ADR eligibility assessment\n\n## Decision\n\n" + decision + "\n\n## Criteria\n\n- Consequential: " + strconv.FormatBool(consequential) + "\n- Hard to reverse: " + strconv.FormatBool(hardToReverse) + "\n- Alternative, trade-off, and reversal cost recorded: " + strconv.FormatBool(chosen != "" && alternative != "" && tradeoff != "" && reversalCost != "") + "\n\n## Result\n\nIneligible. The PM cannot establish every ADR criterion from this settled decision.", ""
 	}
 	assessment := "# ADR eligibility assessment\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost + "\n\n## Result\n\nEligible: this is a consequential, hard-to-reverse decision with a real trade-off."
 	proposal := "# ADR proposal\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost
 	return assessment, proposal
+}
+
+func consequentialDecision(chosen, tradeoff, reversalCost string) bool {
+	evidence := strings.ToLower(chosen + " " + tradeoff + " " + reversalCost)
+	return containsAny(evidence, "migration", "durable", "database", "schema", "protocol", "security", "authentication")
+}
+
+func hardToReverseDecision(reversalCost string) bool {
+	return containsAny(strings.ToLower(reversalCost), "migration", "data", "session", "deployment", "rollback")
+}
+
+func containsAny(value string, terms ...string) bool {
+	for _, term := range terms {
+		if strings.Contains(value, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // grillWithDocs is the bounded discovery capability. It accepts only settled
