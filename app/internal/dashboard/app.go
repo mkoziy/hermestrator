@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/mkoziy/hermestrator/internal/redaction"
@@ -1275,6 +1276,13 @@ func (a *application) publishIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ticket draft is not publishable", http.StatusConflict)
 		return
 	}
+	for _, publication := range publications {
+		if err := validateEnglishPublication(publication); err != nil {
+			_ = a.returnPublicationToConfirmed(r.Context(), id)
+			http.Error(w, "confirmed GitHub tickets must be written in English", http.StatusUnprocessableEntity)
+			return
+		}
+	}
 	published, err := a.publishedIntakeIssues(r.Context(), id)
 	if err != nil {
 		http.Error(w, "could not load published tickets", http.StatusInternalServerError)
@@ -1666,6 +1674,22 @@ func ticketSetPublications(body string) ([]Publication, error) {
 		publications = append(publications, publication)
 	}
 	return publications, nil
+}
+
+// validateEnglishPublication keeps the GitHub tracker boundary predictable:
+// the discovery conversation may contain any language, but published tickets
+// must use the project's portable English/plain-ASCII format. We validate the
+// complete set before the first GitHub mutation, so a rejected draft cannot
+// leave a partially published ticket set behind.
+func validateEnglishPublication(publication Publication) error {
+	for _, value := range []string{publication.Title, publication.Body} {
+		for _, r := range value {
+			if r > unicode.MaxASCII {
+				return errors.New("GitHub tickets must use English plain-ASCII text")
+			}
+		}
+	}
+	return nil
 }
 func (a *application) conversation(ctx context.Context, id string) (Conversation, error) {
 	return a.conversationAfter(ctx, id, 0)

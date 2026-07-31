@@ -285,6 +285,37 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 	}
 }
 
+func TestIntakeRejectsNonEnglishTicketsBeforeGitHubPublication(t *testing.T) {
+	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Publisher:    publisher,
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"операторы могут создавать проекты"}}.Encode(), "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/complete-discovery", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael")
+	for _, artifact := range []string{"spec", "tickets"} {
+		if response := request(t, app, http.MethodPost, "/repositories/42/intake/"+artifact+"/confirm", "", "michael"); response.Code != http.StatusSeeOther {
+			t.Fatalf("confirm %s status = %d", artifact, response.Code)
+		}
+	}
+
+	response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael")
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("publish non-English ticket status = %d, body=%q", response.Code, response.Body.String())
+	}
+	if len(publisher.publications) != 0 {
+		t.Fatalf("non-English ticket reached GitHub publisher: %#v", publisher.publications)
+	}
+}
+
 func TestConfirmingOnlyOneRequiredArtifactDoesNotConfirmIntake(t *testing.T) {
 	app, err := New(Dependencies{
 		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
