@@ -261,16 +261,16 @@ duplicate Ticket 3 in `docs/tickets/20260726-genkit-pm-dashboard.md`.
 - Create: `app/internal/live/workspace.go`
 - Create: `app/internal/live/workspace_test.go`
 
-- [ ] implement an issue-clone adapter mirroring `CloneIntake`'s shape
+- [x] implement an issue-clone adapter mirroring `CloneIntake`'s shape
       (injectable `Command`, path validation, `Cleanup` that refuses to
       escape its base directory) but rooted under a distinct, configurable
       workspace root and keyed by issue rather than by discovery session
-- [ ] implement `Start(ctx, Repository, issueNumber) (path, error)` doing a
+- [x] implement `Start(ctx, Repository, issueNumber) (path, error)` doing a
       fresh `gh repo clone`
-- [ ] write tests for successful clone + cleanup (success case)
-- [ ] write tests for path-escape rejection and clone failure surfacing
+- [x] write tests for successful clone + cleanup (success case)
+- [x] write tests for path-escape rejection and clone failure surfacing
       `gh` stderr (error/edge cases)
-- [ ] run tests — must pass before task 5
+- [x] run tests — must pass before task 5
 
 ### Task 5: Plan generation via direct Codex/Pi invocation
 

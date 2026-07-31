@@ -1,6 +1,9 @@
 package dashboard
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // ExecutorKind identifies which executor drives implementation for a ticket.
 type ExecutorKind string
@@ -115,6 +118,14 @@ func indexInChain(k ExecutorKind, chain []ExecutorKind) int {
 	}
 	// Unknown kinds start at the end of the chain (VerificationOnly).
 	return len(chain) - 1
+}
+
+// IssueClone creates an isolated clone for implementation work, keyed by
+// issue number. Implementations must never share the intake clone
+// directory.
+type IssueClone interface {
+	Start(context.Context, Repository, int) (string, error)
+	Cleanup(context.Context, string) error
 }
 
 func rationaleFor(k ExecutorKind, scope string, repoPolicy ExecutorKind) string {
