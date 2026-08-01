@@ -231,16 +231,21 @@ type Telegram interface {
 }
 
 type Dependencies struct {
-	GitHub         GitHub
-	Model          Model
-	Telegram       Telegram
-	Publisher      Publisher
-	Intake         Intake
-	Store          string
-	AllowedUsers   map[string]bool
-	DashboardURL   string
-	Synthesizer    Synthesizer
-	ExecutorRunner ExecutorRunner
+	GitHub             GitHub
+	Model              Model
+	Telegram           Telegram
+	Publisher          Publisher
+	Intake             Intake
+	Store              string
+	AllowedUsers       map[string]bool
+	DashboardURL       string
+	Synthesizer        Synthesizer
+	ExecutorRunner     ExecutorRunner
+	Planner            Planner
+	Critiquer          Critiquer
+	IssueWorkspace     IssueClone
+	Preflight          Preflight
+	VerificationRunner VerificationRunner
 }
 
 type application struct {
@@ -1597,6 +1602,46 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor is not in the correct state for planning", http.StatusConflict)
 		return
 	}
+	
+	// TODO: Get workspace path from intake or create one
+	workspacePath := "" // This needs to be properly implemented
+	scope := "medium" // TODO: Get from conversation state
+	executorKind := ExecutorKind(status.ExecutorKind)
+	
+	var planContent string
+	
+	// Generate plan if Planner is configured
+	if a.deps.Planner != nil {
+		var err error
+		planContent, err = a.deps.Planner.GeneratePlan(r.Context(), workspacePath, executorKind, scope)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("planning failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	
+	// Run preflight checks if Preflight is configured
+	if a.deps.Preflight != nil {
+		preflightResult := a.deps.Preflight.Verify(r.Context(), workspacePath, "")
+		if !preflightResult.Passed {
+			http.Error(w, "preflight checks failed", http.StatusFailedDependency)
+			return
+		}
+	}
+	
+	// Run critique if Critiquer is configured
+	if a.deps.Critiquer != nil {
+		critiqueResult, err := a.deps.Critiquer.CritiquePlan(r.Context(), workspacePath, executorKind, scope)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("critique failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if critiqueResult.Blocked {
+			http.Error(w, "plan blocked after max critique rounds", http.StatusFailedDependency)
+			return
+		}
+	}
+	
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := a.db.ExecContext(r.Context(),
 		`UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
@@ -1604,10 +1649,17 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not record planning state", http.StatusInternalServerError)
 		return
 	}
-	// Planning is implemented in Task 5; for now this gate enforces the
-	// pre-condition and returns an accepted acknowledgement.
+	
+	// Store plan content as artifact
+	if _, err := a.db.ExecContext(r.Context(),
+		`INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,created_at=excluded.created_at`,
+		id, "plan", planContent, now); err != nil {
+		http.Error(w, "could not store plan", http.StatusInternalServerError)
+		return
+	}
+	
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte("planning acknowledged (stub)"))
+	_, _ = w.Write([]byte("planning completed"))
 }
 
 func (a *application) executorApprove(w http.ResponseWriter, r *http.Request) {
@@ -1702,7 +1754,30 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 			heartbeat, id, string(executorRunning))
 		return nil
 	}
-	result, runErr := a.deps.ExecutorRunner.Run(runCtx, onLine, "echo", "stub")
+	// Determine command based on executor kind
+	var commandName string
+	var commandArgs []string
+
+	// TODO: Get workspace path from intake
+	workspacePath := "" // This needs to be stored in the intake table
+	planPath := workspacePath + "/plan.md"
+
+	switch ExecutorKind(status.ExecutorKind) {
+	case Ralphex:
+		commandName = "ralphex"
+		commandArgs = []string{"--config-dir", "", planPath}
+	case Codex:
+		commandName = "codex"
+		commandArgs = []string{"exec", planPath}
+	case Pi:
+		commandName = "pi"
+		commandArgs = []string{"-p", fmt.Sprintf("Execute the plan at %s", planPath)}
+	default:
+		http.Error(w, fmt.Sprintf("unsupported executor kind: %s", status.ExecutorKind), http.StatusBadRequest)
+		return
+	}
+
+	result, runErr := a.deps.ExecutorRunner.Run(runCtx, onLine, commandName, commandArgs...)
 	duration := time.Since(nowTime)
 	terminalState := executorCompleted
 	if result.Cancelled {

@@ -194,3 +194,64 @@ func rationaleFor(k ExecutorKind, scope string, repoPolicy ExecutorKind) string 
 		return fmt.Sprintf("falling back to %s (ambiguous scope %q)", k, scope)
 	}
 }
+
+// Planner generates a plan file by invoking codex or pi directly.
+type Planner interface {
+	GeneratePlan(ctx context.Context, workspacePath string, executorKind ExecutorKind, scope string) (string, error)
+}
+
+// Critiquer evaluates a generated plan and triggers regeneration on material findings.
+type Critiquer interface {
+	CritiquePlan(ctx context.Context, workspacePath string, executorKind ExecutorKind, scope string) (*CritiqueResult, error)
+}
+
+// Preflight runs pre-critique checks on an issue workspace.
+type Preflight interface {
+	Verify(ctx context.Context, workspacePath string, expectedRemote string) PreflightResult
+}
+
+// PreflightResult captures the outcome of pre-critique verification.
+type PreflightResult struct {
+	Passed   bool
+	Failures []PreflightFailure
+}
+
+// PreflightFailure describes a single pre-flight check failure.
+type PreflightFailure struct {
+	Check  string
+	Detail string
+}
+
+// VerificationRunner executes canonical checks before PR creation.
+type VerificationRunner interface {
+	Run(ctx context.Context, workspacePath string, checks []CheckSpec) (VerificationResult, error)
+}
+
+// CheckSpec describes a single verification check.
+type CheckSpec struct {
+	Name    string
+	Command string
+	Args    []string
+}
+
+// VerificationResult aggregates verification check results.
+type VerificationResult struct {
+	ReadyForPR bool
+	Checks     []CheckResult
+}
+
+// CheckResult captures the outcome of a single verification check.
+type CheckResult struct {
+	Name     string
+	ExitCode int
+	Passed   bool
+	Output   string
+}
+
+// CritiqueResult captures the outcome of plan critique.
+type CritiqueResult struct {
+	Approved           bool
+	Findings           string
+	RegenerationRounds int
+	Blocked            bool
+}
