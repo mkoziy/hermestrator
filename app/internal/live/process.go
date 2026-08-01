@@ -42,18 +42,18 @@ type ProcessRunner struct {
 	// production uses exec.CommandContext. The runner adjusts
 	// cmd.SysProcAttr before starting the child.
 	Command func(ctx context.Context, name string, args ...string) *exec.Cmd
-	// Dir is the working directory for the subprocess. When empty, the
-	// subprocess inherits the parent's working directory.
-	Dir string
 }
 
-// Run starts name with args, streams stdout and stderr line-by-line to onLine,
-// and blocks until the process exits or ctx is cancelled. When ctx is
-// cancelled the runner sends SIGKILL to the entire process group.
+// Run starts name with args in dir, streams stdout and stderr line-by-line
+// to onLine, and blocks until the process exits or ctx is cancelled. When
+// ctx is cancelled the runner sends SIGKILL to the entire process group.
+//
+// dir is the working directory for the subprocess. When empty, the
+// subprocess inherits the parent's working directory.
 //
 // onLine may be nil; when non-nil it is called for every line as it arrives.
 // If onLine returns an error, the process is killed and that error is returned.
-func (r *ProcessRunner) Run(ctx context.Context, onLine func(LineEvent) error, name string, args ...string) (*RunResult, error) {
+func (r *ProcessRunner) Run(ctx context.Context, dir string, onLine func(LineEvent) error, name string, args ...string) (*RunResult, error) {
 	command := r.Command
 	if command == nil {
 		command = exec.CommandContext
@@ -63,13 +63,13 @@ func (r *ProcessRunner) Run(ctx context.Context, onLine func(LineEvent) error, n
 
 	// Set the working directory if specified. Return an error if the directory
 	// doesn't exist to prevent silent fallback to the current directory.
-	if r.Dir != "" {
-		if info, err := os.Stat(r.Dir); err != nil {
-			return nil, fmt.Errorf("process runner working directory %q: %w", r.Dir, err)
+	if dir != "" {
+		if info, err := os.Stat(dir); err != nil {
+			return nil, fmt.Errorf("process runner working directory %q: %w", dir, err)
 		} else if !info.IsDir() {
-			return nil, fmt.Errorf("process runner working directory %q is not a directory", r.Dir)
+			return nil, fmt.Errorf("process runner working directory %q is not a directory", dir)
 		}
-		cmd.Dir = r.Dir
+		cmd.Dir = dir
 	}
 
 	// Put the child in its own process group so a single signal kills the

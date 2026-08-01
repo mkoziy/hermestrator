@@ -15,7 +15,7 @@ func TestProcessRunnerSuccess(t *testing.T) {
 		},
 	}
 
-	result, err := runner.Run(context.Background(), nil, "printf", "%s\n%s", "hello", "world")
+	result, err := runner.Run(context.Background(), "", nil, "printf", "%s\n%s", "hello", "world")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestProcessRunnerNonZeroExit(t *testing.T) {
 		},
 	}
 
-	result, err := runner.Run(context.Background(), nil, "sh", "-c", "echo before; exit 1")
+	result, err := runner.Run(context.Background(), "", nil, "sh", "-c", "echo before; exit 1")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestProcessRunnerHangAndCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	result, err := runner.Run(ctx, nil, "sleep", "10")
+	result, err := runner.Run(ctx, "", nil, "sleep", "10")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestProcessRunnerPartialOutputBeforeCancel(t *testing.T) {
 		return nil
 	}
 
-	result, err := runner.Run(ctx, onLine, "sh", "-c", "echo first; sleep 10; echo second")
+	result, err := runner.Run(ctx, "", onLine, "sh", "-c", "echo first; sleep 10; echo second")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestProcessRunnerStderrCapture(t *testing.T) {
 		},
 	}
 
-	result, err := runner.Run(context.Background(), nil, "sh", "-c", "echo stdout-line; echo stderr-line >&2")
+	result, err := runner.Run(context.Background(), "", nil, "sh", "-c", "echo stdout-line; echo stderr-line >&2")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestProcessRunnerOnLineErrorKillsProcess(t *testing.T) {
 		return fmt.Errorf("stop")
 	}
 
-	result, err := runner.Run(context.Background(), onLine, "sh", "-c", "echo line1; echo line2")
+	result, err := runner.Run(context.Background(), "", onLine, "sh", "-c", "echo line1; echo line2")
 	if err == nil {
 		t.Fatal("expected error from onLine, got nil")
 	}
@@ -190,7 +190,7 @@ func TestProcessRunnerExitCodeNegativeOneOnSignal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	result, err := runner.Run(ctx, nil, "sleep", "10")
+	result, err := runner.Run(ctx, "", nil, "sleep", "10")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestProcessRunnerProcessGroupKillsDescendants(t *testing.T) {
 	// kill the shell and all its descendants.
 	done := make(chan *RunResult, 1)
 	go func() {
-		result, err := runner.Run(ctx, nil, "sh", "-c", "sleep 100 & sleep 100 & wait")
+		result, err := runner.Run(ctx, "", nil, "sh", "-c", "sleep 100 & sleep 100 & wait")
 		if err != nil {
 			t.Logf("Run error: %v", err)
 		}
@@ -251,7 +251,7 @@ func TestProcessRunnerSetsProcessGroup(t *testing.T) {
 		},
 	}
 
-	result, err := runner.Run(context.Background(), nil, "printf", "ok")
+	result, err := runner.Run(context.Background(), "", nil, "printf", "ok")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

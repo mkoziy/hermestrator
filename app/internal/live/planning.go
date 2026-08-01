@@ -69,9 +69,7 @@ func (p *Planner) GeneratePlan(ctx context.Context, workspacePath string, execut
 	if runner == nil {
 		runner = &ProcessRunner{Command: exec.CommandContext}
 	}
-	runner.Dir = workspacePath
-
-	result, err := runner.Run(ctx, nil, name, args...)
+	result, err := runner.Run(ctx, workspacePath, nil, name, args...)
 	if err != nil {
 		return "", fmt.Errorf("plan generation: %w", err)
 	}

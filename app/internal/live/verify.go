@@ -76,8 +76,7 @@ func (v *VerificationRunner) Run(ctx context.Context, workspacePath string, chec
 
 	for i, check := range checks {
 		cr := CheckResult{Name: check.Name}
-		runner.Dir = workspacePath
-		runResult, err := runner.Run(ctx, nil, check.Command, check.Args...)
+		runResult, err := runner.Run(ctx, workspacePath, nil, check.Command, check.Args...)
 		if err != nil {
 			// A process-start failure (e.g. missing binary) is terminal.
 			return result, fmt.Errorf("verification check %q: %w", check.Name, err)

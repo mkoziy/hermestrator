@@ -39,9 +39,7 @@ func (e *RalphexExecutor) Run(ctx context.Context, workspacePath, configDir, pla
 	if runner == nil {
 		runner = &ProcessRunner{Command: exec.CommandContext}
 	}
-	runner.Dir = workspacePath
-
-	result, err := runner.Run(ctx, nil, "ralphex", "--config-dir", configDir, planPath)
+	result, err := runner.Run(ctx, workspacePath, nil, "ralphex", "--config-dir", configDir, planPath)
 	if err != nil {
 		return result, fmt.Errorf("ralphex execution: %w", err)
 	}
