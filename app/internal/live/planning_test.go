@@ -328,7 +328,10 @@ func TestPlanCommandCodexArgs(t *testing.T) {
 	if len(args) < 2 || args[0] != "exec" {
 		t.Errorf("args = %v, want [exec, ...]", args)
 	}
-	prompt := args[1]
+	prompt := args[len(args)-1]
+	if !strings.Contains(strings.Join(args, " "), "--model gpt-5") {
+		t.Errorf("args = %v, want configured model flag", args)
+	}
 	if !strings.Contains(prompt, "test scope") {
 		t.Errorf("prompt does not contain scope: %q", prompt)
 	}
@@ -348,10 +351,10 @@ func TestPlanCommandPiArgs(t *testing.T) {
 	if name != "pi" {
 		t.Errorf("name = %q, want pi", name)
 	}
-	if len(args) < 2 || args[0] != "-p" {
-		t.Errorf("args = %v, want [-p, ...]", args)
+	if len(args) < 4 || args[0] != "--model" || args[1] != "claude" || args[2] != "-p" {
+		t.Errorf("args = %v, want [--model claude -p ...]", args)
 	}
-	prompt := args[1]
+	prompt := args[len(args)-1]
 	if !strings.Contains(prompt, "pi test") {
 		t.Errorf("prompt does not contain scope: %q", prompt)
 	}

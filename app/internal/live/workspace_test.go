@@ -118,6 +118,29 @@ func TestIssueWorkspaceCloneFailureSurfacesStderr(t *testing.T) {
 	}
 }
 
+func TestIssueWorkspaceCloneFailurePreservesExistingWorkspace(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "73")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(path, "keep.txt")
+	if err := os.WriteFile(marker, []byte("existing work"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := IssueWorkspace{BaseDir: base, Command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "exit 1")
+	}}
+	_, err := ws.Start(context.Background(), dashboard.Repository{FullName: "mkoziy/hermestrator"}, 73)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("Start error = %v, want existing workspace rejection", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "existing work" {
+		t.Fatalf("existing workspace was changed: data=%q err=%v", data, err)
+	}
+}
+
 func TestIssueWorkspaceRejectsInvalidRepositoryName(t *testing.T) {
 	base := t.TempDir()
 	ws := IssueWorkspace{BaseDir: base}

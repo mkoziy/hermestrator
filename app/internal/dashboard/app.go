@@ -168,6 +168,7 @@ type executorState string
 
 const (
 	executorSelected  executorState = "selected"
+	executorPlanning  executorState = "planning"
 	executorPlanned   executorState = "planned"
 	executorApproved  executorState = "approved"
 	executorRunning   executorState = "running"
@@ -176,21 +177,22 @@ const (
 )
 
 type IntakeStatus struct {
-	ID                string
-	State             intakeState
-	Path              string
-	MessageStart      int64
-	PendingQuestion   string
-	PublishedIssue    PublishedIssue
-	PublishedIssues   []PublishedIssue
-	ExecutorKind      string
-	ExecutorRationale string
-	ExecutorState     executorState
-	ExecutorHeartbeat string
-	ExecutorDuration  time.Duration
-	ExecutorExitCode  int
-	ExecutorCancelled bool
-	ExecutorCompleted bool
+	ID                    string
+	State                 intakeState
+	Path                  string
+	MessageStart          int64
+	PendingQuestion       string
+	PublishedIssue        PublishedIssue
+	PublishedIssues       []PublishedIssue
+	ExecutorKind          string
+	ExecutorRationale     string
+	ExecutorState         executorState
+	ExecutorHeartbeat     string
+	ExecutorDuration      time.Duration
+	ExecutorExitCode      int
+	ExecutorCancelled     bool
+	ExecutorCompleted     bool
+	ExecutorWorkspacePath string
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -202,7 +204,7 @@ type GitHub interface {
 // The callback receives sanitised lines; the caller must not persist
 // raw executor output before redaction.
 type ExecutorRunner interface {
-	Run(ctx context.Context, onLine func(line string) error, name string, args ...string) (ExecutorRunResult, error)
+	Run(ctx context.Context, workspacePath string, onLine func(line string) error, name string, args ...string) (ExecutorRunResult, error)
 }
 
 // ExecutorRunResult captures the final state of an executor run.
@@ -231,21 +233,22 @@ type Telegram interface {
 }
 
 type Dependencies struct {
-	GitHub             GitHub
-	Model              Model
-	Telegram           Telegram
-	Publisher          Publisher
-	Intake             Intake
-	Store              string
-	AllowedUsers       map[string]bool
-	DashboardURL       string
-	Synthesizer        Synthesizer
-	ExecutorRunner     ExecutorRunner
-	Planner            Planner
-	Critiquer          Critiquer
-	IssueWorkspace     IssueClone
-	Preflight          Preflight
-	VerificationRunner VerificationRunner
+	GitHub                    GitHub
+	Model                     Model
+	Telegram                  Telegram
+	Publisher                 Publisher
+	Intake                    Intake
+	Store                     string
+	AllowedUsers              map[string]bool
+	DashboardURL              string
+	Synthesizer               Synthesizer
+	ExecutorRunner            ExecutorRunner
+	Planner                   Planner
+	Critiquer                 Critiquer
+	IssueWorkspace            IssueClone
+	Preflight                 Preflight
+	VerificationRunner        VerificationRunner
+	RalphexExecutionConfigDir string
 }
 
 type application struct {
@@ -370,6 +373,10 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "executor_cancelled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "executor_workspace_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1602,14 +1609,45 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor is not in the correct state for planning", http.StatusConflict)
 		return
 	}
-	
-	// TODO: Get workspace path from intake or create one
-	workspacePath := "" // This needs to be properly implemented
+	claim, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPlanning, time.Now().UTC().Format(time.RFC3339Nano), id, executorSelected)
+	if err != nil {
+		http.Error(w, "could not claim executor planning", http.StatusInternalServerError)
+		return
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "executor state changed before planning could start", http.StatusConflict)
+		return
+	}
+	planned := false
+	defer func() {
+		if !planned {
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorSelected, time.Now().UTC().Format(time.RFC3339Nano), id, executorPlanning)
+		}
+	}()
+
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	workspacePath := status.ExecutorWorkspacePath
+	if a.deps.IssueWorkspace != nil {
+		workspacePath, err = a.executorWorkspace(r.Context(), repo, status)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("could not prepare issue workspace: %v", err), http.StatusFailedDependency)
+			return
+		}
+	}
 	scope := "medium" // TODO: Get from conversation state
 	executorKind := ExecutorKind(status.ExecutorKind)
-	
+	if executorKind == VerificationOnly {
+		a.runVerification(w, r, id, workspacePath)
+		return
+	}
+
 	var planContent string
-	
+
 	// Generate plan if Planner is configured
 	if a.deps.Planner != nil {
 		var err error
@@ -1619,16 +1657,16 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	
+
 	// Run preflight checks if Preflight is configured
 	if a.deps.Preflight != nil {
-		preflightResult := a.deps.Preflight.Verify(r.Context(), workspacePath, "")
+		preflightResult := a.deps.Preflight.Verify(r.Context(), workspacePath, repo.FullName)
 		if !preflightResult.Passed {
 			http.Error(w, "preflight checks failed", http.StatusFailedDependency)
 			return
 		}
 	}
-	
+
 	// Run critique if Critiquer is configured
 	if a.deps.Critiquer != nil {
 		critiqueResult, err := a.deps.Critiquer.CritiquePlan(r.Context(), workspacePath, executorKind, scope)
@@ -1641,23 +1679,36 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := a.db.ExecContext(r.Context(),
-		`UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
-		string(executorPlanned), now, id, string(executorSelected)); err != nil {
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
 		http.Error(w, "could not record planning state", http.StatusInternalServerError)
 		return
 	}
-	
-	// Store plan content as artifact
-	if _, err := a.db.ExecContext(r.Context(),
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(),
 		`INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,created_at=excluded.created_at`,
 		id, "plan", planContent, now); err != nil {
 		http.Error(w, "could not store plan", http.StatusInternalServerError)
 		return
 	}
-	
+	result, err := tx.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPlanned, now, id, executorPlanning)
+	if err != nil {
+		http.Error(w, "could not record planning state", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before planning could complete", http.StatusConflict)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "could not persist planning result", http.StatusInternalServerError)
+		return
+	}
+	planned = true
+
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("planning completed"))
 }
@@ -1708,9 +1759,38 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor run requires operator approval", http.StatusConflict)
 		return
 	}
+	if a.deps.IssueWorkspace != nil && status.ExecutorWorkspacePath == "" {
+		http.Error(w, "issue workspace is not configured", http.StatusFailedDependency)
+		return
+	}
+	if ExecutorKind(status.ExecutorKind) == VerificationOnly {
+		a.runVerification(w, r, id, status.ExecutorWorkspacePath)
+		return
+	}
+	if a.deps.ExecutorRunner == nil {
+		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if ExecutorKind(status.ExecutorKind) == Ralphex && a.deps.RalphexExecutionConfigDir == "" {
+		http.Error(w, "ralphex execution configuration is not configured", http.StatusServiceUnavailable)
+		return
+	}
 
-	// Create a cancelable context derived from the application lifetime so
-	// the operator-triggered cancel handler can stop a running executor.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := a.db.ExecContext(r.Context(),
+		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
+		string(executorRunning), now, now, id, string(executorApproved))
+	if err != nil {
+		http.Error(w, "could not start executor", http.StatusInternalServerError)
+		return
+	}
+	claimed, err := result.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "executor state changed before run could be started", http.StatusConflict)
+		return
+	}
+	// Register cancellation only after this request has atomically claimed the
+	// approved run. A competing request must never replace its cancel handler.
 	runCtx, runCancel := context.WithCancel(a.ctx)
 	a.execCancelsMu.Lock()
 	if a.execCancels == nil {
@@ -1724,18 +1804,6 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		a.execCancelsMu.Unlock()
 		runCancel()
 	}()
-
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := a.db.ExecContext(r.Context(),
-		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
-		string(executorRunning), now, now, id, string(executorApproved)); err != nil {
-		http.Error(w, "could not start executor", http.StatusInternalServerError)
-		return
-	}
-	if a.deps.ExecutorRunner == nil {
-		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
-		return
-	}
 	// Collect sanitised output lines for storage.
 	var outputLines []string
 	var outputLinesMu sync.Mutex
@@ -1758,14 +1826,13 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	var commandName string
 	var commandArgs []string
 
-	// TODO: Get workspace path from intake
-	workspacePath := "" // This needs to be stored in the intake table
+	workspacePath := status.ExecutorWorkspacePath
 	planPath := workspacePath + "/plan.md"
 
 	switch ExecutorKind(status.ExecutorKind) {
 	case Ralphex:
 		commandName = "ralphex"
-		commandArgs = []string{"--config-dir", "", planPath}
+		commandArgs = []string{"--config-dir", a.deps.RalphexExecutionConfigDir, planPath}
 	case Codex:
 		commandName = "codex"
 		commandArgs = []string{"exec", planPath}
@@ -1777,12 +1844,12 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, runErr := a.deps.ExecutorRunner.Run(runCtx, onLine, commandName, commandArgs...)
+	runResult, runErr := a.deps.ExecutorRunner.Run(runCtx, workspacePath, onLine, commandName, commandArgs...)
 	duration := time.Since(nowTime)
 	terminalState := executorCompleted
-	if result.Cancelled {
+	if runResult.Cancelled {
 		terminalState = executorFailed
-	} else if runErr != nil || result.ExitCode != 0 {
+	} else if runErr != nil || runResult.ExitCode != 0 {
 		terminalState = executorFailed
 	}
 	// Store sanitised output as an artifact.
@@ -1790,7 +1857,7 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	for _, line := range outputLines {
 		outputBody += line + "\n"
 	}
-	outputBody += fmt.Sprintf("\n---\nExit code: %d\nDuration: %v\nCancelled: %v\n", result.ExitCode, result.Duration, result.Cancelled)
+	outputBody += fmt.Sprintf("\n---\nExit code: %d\nDuration: %v\nCancelled: %v\n", runResult.ExitCode, runResult.Duration, runResult.Cancelled)
 	now = time.Now().UTC().Format(time.RFC3339Nano)
 	// Use application context (not r.Context()) for terminal state writes.
 	// This ensures the executor state transitions to terminal even if the
@@ -1810,17 +1877,80 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	}
 	durationNs := duration.Nanoseconds()
 	cancelledInt := 0
-	if result.Cancelled {
+	if runResult.Cancelled {
 		cancelledInt = 1
 	}
 	if _, err := tx.ExecContext(a.ctx,
 		`UPDATE intakes SET executor_state=?,executor_heartbeat=?,executor_duration_ns=?,executor_exit_code=?,executor_cancelled=?,updated_at=? WHERE repository_id=? AND executor_state=?`,
-		string(terminalState), now, durationNs, result.ExitCode, cancelledInt, now, id, string(executorRunning)); err != nil {
+		string(terminalState), now, durationNs, runResult.ExitCode, cancelledInt, now, id, string(executorRunning)); err != nil {
 		http.Error(w, "could not record executor result", http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "could not persist executor result", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+// executorWorkspace returns the durable clone for an implementation issue,
+// creating it exactly once before planning or verification. Intake clones are
+// deliberately never reused for executor work.
+func (a *application) executorWorkspace(ctx context.Context, repo Repository, status IntakeStatus) (string, error) {
+	if status.ExecutorWorkspacePath != "" {
+		return status.ExecutorWorkspacePath, nil
+	}
+	if a.deps.IssueWorkspace == nil {
+		return "", errors.New("issue workspace is not configured")
+	}
+	if status.PublishedIssue.Number < 1 {
+		return "", errors.New("a published issue is required")
+	}
+	path, err := a.deps.IssueWorkspace.Start(ctx, repo, status.PublishedIssue.Number)
+	if err != nil {
+		return "", err
+	}
+	result, err := a.db.ExecContext(ctx,
+		`UPDATE intakes SET executor_workspace_path=?,updated_at=? WHERE repository_id=? AND executor_workspace_path=''`,
+		path, time.Now().UTC().Format(time.RFC3339Nano), repo.ID)
+	if err != nil {
+		return "", fmt.Errorf("persist issue workspace: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("inspect issue workspace persistence: %w", err)
+	}
+	if changed == 1 {
+		return path, nil
+	}
+	var persisted string
+	if err := a.db.QueryRowContext(ctx, `SELECT executor_workspace_path FROM intakes WHERE repository_id=?`, repo.ID).Scan(&persisted); err != nil {
+		return "", fmt.Errorf("load concurrently created issue workspace: %w", err)
+	}
+	if persisted == "" {
+		return "", errors.New("issue workspace was not persisted")
+	}
+	return persisted, nil
+}
+
+// runVerification is the terminal path for verification-only selections. It
+// intentionally bypasses planning, critique, approval, and executor binaries.
+func (a *application) runVerification(w http.ResponseWriter, r *http.Request, id, workspacePath string) {
+	if a.deps.VerificationRunner == nil {
+		http.Error(w, "verification runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	result, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("verification failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	state := executorCompleted
+	if !result.ReadyForPR {
+		state = executorFailed
+	}
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
+		http.Error(w, "could not record verification result", http.StatusInternalServerError)
 		return
 	}
 	a.redirectWorkspace(w, r, id)
@@ -2128,7 +2258,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var executorStateStr string
 	var durationNs int64
 	var cancelledInt int
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath)
 	status.ExecutorState = executorState(executorStateStr)
 	status.ExecutorDuration = time.Duration(durationNs)
 	status.ExecutorCancelled = cancelledInt != 0

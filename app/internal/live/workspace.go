@@ -43,15 +43,23 @@ func (w IssueWorkspace) Start(ctx context.Context, repo dashboard.Repository, is
 		return "", fmt.Errorf("create issue workspace base directory: %w", err)
 	}
 	path := filepath.Join(w.BaseDir, strconv.Itoa(issueNumber))
+	if _, err := os.Lstat(path); err == nil {
+		return "", fmt.Errorf("issue workspace already exists: %s", path)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect issue workspace destination: %w", err)
+	}
 	command := w.Command
 	if command == nil {
 		command = exec.CommandContext
 	}
 	output, err := command(ctx, "gh", "repo", "clone", repo.FullName, path, "--", "--depth=1").CombinedOutput()
 	if err != nil {
-		// Best-effort cleanup: if the clone left partial state, remove it.
-		// Don't let a cleanup error hide the original clone stderr.
-		_ = w.Cleanup(ctx, path)
+		// The destination was absent immediately before this invocation, so any
+		// path now present is clone-owned partial state and may be removed.
+		// This must not delete a workspace that predated a failed clone.
+		if _, statErr := os.Lstat(path); statErr == nil {
+			_ = w.Cleanup(ctx, path)
+		}
 		return "", fmt.Errorf("clone issue workspace: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return path, nil

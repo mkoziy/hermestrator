@@ -122,9 +122,17 @@ func (p *Planner) planCommand(profile PlanningProfile, scope string) (string, []
 	prompt := buildPlanPrompt(profile, scope)
 	switch profile.Planner {
 	case "pi":
-		return "pi", []string{"-p", prompt}
+		args := []string{"-p", prompt}
+		if profile.Model != "" {
+			args = append([]string{"--model", profile.Model}, args...)
+		}
+		return "pi", args
 	default:
-		return "codex", []string{"exec", prompt}
+		args := []string{"exec"}
+		if profile.Model != "" {
+			args = append(args, "--model", profile.Model)
+		}
+		return "codex", append(args, prompt)
 	}
 }
 

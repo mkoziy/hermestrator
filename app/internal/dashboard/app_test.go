@@ -99,7 +99,33 @@ type fakeExecutorRunner struct {
 	cancelled bool
 }
 
-func (f *fakeExecutorRunner) Run(_ context.Context, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+type fakeIssueWorkspace struct {
+	path   string
+	starts int
+}
+
+func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (string, error) {
+	f.starts++
+	return f.path, nil
+}
+
+func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { return nil }
+
+type fakePlanner struct{ workspace string }
+
+func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, _ string) (string, error) {
+	f.workspace = workspace
+	return "# Plan: test\n\n### Task 1: test", nil
+}
+
+type fakeVerificationRunner struct{ calls int }
+
+func (f *fakeVerificationRunner) Run(context.Context, string, []CheckSpec) (VerificationResult, error) {
+	f.calls++
+	return VerificationResult{ReadyForPR: true}, nil
+}
+
+func (f *fakeExecutorRunner) Run(_ context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
 	for _, line := range f.lines {
 		if err := onLine(line); err != nil {
 			return ExecutorRunResult{}, err
@@ -116,7 +142,7 @@ type hangExecutorRunner struct {
 	run   bool
 }
 
-func (h *hangExecutorRunner) Run(ctx context.Context, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+func (h *hangExecutorRunner) Run(ctx context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
 	h.mu.Lock()
 	h.run = true
 	h.mu.Unlock()
@@ -1342,6 +1368,55 @@ func TestPlanningRejectedBeforeExecutorSelection(t *testing.T) {
 	response = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("plan after selection status = %d, want %d", response.Code, http.StatusAccepted)
+	}
+}
+
+func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	clone := &fakeIssueWorkspace{path: workspace}
+	planner := &fakePlanner{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, IssueWorkspace: clone, Planner: planner})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned an unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_, err := executorApp.db.Exec(`UPDATE intakes SET issue_number=73,issue_url='https://github.com/mkoziy/hermestrator/issues/73' WHERE repository_id='42'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("plan status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	if planner.workspace != workspace || clone.starts != 1 {
+		t.Fatalf("planner workspace=%q starts=%d, want %q and 1", planner.workspace, clone.starts, workspace)
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorWorkspacePath != workspace {
+		t.Fatalf("persisted workspace=%q err=%v, want %q", status.ExecutorWorkspacePath, err, workspace)
+	}
+}
+
+func TestVerificationOnlySkipsPlanningAndApproval(t *testing.T) {
+	verification := &fakeVerificationRunner{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, VerificationRunner: verification})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned an unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_, err := executorApp.db.Exec(`UPDATE intakes SET executor_kind='verification-only',executor_state='selected',executor_workspace_path=? WHERE repository_id='42'`, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusSeeOther || verification.calls != 1 {
+		t.Fatalf("verification response=%d body=%q calls=%d, want redirect and one call", response.Code, response.Body.String(), verification.calls)
 	}
 }
 
