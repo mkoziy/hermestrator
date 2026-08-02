@@ -26,7 +26,7 @@ func main() {
 	issueWorkspaceBase := envOr("PM_EXECUTOR_WORKSPACE_DIR", filepath.Join(os.TempDir(), "hermestrator-executor-workspaces"))
 	planningProfile := envOr("PM_PLANNING_PROFILE", filepath.Join(os.TempDir(), "hermestrator-planning-profile.json"))
 	processRunner := &live.ProcessRunner{}
-	planner := &live.Planner{Runner: processRunner, ProfilePath: planningProfile}
+	planner := &live.Planner{Runner: processRunner, ProfilePath: planningProfile, RalphexPlanningConfigDir: envOr("PM_RALPHEX_PLANNING_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-planning"))}
 	app, err := dashboard.New(dashboard.Dependencies{
 		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
 		Model:       model,

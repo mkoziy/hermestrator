@@ -1,12 +1,14 @@
 package live
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
@@ -47,6 +49,10 @@ type Planner struct {
 	// ProfilePath is the path to the PM-owned planning profile JSON file.
 	// When empty, DefaultPlanningProfile is used.
 	ProfilePath string
+	// RalphexPlanningConfigDir is a PM-owned ralphex planning profile. The
+	// upstream ralphex plan UI is interactive, so this adapter reads its
+	// executor settings and invokes that executor directly, headlessly.
+	RalphexPlanningConfigDir string
 }
 
 // GeneratePlan runs the planning binary (codex exec or pi -p) inside the
@@ -63,7 +69,10 @@ func (p *Planner) GeneratePlan(ctx context.Context, workspacePath string, execut
 		return "", fmt.Errorf("load planning profile: %w", err)
 	}
 
-	name, args := p.planCommand(profile, scope)
+	name, args, err := p.planCommandForExecutor(profile, executorKind, scope)
+	if err != nil {
+		return "", err
+	}
 
 	runner := p.Runner
 	if runner == nil {
@@ -92,6 +101,59 @@ func (p *Planner) GeneratePlan(ctx context.Context, workspacePath string, execut
 	}
 
 	return content, nil
+}
+
+func (p *Planner) planCommandForExecutor(profile PlanningProfile, executorKind dashboard.ExecutorKind, scope string) (string, []string, error) {
+	if executorKind != dashboard.Ralphex {
+		name, args := p.planCommand(profile, scope)
+		return name, args, nil
+	}
+	if p.RalphexPlanningConfigDir == "" {
+		return "", nil, fmt.Errorf("ralphex planning config directory is required")
+	}
+	settings, err := loadRalphexPlanningSettings(filepath.Join(p.RalphexPlanningConfigDir, "config"))
+	if err != nil {
+		return "", nil, err
+	}
+	if settings.Executor != "codex" {
+		return "", nil, fmt.Errorf("ralphex planning profile executor %q is unsupported", settings.Executor)
+	}
+	args := []string{"exec", "--model", settings.Model, "-c", fmt.Sprintf("model_reasoning_effort=%q", settings.Effort)}
+	if settings.Sandbox != "" {
+		args = append(args, "--sandbox", settings.Sandbox)
+	}
+	args = append(args, buildRalphexPlanPrompt(scope))
+	return "codex", args, nil
+}
+
+type ralphexPlanningSettings struct{ Executor, Model, Effort, Sandbox string }
+
+func loadRalphexPlanningSettings(path string) (ralphexPlanningSettings, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return ralphexPlanningSettings{}, fmt.Errorf("read ralphex planning profile: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	values := map[string]string{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ralphexPlanningSettings{}, fmt.Errorf("read ralphex planning profile: %w", err)
+	}
+	return ralphexPlanningSettings{Executor: values["executor"], Model: defaultString(values["codex_model"], "gpt-5.6-terra"), Effort: defaultString(values["codex_reasoning_effort"], "medium"), Sandbox: values["codex_sandbox"]}, nil
+}
+
+func defaultString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 // loadProfile reads the planning profile from disk or returns defaults.
@@ -149,6 +211,10 @@ func buildPlanPrompt(profile PlanningProfile, scope string) string {
 			"Scope: %s",
 		effort, profile.Sandbox, dashboard.PlanFileName, scope,
 	)
+}
+
+func buildRalphexPlanPrompt(scope string) string {
+	return fmt.Sprintf("Generate a ralphex-compatible implementation plan for this scope. Inspect the repository first. Output only markdown beginning with '# Plan:', include '## Validation Commands', and one or more '### Task N:' sections with unchecked checklist items.\n\nScope: %s", scope)
 }
 
 // collectStdout concatenates all stdout lines from a run result.

@@ -195,12 +195,17 @@ func TestPlannerGeneratePlanEmptyOutput(t *testing.T) {
 
 func TestPlannerDefaultProfile(t *testing.T) {
 	workspace := t.TempDir()
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "config"), []byte("executor=codex\ncodex_model=ralphex-model\ncodex_reasoning_effort=high\ncodex_sandbox=workspace-write\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 
 	var invokedName string
 	var invokedArgs []string
 
 	planner := Planner{
-		ProfilePath: "",
+		ProfilePath:              "",
+		RalphexPlanningConfigDir: configDir,
 		Runner: &ProcessRunner{
 			Command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 				invokedName = name
@@ -215,7 +220,8 @@ func TestPlannerDefaultProfile(t *testing.T) {
 		t.Fatalf("GeneratePlan: %v", err)
 	}
 
-	// Default profile should use "codex".
+	// The PM-owned ralphex adapter invokes the profile's executor directly;
+	// it never invokes the interactive ralphex plan UI.
 	if invokedName != "codex" {
 		t.Errorf("invoked binary = %q, want codex", invokedName)
 	}
@@ -223,10 +229,18 @@ func TestPlannerDefaultProfile(t *testing.T) {
 		t.Errorf("invoked args = %v, want [exec, ...]", invokedArgs)
 	}
 
-	// Ralphex executorKind should not change the planning binary — the
-	// profile controls planning independently.
+	if !strings.Contains(strings.Join(invokedArgs, " "), "ralphex-model") {
+		t.Errorf("ralphex planning model was not passed: %v", invokedArgs)
+	}
 	if invokedName == "ralphex" {
-		t.Error("ralphex was invoked for planning, but planning must never call ralphex --plan")
+		t.Error("interactive ralphex was invoked instead of the PM-owned headless adapter")
+	}
+}
+
+func TestPlannerRalphexPlanningRequiresDedicatedConfig(t *testing.T) {
+	_, err := (&Planner{}).GeneratePlan(context.Background(), t.TempDir(), dashboard.Ralphex, "scope")
+	if err == nil || !strings.Contains(err.Error(), "ralphex planning config directory is required") {
+		t.Fatalf("GeneratePlan error = %v, want missing planning config", err)
 	}
 }
 
