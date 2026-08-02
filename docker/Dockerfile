@@ -92,7 +92,7 @@ RUN --mount=type=secret,id=github_token \
         | grep -oE "https://github.com/umputun/ralphex/releases/download/[^\"]*linux_${ARCH}\.tar\.gz")" \
     && curl -fsSL "$REL_URL" -o /tmp/ralphex.tar.gz \
     && tar -xzf /tmp/ralphex.tar.gz -C /tmp ralphex \
-    && install -m 755 /tmp/ralphex /usr/local/bin/ralphex-real \
+    && install -m 755 /tmp/ralphex /usr/local/bin/ralphex \
     && rm -f /tmp/ralphex.tar.gz /tmp/ralphex
 
 # non-root `npm install -g` needs a writable prefix — the system Node's
@@ -182,9 +182,6 @@ COPY --chown=app:app ralphex/ralphex-pi-planning/prompts/ /opt/ralphex-profiles/
 COPY --chown=app:app ralphex/ralphex-pi-planning/scripts/ /opt/ralphex-profiles/pi-planning/scripts/
 COPY --chown=app:app ralphex/ralphex-claude-planning/config /opt/ralphex-profiles/claude-planning/config
 RUN chmod +x /opt/ralphex-profiles/pi/scripts/*.sh /opt/ralphex-profiles/pi-planning/scripts/*.sh
-
-COPY --chmod=755 docker/ralphex-wrapper.sh /usr/local/bin/ralphex
-COPY --chmod=755 docker/ralphex-headless-plan.sh /usr/local/bin/ralphex-headless-plan
 
 # Agent Skills (open SKILL.md standard, shared unmodified across Claude Code,
 # codex CLI, and pi): baked into the read-only image layer under
