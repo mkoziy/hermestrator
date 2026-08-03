@@ -440,10 +440,10 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 
 ### Task 15: Verify acceptance criteria
 
-- [ ] verify every checkbox in issue #5's acceptance criteria against the implementation
-- [ ] verify the two extra gaps found in discovery (verification-for-all-kinds, lease wiring) are fully closed
-- [ ] run full test suite: `make check` (fmt-check, mod-check, vet, lint, test, race, shell-check)
-- [ ] verify no secrets/tokens appear in any new logged, streamed, or persisted output (grep new files for `GH_TOKEN`, API keys)
+- [x] verify every checkbox in issue #5's acceptance criteria against the implementation (verified against the completed Tasks 1–14 and their handler/unit tests)
+- [x] verify the two extra gaps found in discovery (verification-for-all-kinds, lease wiring) are fully closed (confirmed in `app/internal/dashboard/app.go` and lease/recovery tests)
+- [x] run full test suite: `make check` (fmt-check, mod-check, vet, lint, test, race, shell-check) (passed)
+- [x] verify no secrets/tokens appear in any new logged, streamed, or persisted output (grep new files for `GH_TOKEN`, API keys) (scan found only intentional environment-variable reads in startup wiring)
 
 ### Task 16: [Final] Update documentation
 
