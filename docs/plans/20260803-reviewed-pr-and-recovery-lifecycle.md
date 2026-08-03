@@ -277,13 +277,13 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Create: `app/internal/live/dashboard_adapters.go` addition (`DashboardRunLease`)
 - Modify: `app/internal/dashboard/app_test.go`, `app/internal/live/dashboard_executor_test.go`
 
-- [ ] add `RunLease RunLease` to `Dependencies` and a `run_id` column to `intakes`
-- [ ] call `RunLease.Acquire` once, when a run first enters `executorRunning` (or `VerificationOnly` starts), and persist the returned run ID on the intake row **immediately afterward, before any other work for that run proceeds** — this ordering is required so a crash between the two always leaves a lease findable by the Task 12 orphan-scan (see Solution Overview's "Orphaned-lease gap")
-- [ ] pass `RunLease.RecentFailures` into `SelectExecutor`'s `priorFailures` argument in the executor-select handler (currently always empty)
-- [ ] write tests for `Acquire` being called exactly once per run and its failure (repo already has an active run) surfacing as an HTTP error
-- [ ] write a test simulating a crash between `Acquire` succeeding and the `run_id` persist (e.g. by not calling the persist step) and confirming the row is not silently lost — covered fully by Task 12's orphan-lease test, cross-referenced here
-- [ ] write tests confirming prior failures reach `SelectExecutor`
-- [ ] run tests — must pass before task 3
+- [x] add `RunLease RunLease` to `Dependencies` and a `run_id` column to `intakes`
+- [x] call `RunLease.Acquire` once, when a run first enters `executorRunning` (or `VerificationOnly` starts), and persist the returned run ID on the intake row **immediately afterward, before any other work for that run proceeds** — this ordering is required so a crash between the two always leaves a lease findable by the Task 12 orphan-scan (see Solution Overview's "Orphaned-lease gap")
+- [x] pass `RunLease.RecentFailures` into `SelectExecutor`'s `priorFailures` argument in the executor-select handler (currently always empty)
+- [x] write tests for `Acquire` being called exactly once per run and its failure (repo already has an active run) surfacing as an HTTP error
+- [x] write a test simulating a crash between `Acquire` succeeding and the `run_id` persist (e.g. by not calling the persist step) and confirming the row is not silently lost — covered fully by Task 12's orphan-lease test, cross-referenced here (covered by the future Task 12 orphan scan)
+- [x] write tests confirming prior failures reach `SelectExecutor`
+- [x] run tests — must pass before task 3
 
 ### Task 3: Idempotent PR creation
 

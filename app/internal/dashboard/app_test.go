@@ -99,6 +99,24 @@ type fakeExecutorRunner struct {
 	cancelled bool
 }
 
+type fakeRunLease struct {
+	acquires int
+	failures []FailureRecord
+	err      error
+}
+
+func (l *fakeRunLease) Acquire(context.Context, string, int, ExecutorKind) (string, error) {
+	l.acquires++
+	if l.err != nil {
+		return "", l.err
+	}
+	return "run-1", nil
+}
+func (*fakeRunLease) Release(context.Context, string, string, string) error { return nil }
+func (l *fakeRunLease) RecentFailures(context.Context, string, int) ([]FailureRecord, error) {
+	return l.failures, nil
+}
+
 type fakeIssueWorkspace struct {
 	path   string
 	starts int
@@ -1462,6 +1480,54 @@ func TestExecutorVerificationFailureLandsFailed(t *testing.T) {
 	}
 	if status.ExecutorState != executorFailed {
 		t.Fatalf("state=%q, want failed", status.ExecutorState)
+	}
+}
+
+func TestExecutorRunAcquiresLeaseOnceAndPersistsRunID(t *testing.T) {
+	lease := &fakeRunLease{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}, VerificationRunner: &fakeVerificationRunner{ready: true}, RunLease: lease})
+	setupExecutorRun(t, app)
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want redirect", response.Code)
+	}
+	if lease.acquires != 1 {
+		t.Fatalf("acquires = %d, want 1", lease.acquires)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.RunID != "run-1" {
+		t.Fatalf("run ID = %q, err=%v, want run-1", status.RunID, err)
+	}
+}
+
+func TestExecutorRunLeaseFailureReturnsConflict(t *testing.T) {
+	lease := &fakeRunLease{err: errors.New("repository already has an active implementation run")}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}, RunLease: lease})
+	setupExecutorRun(t, app)
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("run status = %d, want conflict", response.Code)
+	}
+}
+
+func TestExecutorSelectionUsesPriorFailures(t *testing.T) {
+	lease := &fakeRunLease{failures: []FailureRecord{{Kind: Ralphex, Reason: "failed"}}}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("select status = %d, want redirect", response.Code)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Codex) {
+		t.Fatalf("executor kind = %q, err=%v, want codex", status.ExecutorKind, err)
 	}
 }
 

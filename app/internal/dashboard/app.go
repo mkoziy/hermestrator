@@ -195,6 +195,7 @@ type IntakeStatus struct {
 	ExecutorCancelled     bool
 	ExecutorCompleted     bool
 	ExecutorWorkspacePath string
+	RunID                 string
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -207,6 +208,12 @@ type GitHub interface {
 // raw executor output before redaction.
 type ExecutorRunner interface {
 	Run(ctx context.Context, workspacePath string, onLine func(line string) error, name string, args ...string) (ExecutorRunResult, error)
+}
+
+type RunLease interface {
+	Acquire(context.Context, string, int, ExecutorKind) (string, error)
+	Release(context.Context, string, string, string) error
+	RecentFailures(context.Context, string, int) ([]FailureRecord, error)
 }
 
 // ExecutorRunResult captures the final state of an executor run.
@@ -250,6 +257,7 @@ type Dependencies struct {
 	IssueWorkspace            IssueClone
 	Preflight                 Preflight
 	VerificationRunner        VerificationRunner
+	RunLease                  RunLease
 	RalphexExecutionConfigDir string
 }
 
@@ -379,6 +387,10 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "executor_workspace_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1582,10 +1594,16 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Derive scope from conversation state. For now, default to "medium".
-	// repoPolicy and priorFailures are empty: policy support (operator
-	// config) and failure history (Task 14) are later additions.
-	selection := SelectExecutor("medium", "", nil)
+	var priorFailures []FailureRecord
+	if a.deps.RunLease != nil {
+		var err error
+		priorFailures, err = a.deps.RunLease.RecentFailures(r.Context(), id, 10)
+		if err != nil {
+			http.Error(w, "could not load executor history", http.StatusInternalServerError)
+			return
+		}
+	}
+	selection := SelectExecutor("medium", "", priorFailures)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := a.db.ExecContext(r.Context(),
 		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,updated_at=excluded.updated_at`,
@@ -1817,6 +1835,18 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "executor state changed before run could be started", http.StatusConflict)
 		return
 	}
+	if a.deps.RunLease != nil {
+		runID, err := a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, ExecutorKind(status.ExecutorKind))
+		if err != nil {
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorRunning)
+			http.Error(w, fmt.Sprintf("could not acquire executor lease: %v", err), http.StatusConflict)
+			return
+		}
+		if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorRunning); err != nil {
+			http.Error(w, "could not persist executor lease", http.StatusInternalServerError)
+			return
+		}
+	}
 	// Register cancellation only after this request has atomically claimed the
 	// approved run. A competing request must never replace its cancel handler.
 	runCtx, runCancel := context.WithCancel(a.ctx)
@@ -1980,6 +2010,23 @@ func (a *application) runVerification(w http.ResponseWriter, r *http.Request, id
 	if err != nil || changed != 1 {
 		http.Error(w, "executor state changed before verification could start", http.StatusConflict)
 		return
+	}
+	if a.deps.RunLease != nil {
+		status, statusErr := a.intakeStatus(r.Context(), id)
+		if statusErr != nil {
+			http.Error(w, "could not load verification intake", http.StatusInternalServerError)
+			return
+		}
+		runID, acquireErr := a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, VerificationOnly)
+		if acquireErr != nil {
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorSelected, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying)
+			http.Error(w, fmt.Sprintf("could not acquire executor lease: %v", acquireErr), http.StatusConflict)
+			return
+		}
+		if _, persistErr := a.db.ExecContext(a.ctx, `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying); persistErr != nil {
+			http.Error(w, "could not persist executor lease", http.StatusInternalServerError)
+			return
+		}
 	}
 	verification, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
 	state := executorVerified
@@ -2295,7 +2342,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var executorStateStr string
 	var durationNs int64
 	var cancelledInt int
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID)
 	status.ExecutorState = executorState(executorStateStr)
 	status.ExecutorDuration = time.Duration(durationNs)
 	status.ExecutorCancelled = cancelledInt != 0
