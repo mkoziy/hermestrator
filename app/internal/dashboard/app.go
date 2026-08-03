@@ -474,7 +474,7 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-pr"><button class="btn btn-outline-primary">Retry pull request</button></form>{{else if .Intake.ExecutorCompleted}}`
+	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "reviewing"}}<p>State: reviewing pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel review</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merging"}}<p>State: merging pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel merge</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-review"><button class="btn btn-outline-primary">Retry pull request review</button></form>{{else if .Intake.ExecutorCompleted}}`
 	t, err := template.New("page").Parse(strings.Replace(pageTemplate, `{{else if .Intake.ExecutorCompleted}}`, executorControls, 1))
 	if err != nil {
 		_ = db.Close()
@@ -530,15 +530,15 @@ func New(deps Dependencies) (*application, error) {
 // authority for PR state; the lease scan is intentionally independent so a
 // crash before run_id was persisted is recoverable too.
 func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),COALESCE(i.issue_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','failed','cleanup_done')`)
+	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','merged','failed','cleanup_done')`)
 	if err != nil {
 		return fmt.Errorf("startup reconciliation: query intakes: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id, fullName, runID, state string
-		var number, issueNumber int
-		if err := rows.Scan(&id, &fullName, &number, &issueNumber, &state, &runID); err != nil {
+		var number int
+		if err := rows.Scan(&id, &fullName, &number, &state, &runID); err != nil {
 			return err
 		}
 		if (state == string(executorFailed) || state == string(executorCleanupDone)) && runID != "" && a.deps.RunLease != nil {
@@ -568,12 +568,6 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 		next := executorState(state)
 		switch remote {
 		case "MERGED":
-			if a.deps.MergeExecutor == nil {
-				continue
-			}
-			if err := a.deps.MergeExecutor.CloseIssue(ctx, Repository{ID: id, FullName: fullName}, issueNumber); err != nil {
-				return fmt.Errorf("startup reconciliation: close issue #%d: %w", issueNumber, err)
-			}
 			next = executorMerged
 		case "CLOSED":
 			next = executorFailed
@@ -592,6 +586,11 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 		}
 		if next == executorFailed && runID != "" && a.deps.RunLease != nil {
 			_ = a.deps.RunLease.Release(ctx, runID, string(next), "startup reconciliation")
+		}
+		if next == executorMerged {
+			if err := a.cleanupMerged(ctx, id); err != nil {
+				return fmt.Errorf("startup reconciliation: cleanup merged pull request: %w", err)
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -2345,6 +2344,24 @@ func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "maximum review fix rounds exhausted", http.StatusConflict)
 		return
 	}
+	var name string
+	var args []string
+	prompt := fmt.Sprintf("Fix the following independent review findings in the workspace, then run the relevant checks:\n\n%s", status.ReviewFindings)
+	switch ExecutorKind(status.ExecutorKind) {
+	case Ralphex:
+		if a.deps.RalphexExecutionConfigDir == "" {
+			http.Error(w, "ralphex execution configuration is not configured", http.StatusServiceUnavailable)
+			return
+		}
+		name, args = "ralphex", []string{"--config-dir", a.deps.RalphexExecutionConfigDir, "-p", prompt}
+	case Codex:
+		name, args = "codex", []string{"exec", prompt}
+	case Pi:
+		name, args = "pi", []string{"-p", prompt}
+	default:
+		http.Error(w, "unsupported executor kind for review fix", http.StatusBadRequest)
+		return
+	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFixing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewBlocked)
 	if err != nil {
 		http.Error(w, "could not claim review fix", http.StatusInternalServerError)
@@ -2353,20 +2370,6 @@ func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
 	changed, rowsErr := result.RowsAffected()
 	if rowsErr != nil || changed != 1 {
 		http.Error(w, "review state changed before fix could start", http.StatusConflict)
-		return
-	}
-	prompt := fmt.Sprintf("Fix the following independent review findings in the workspace, then run the relevant checks:\n\n%s", status.ReviewFindings)
-	var name string
-	var args []string
-	switch ExecutorKind(status.ExecutorKind) {
-	case Ralphex:
-		name, args = "ralphex", []string{"--config-dir", a.deps.RalphexExecutionConfigDir, "-p", prompt}
-	case Codex:
-		name, args = "codex", []string{"exec", prompt}
-	case Pi:
-		name, args = "pi", []string{"-p", prompt}
-	default:
-		http.Error(w, "unsupported executor kind for review fix", http.StatusBadRequest)
 		return
 	}
 	runResult, runErr := a.deps.ExecutorRunner.Run(r.Context(), status.ExecutorWorkspacePath, nil, name, args...)
@@ -2421,13 +2424,12 @@ func (a *application) executorMerge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("pull request merge rejected: %v", err), http.StatusConflict)
 		return
 	}
-	if err = a.deps.MergeExecutor.CloseIssue(r.Context(), repo, status.PublishedIssue.Number); err != nil {
-		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeReady, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging)
-		http.Error(w, fmt.Sprintf("issue closure failed: %v", err), http.StatusBadGateway)
-		return
-	}
 	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging); err != nil {
 		http.Error(w, "could not record merged state", 500)
+		return
+	}
+	if err = a.deps.MergeExecutor.CloseIssue(r.Context(), repo, status.PublishedIssue.Number); err != nil {
+		http.Error(w, fmt.Sprintf("issue closure failed; retry cleanup: %v", err), http.StatusBadGateway)
 		return
 	}
 	a.redirectWorkspace(w, r, id)
@@ -2442,41 +2444,50 @@ func (a *application) executorCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cleanup is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	status, err := a.intakeStatus(r.Context(), id)
-	if err != nil {
-		http.Error(w, "could not load intake", http.StatusInternalServerError)
+	if err := a.cleanupMerged(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+// cleanupMerged completes the post-merge work only after GitHub confirms the
+// merge. It is shared by the operator action and startup recovery.
+func (a *application) cleanupMerged(ctx context.Context, id string) error {
+	if a.deps.MergeExecutor == nil || a.deps.IssueWorkspace == nil {
+		return errors.New("cleanup is not configured")
+	}
+	status, err := a.intakeStatus(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load intake: %w", err)
 	}
 	if status.ExecutorState != executorMerged {
-		http.Error(w, "cleanup requires a merged pull request", http.StatusConflict)
-		return
+		return errors.New("cleanup requires a merged pull request")
 	}
-	repo, err := a.repository(r.Context(), id)
+	repo, err := a.repository(ctx, id)
 	if err != nil {
-		http.Error(w, "could not load repository", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("load repository: %w", err)
 	}
-	if err := a.deps.MergeExecutor.ConfirmMerged(r.Context(), repo, status.PR.Number); err != nil {
-		http.Error(w, fmt.Sprintf("pull request is not confirmed merged: %v", err), http.StatusConflict)
-		return
+	if err := a.deps.MergeExecutor.ConfirmMerged(ctx, repo, status.PR.Number); err != nil {
+		return fmt.Errorf("pull request is not confirmed merged: %w", err)
 	}
-	if err := a.deps.IssueWorkspace.Cleanup(r.Context(), status.ExecutorWorkspacePath); err != nil {
-		http.Error(w, fmt.Sprintf("cleanup workspace: %v", err), http.StatusInternalServerError)
-		return
+	if err := a.deps.MergeExecutor.CloseIssue(ctx, repo, status.PublishedIssue.Number); err != nil {
+		return fmt.Errorf("close issue: %w", err)
 	}
-	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCleanupDone, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerged)
+	if err := a.deps.IssueWorkspace.Cleanup(ctx, status.ExecutorWorkspacePath); err != nil {
+		return fmt.Errorf("cleanup workspace: %w", err)
+	}
+	result, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCleanupDone, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerged)
 	if err != nil {
-		http.Error(w, "could not record cleanup", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("record cleanup: %w", err)
 	}
 	changed, _ := result.RowsAffected()
 	if changed == 1 && a.deps.RunLease != nil && status.RunID != "" {
-		if err := a.deps.RunLease.Release(a.ctx, status.RunID, "completed", ""); err != nil {
-			http.Error(w, "could not release implementation lease", http.StatusInternalServerError)
-			return
+		if err := a.deps.RunLease.Release(ctx, status.RunID, "completed", ""); err != nil {
+			return fmt.Errorf("release implementation lease: %w", err)
 		}
 	}
-	a.redirectWorkspace(w, r, id)
+	return nil
 }
 
 // executorWorkspace returns the durable clone for an implementation issue,

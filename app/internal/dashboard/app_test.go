@@ -155,6 +155,7 @@ type endToEndMergeExecutor struct {
 	closeCalls int
 	mergeErr   error
 	confirmErr error
+	closeErr   error
 }
 
 func (m *endToEndMergeExecutor) ConfirmMerged(context.Context, Repository, int) error {
@@ -166,7 +167,7 @@ func (m *endToEndMergeExecutor) Merge(context.Context, Repository, int) error {
 }
 func (m *endToEndMergeExecutor) CloseIssue(context.Context, Repository, int) error {
 	m.closeCalls++
-	return nil
+	return m.closeErr
 }
 
 func (f *fakeMergeabilityChecker) CheckMergeable(context.Context, Repository, int) (bool, string, error) {
@@ -1137,6 +1138,53 @@ func TestFixingStateRecoversAtStartupWithoutReplayingFix(t *testing.T) {
 	}
 }
 
+func TestExecutorFixRejectsUnsupportedKindWithoutClaimingState(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='review_blocked',executor_kind='verification_only' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/fix", "", "michael")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want bad request", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		t.Fatalf("state=%q err=%v, want review_blocked", status.ExecutorState, err)
+	}
+}
+
+func TestIssueCloseFailureLeavesMergedWorkRetryableThroughCleanup(t *testing.T) {
+	merge := &endToEndMergeExecutor{closeErr: errors.New("temporary GitHub error")}
+	clone := &fakeIssueWorkspace{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeExecutor: merge, IssueWorkspace: clone})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='merge_approved',pr_number=7,issue_number=3,executor_workspace_path=? WHERE repository_id='42'`, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/merge", "", "michael")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("merge status=%d, want bad gateway", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMerged {
+		t.Fatalf("state=%q err=%v, want merged", status.ExecutorState, err)
+	}
+	merge.closeErr = nil
+	response = request(t, app, http.MethodPost, "/repositories/42/executor/cleanup", "", "michael")
+	if response.Code != http.StatusSeeOther || clone.cleanups != 1 {
+		t.Fatalf("cleanup status=%d cleanups=%d", response.Code, clone.cleanups)
+	}
+}
+
 func TestMergeRejectionLeavesWorkspaceAndDoesNotCleanup(t *testing.T) {
 	merge := &endToEndMergeExecutor{mergeErr: errors.New("GitHub rejected merge")}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeExecutor: merge, IssueWorkspace: &fakeIssueWorkspace{}})
@@ -1738,7 +1786,8 @@ func (l *startupLease) Release(ctx context.Context, id, state, reason string) er
 func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
 	lease := &startupLease{active: []ActiveRun{{RunID: "orphan"}}}
 	merge := &endToEndMergeExecutor{}
-	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease, MergeExecutor: merge})
+	clone := &fakeIssueWorkspace{}
+	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease, MergeExecutor: merge, IssueWorkspace: clone})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1753,14 +1802,17 @@ func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT executor_state FROM intakes WHERE repository_id='repo'`).Scan(&state); err != nil {
 		t.Fatal(err)
 	}
-	if state != "merged" {
-		t.Fatalf("state = %q, want merged", state)
+	if state != "cleanup_done" {
+		t.Fatalf("state = %q, want cleanup_done", state)
 	}
 	if merge.closeCalls != 1 {
 		t.Fatalf("issue close calls = %d, want 1", merge.closeCalls)
 	}
-	if len(lease.released) != 1 || lease.released[0] != "orphan" {
-		t.Fatalf("released %v, want only orphan lease; merged work retains its lease until cleanup", lease.released)
+	if len(lease.released) != 2 || lease.released[0] != "run-1" || lease.released[1] != "orphan" {
+		t.Fatalf("released %v, want recovered and orphan leases", lease.released)
+	}
+	if clone.cleanups != 1 {
+		t.Fatalf("workspace cleanups=%d, want 1", clone.cleanups)
 	}
 }
 
