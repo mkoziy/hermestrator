@@ -447,9 +447,9 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 
 ### Task 16: [Final] Update documentation
 
-- [ ] update `app/README.md` with the new executor-state lifecycle diagram/table
-- [ ] update `CLAUDE.md` only if a new durable pattern emerged that future work should follow
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `app/README.md` with the new executor-state lifecycle diagram/table
+- [x] update `CLAUDE.md` only if a new durable pattern emerged that future work should follow (no additional pattern beyond the existing guide)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
