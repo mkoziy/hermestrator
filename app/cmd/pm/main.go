@@ -26,6 +26,11 @@ func main() {
 	issueWorkspaceBase := envOr("PM_EXECUTOR_WORKSPACE_DIR", filepath.Join(os.TempDir(), "hermestrator-executor-workspaces"))
 	planningProfile := envOr("PM_PLANNING_PROFILE", filepath.Join(os.TempDir(), "hermestrator-planning-profile.json"))
 	processRunner := &live.ProcessRunner{}
+	runStore, err := live.NewImplementationRunStore(store)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = runStore.Close() }()
 	planner := &live.Planner{Runner: processRunner, ProfilePath: planningProfile, RalphexPlanningConfigDir: envOr("PM_RALPHEX_PLANNING_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-planning"))}
 	app, err := dashboard.New(dashboard.Dependencies{
 		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
@@ -49,10 +54,18 @@ func main() {
 		IssueWorkspace:            live.IssueWorkspace{BaseDir: issueWorkspaceBase},
 		Preflight:                 live.DashboardPreflight{Preflight: &live.Preflight{}},
 		VerificationRunner:        live.DashboardVerificationRunner{Runner: &live.VerificationRunner{Runner: processRunner}},
+		RunLease:                  live.DashboardRunLease{Store: runStore},
+		PRCreator:                 live.GHPRCreator{},
 		RalphexExecutionConfigDir: envOr("PM_RALPHEX_EXECUTION_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-execution")),
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+	if err := app.ReconcileStartup(ctx, live.GHPRCreator{}); err != nil {
+		log.Printf("startup PR reconciliation: %v", err)
+	}
+	if err := live.RecoverLocks(ctx, runStore, live.WorkspaceClassifier{}, issueWorkspaceBase, nil); err != nil {
+		log.Printf("startup lock recovery: %v", err)
 	}
 	defer func() { _ = app.Close() }()
 	handler, err := (live.GitHubOAuth{BaseURL: dashboardURL, ClientID: os.Getenv("GITHUB_OAUTH_CLIENT_ID"), ClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"), JWTSecret: os.Getenv("PM_JWT_SECRET"), SecureCookie: !strings.HasPrefix(dashboardURL, "http://localhost")}).Wrap(app)

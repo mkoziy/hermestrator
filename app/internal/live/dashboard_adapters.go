@@ -61,6 +61,18 @@ func (l DashboardRunLease) RecentFailures(ctx context.Context, repositoryID stri
 	return l.Store.RecentFailures(ctx, repositoryID, limit)
 }
 
+func (l DashboardRunLease) ListActive(ctx context.Context) ([]dashboard.ActiveRun, error) {
+	runs, err := l.Store.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]dashboard.ActiveRun, len(runs))
+	for i, run := range runs {
+		result[i] = dashboard.ActiveRun{RunID: run.RunID}
+	}
+	return result, nil
+}
+
 func (v DashboardVerificationRunner) Run(ctx context.Context, workspacePath string, checks []dashboard.CheckSpec) (dashboard.VerificationResult, error) {
 	runner := v.Runner
 	if runner == nil {

@@ -255,6 +255,16 @@ type RunLease interface {
 	RecentFailures(context.Context, string, int) ([]FailureRecord, error)
 }
 
+type PRStateReader interface {
+	State(ctx context.Context, repo Repository, number int) (string, error)
+}
+
+type ActiveRun struct{ RunID string }
+
+type ActiveRunLister interface {
+	ListActive(context.Context) ([]ActiveRun, error)
+}
+
 // ExecutorRunResult captures the final state of an executor run.
 type ExecutorRunResult struct {
 	ExitCode  int
@@ -507,6 +517,69 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// ReconcileStartup repairs intake state after a process crash. GitHub is the
+// authority for PR state; the lease scan is intentionally independent so a
+// crash before run_id was persisted is recoverable too.
+func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,i.pr_number,i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging')`)
+	if err != nil {
+		return fmt.Errorf("startup reconciliation: query intakes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, fullName, runID, state string
+		var number int
+		if err := rows.Scan(&id, &fullName, &number, &state, &runID); err != nil {
+			return err
+		}
+		if prs == nil || number == 0 {
+			continue
+		}
+		remote, err := prs.State(ctx, Repository{ID: id, FullName: fullName}, number)
+		if err != nil {
+			continue
+		}
+		next := executorState(state)
+		switch remote {
+		case "MERGED":
+			next = executorMerged
+		case "CLOSED":
+			next = executorFailed
+		case "OPEN":
+			if next != executorReviewBlocked && next != executorFixing {
+				next = executorReviewing
+			}
+		}
+		if next != executorState(state) {
+			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, next, time.Now().UTC().Format(time.RFC3339Nano), id, state); err != nil {
+				return err
+			}
+		}
+		if (next == executorMerged || next == executorFailed) && runID != "" && a.deps.RunLease != nil {
+			_ = a.deps.RunLease.Release(ctx, runID, string(next), "startup reconciliation")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if lister, ok := a.deps.RunLease.(ActiveRunLister); ok {
+		active, err := lister.ListActive(ctx)
+		if err != nil {
+			return err
+		}
+		for _, run := range active {
+			var found int
+			if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM intakes WHERE run_id=?`, run.RunID).Scan(&found); err != nil {
+				return err
+			}
+			if found == 0 {
+				_ = a.deps.RunLease.Release(ctx, run.RunID, string(executorFailed), "orphaned lease recovered")
+			}
+		}
+	}
+	return nil
 }
 
 // recoverIntakes completes only local, already-authorized work after a

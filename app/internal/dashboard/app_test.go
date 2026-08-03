@@ -1606,6 +1606,47 @@ func TestExecutorRunLeaseFailureReturnsConflict(t *testing.T) {
 	}
 }
 
+type startupPRState struct{ state string }
+
+func (p startupPRState) State(context.Context, Repository, int) (string, error) { return p.state, nil }
+
+type startupLease struct {
+	fakeRunLease
+	active   []ActiveRun
+	released []string
+}
+
+func (l *startupLease) ListActive(context.Context) ([]ActiveRun, error) { return l.active, nil }
+func (l *startupLease) Release(ctx context.Context, id, state, reason string) error {
+	l.released = append(l.released, id)
+	return nil
+}
+
+func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
+	lease := &startupLease{active: []ActiveRun{{RunID: "orphan"}}}
+	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	if _, err := a.db.Exec(`INSERT INTO repositories(id,full_name) VALUES('repo','owner/repo'); INSERT INTO intakes(repository_id,intake_id,state,updated_at,executor_state,pr_number,run_id) VALUES('repo','x','promoted', 'now','merging',7,'run-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReconcileStartup(context.Background(), startupPRState{state: "MERGED"}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := a.db.QueryRow(`SELECT executor_state FROM intakes WHERE repository_id='repo'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "merged" {
+		t.Fatalf("state = %q, want merged", state)
+	}
+	if len(lease.released) != 2 {
+		t.Fatalf("released %v, want terminal and orphan leases", lease.released)
+	}
+}
+
 func TestExecutorSelectionUsesPriorFailures(t *testing.T) {
 	lease := &fakeRunLease{failures: []FailureRecord{{Kind: Ralphex, Reason: "failed"}}}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease})

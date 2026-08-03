@@ -18,6 +18,28 @@ type GHPRCreator struct {
 	Command func(context.Context, string, ...string) *exec.Cmd
 }
 
+func (p GHPRCreator) State(ctx context.Context, repo dashboard.Repository, number int) (string, error) {
+	command := p.Command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	out, err := command(ctx, "gh", "pr", "view", fmt.Sprintf("%d", number), "--repo", repo.FullName, "--json", "state,mergedAt").Output()
+	if err != nil {
+		return "", fmt.Errorf("query pull request state: %w", err)
+	}
+	var v struct {
+		State    string `json:"state"`
+		MergedAt string `json:"mergedAt"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return "", fmt.Errorf("decode pull request state: %w", err)
+	}
+	if v.MergedAt != "" {
+		return "MERGED", nil
+	}
+	return strings.ToUpper(v.State), nil
+}
+
 type mergeabilityResponse struct {
 	Mergeable        string `json:"mergeable"`
 	MergeStateStatus string `json:"mergeStateStatus"`
