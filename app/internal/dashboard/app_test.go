@@ -100,9 +100,11 @@ type fakeExecutorRunner struct {
 }
 
 type fakeRunLease struct {
-	acquires int
-	failures []FailureRecord
-	err      error
+	acquires   int
+	released   int
+	failures   []FailureRecord
+	err        error
+	releaseErr error
 }
 
 func (l *fakeRunLease) Acquire(context.Context, string, int, ExecutorKind) (string, error) {
@@ -112,7 +114,10 @@ func (l *fakeRunLease) Acquire(context.Context, string, int, ExecutorKind) (stri
 	}
 	return "run-1", nil
 }
-func (*fakeRunLease) Release(context.Context, string, string, string) error { return nil }
+func (l *fakeRunLease) Release(context.Context, string, string, string) error {
+	l.released++
+	return l.releaseErr
+}
 func (l *fakeRunLease) RecentFailures(context.Context, string, int) ([]FailureRecord, error) {
 	return l.failures, nil
 }
@@ -148,6 +153,15 @@ type fakeMergeabilityChecker struct {
 	mergeable bool
 	reason    string
 	calls     int
+}
+
+type fakeReviewer struct {
+	result ReviewResult
+	err    error
+}
+
+func (r fakeReviewer) Review(context.Context, Repository, PullRequest, IntakeStatus) (ReviewResult, error) {
+	return r.result, r.err
 }
 
 type endToEndMergeExecutor struct {
@@ -1106,6 +1120,71 @@ func TestExecutorRetryEndpointsAreSafeToRepeatThroughHandler(t *testing.T) {
 		if second.Code != http.StatusConflict && second.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s repeat status=%d", endpoint, second.Code)
 		}
+	}
+}
+
+func TestExecutorRetryReviewReacquiresLease(t *testing.T) {
+	lease := &fakeRunLease{}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+		RunLease:     lease,
+		Reviewer:     fakeReviewer{result: ReviewResult{Approved: true}},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if result, err := a.db.Exec(`UPDATE intakes SET executor_state='failed',retry_state='reviewing',issue_number=7,executor_kind='codex',pr_number=11 WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	} else if changed, _ := result.RowsAffected(); changed != 1 {
+		t.Fatalf("updated %d intakes, want 1", changed)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/retry-review", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("retry status=%d body=%q", response.Code, response.Body.String())
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeReady || lease.acquires != 1 || status.RunID != "run-1" {
+		t.Fatalf("state=%q run=%q acquires=%d err=%v", status.ExecutorState, status.RunID, lease.acquires, err)
+	}
+}
+
+func TestCleanupLeaseFailureLeavesCleanupRetryable(t *testing.T) {
+	lease := &fakeRunLease{releaseErr: errors.New("lease store unavailable")}
+	merge := &endToEndMergeExecutor{}
+	clone := &fakeIssueWorkspace{}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		RunLease:       lease,
+		MergeExecutor:  merge,
+		IssueWorkspace: clone,
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if result, err := a.db.Exec(`UPDATE intakes SET executor_state='merged',issue_number=7,pr_number=11,run_id='run-1' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	} else if changed, _ := result.RowsAffected(); changed != 1 {
+		t.Fatalf("updated %d intakes, want 1", changed)
+	}
+	if err := a.cleanupMerged(context.Background(), "42"); err == nil {
+		t.Fatal("cleanup succeeded despite a lease-release failure")
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMerged || lease.released != 1 {
+		t.Fatalf("state=%q releases=%d err=%v", status.ExecutorState, lease.released, err)
 	}
 }
 

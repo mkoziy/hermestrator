@@ -197,6 +197,8 @@ type executorState string
 
 const MaxReviewRounds = 3
 
+const startupReconciliationBackoff = 100 * time.Millisecond
+
 const (
 	executorSelected      executorState = "selected"
 	executorPlanning      executorState = "planning"
@@ -568,6 +570,14 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 		}
 		remote, err := prs.State(ctx, Repository{ID: id, FullName: fullName}, number)
 		if err != nil {
+			// This pass is deliberately serial (one bounded worker) and backs
+			// off after GitHub errors so a large interrupted deployment cannot
+			// consume the API allowance in a burst.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(startupReconciliationBackoff):
+			}
 			continue
 		}
 		next := executorState(state)
@@ -2498,6 +2508,10 @@ func (a *application) cleanupMerged(ctx context.Context, id string) error {
 	changed, _ := result.RowsAffected()
 	if changed == 1 && a.deps.RunLease != nil && status.RunID != "" {
 		if err := a.deps.RunLease.Release(ctx, status.RunID, "completed", ""); err != nil {
+			// Keep cleanup actionable when the independent lease store is
+			// unavailable. Workspace cleanup and issue closure are idempotent,
+			// so the normal cleanup action can safely retry the release.
+			_, _ = a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorCleanupDone)
 			return fmt.Errorf("release implementation lease: %w", err)
 		}
 	}
@@ -2647,7 +2661,48 @@ func (a *application) executorRetryPR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *application) executorRetryReview(w http.ResponseWriter, r *http.Request) {
-	a.retryPhase(w, r, executorReviewing, executorPRCreated, executorReviewing)
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state='',updated_at=? WHERE repository_id=? AND executor_state=? AND retry_state=?`, executorPRCreated, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed, executorReviewing)
+	if err != nil {
+		http.Error(w, "could not retry executor phase", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "retry requires this failed phase", http.StatusConflict)
+		return
+	}
+	if a.deps.RunLease != nil {
+		runID, acquireErr := a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, ExecutorKind(status.ExecutorKind))
+		if acquireErr != nil {
+			a.restoreFailedRetry(r.Context(), id, executorPRCreated, executorReviewing)
+			http.Error(w, "could not acquire implementation lease: "+acquireErr.Error(), http.StatusConflict)
+			return
+		}
+		updated, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated)
+		if updateErr != nil {
+			_ = a.deps.RunLease.Release(r.Context(), runID, "failed", "could not persist retry lease")
+			a.restoreFailedRetry(r.Context(), id, executorPRCreated, executorReviewing)
+			http.Error(w, "could not persist implementation lease", http.StatusInternalServerError)
+			return
+		}
+		persisted, _ := updated.RowsAffected()
+		if persisted != 1 {
+			_ = a.deps.RunLease.Release(r.Context(), runID, "failed", "review retry state changed")
+			http.Error(w, "review retry state changed", http.StatusConflict)
+			return
+		}
+	}
+	a.executorReview(w, r)
+}
+
+func (a *application) restoreFailedRetry(ctx context.Context, id string, from, failedPhase executorState) {
+	_, _ = a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, failedPhase, time.Now().UTC().Format(time.RFC3339Nano), id, from)
 }
 
 func (a *application) executorRetryMerge(w http.ResponseWriter, r *http.Request) {

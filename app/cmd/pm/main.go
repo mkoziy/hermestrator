@@ -70,13 +70,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Recover executor-owned workspaces before reconciling dashboard state. A
-	// run ID is not an OS process ID, so no process can be confirmed alive
-	// across a PM restart; RecoverLocks therefore safely classifies and releases
-	// every active lease before the dashboard makes its state actionable again.
-	if err := live.RecoverLocks(ctx, runStore, live.WorkspaceClassifier{}, issueWorkspaceBase, nil); err != nil {
-		log.Printf("startup executor-lock recovery: %v", err)
-	}
+	// Reconcile from the intake lifecycle before considering leases. A lease
+	// remains held while an open PR awaits review, approval, merge, or cleanup;
+	// ReconcileStartup releases only interrupted and orphaned leases.
 	if err := app.ReconcileStartup(ctx, live.GHPRCreator{}); err != nil {
 		log.Printf("startup PR reconciliation: %v", err)
 	}
