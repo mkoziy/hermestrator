@@ -324,11 +324,11 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/live/review.go` (or new `app/internal/live/pr_comments.go`)
 - Modify: `app/internal/live/review_test.go`
 
-- [ ] post `ReviewResult.Findings` to the PR via `gh pr comment <number> --body-file -` (or `gh pr review --comment`), embedding a `<!-- hermestrator-review:<round> -->` idempotency marker
-- [ ] before posting, query existing PR comments for the same round's marker and skip re-posting if already present (idempotent retry)
-- [ ] write tests for first post, retried post (no duplicate), and marker-round increment across `Task 6`'s fix loop
-- [ ] write a table-driven idempotency regression test: a simulated timed-out first post followed by a retry that queries first and does not duplicate the comment
-- [ ] run tests — must pass before task 6
+- [x] post `ReviewResult.Findings` to the PR via `gh pr comment <number> --body-file -` (or `gh pr review --comment`), embedding a `<!-- hermestrator-review:<round> -->` idempotency marker
+- [x] before posting, query existing PR comments for the same round's marker and skip re-posting if already present (idempotent retry)
+- [x] write tests for first post, retried post (no duplicate), and marker-round increment across `Task 6`'s fix loop
+- [x] write a table-driven idempotency regression test: a simulated timed-out first post followed by a retry that queries first and does not duplicate the comment
+- [x] run tests — must pass before task 6
 
 ### Task 6: Delegate review fixes to an executor and loop
 

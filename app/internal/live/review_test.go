@@ -2,6 +2,8 @@ package live
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -21,6 +23,91 @@ func TestGHReviewerBlocksOversizedDiffBeforeModels(t *testing.T) {
 	result, err := r.Review(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.PullRequest{Number: 4}, dashboard.IntakeStatus{PublishedIssue: dashboard.PublishedIssue{Number: 9}})
 	if err != nil || !result.Blocked || called || !strings.Contains(result.Findings, "above") {
 		t.Fatalf("result=%+v err=%v called=%v", result, err, called)
+	}
+}
+
+func TestGHReviewerPostFindingsIsIdempotentPerRound(t *testing.T) {
+	commentFile := t.TempDir() + "/comment"
+	posted := 0
+	command := func(_ context.Context, name string, args ...string) *exec.Cmd {
+		if args[0] == "pr" && args[1] == "view" {
+			body := "{}"
+			if data, err := os.ReadFile(commentFile); err == nil {
+				body = fmt.Sprintf(`{"comments":[{"body":%q}]}`, string(data))
+			}
+			return exec.Command("sh", "-c", "printf '%s' '"+body+"'")
+		}
+		posted++
+		return exec.Command("sh", "-c", "cat > "+commentFile)
+	}
+	r := GHReviewer{Command: command}
+	repo := dashboard.Repository{FullName: "acme/repo"}
+	pr := dashboard.PullRequest{Number: 4}
+	if err := r.PostFindings(context.Background(), repo, pr, "fix it", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.PostFindings(context.Background(), repo, pr, "fix it", 1); err != nil {
+		t.Fatal(err)
+	}
+	if posted != 1 {
+		t.Fatalf("posted=%d, want one comment", posted)
+	}
+	content, err := os.ReadFile(commentFile)
+	if err != nil || !strings.Contains(string(content), "hermestrator-review:1") {
+		t.Fatalf("comment=%q err=%v", content, err)
+	}
+}
+
+func TestGHReviewerPostFindingsRoundMarkerIncrements(t *testing.T) {
+	markers := []string{}
+	command := func(_ context.Context, name string, args ...string) *exec.Cmd {
+		if args[1] == "view" {
+			return exec.Command("sh", "-c", "printf '%s' '{}'")
+		}
+		return exec.Command("sh", "-c", "cat")
+	}
+	// A distinct round must be eligible for publication even after an earlier
+	// round was posted; the command fake records the body through its stdin.
+	r := GHReviewer{Command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := command(ctx, name, args...)
+		if args[1] == "comment" {
+			markers = append(markers, fmt.Sprint(args))
+		}
+		return cmd
+	}}
+	for round := 1; round <= 2; round++ {
+		if err := r.PostFindings(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.PullRequest{Number: 4}, "finding", round); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(markers) != 2 {
+		t.Fatalf("comment posts=%d, want two", len(markers))
+	}
+}
+
+func TestGHReviewerPostFindingsRetriesAfterTimedOutMutation(t *testing.T) {
+	posted := false
+	queries := 0
+	command := func(_ context.Context, name string, args ...string) *exec.Cmd {
+		if args[1] == "view" {
+			queries++
+			if posted {
+				return exec.Command("sh", "-c", "printf '%s' '{\"comments\":[{\"body\":\"<!-- hermestrator-review:1 -->\"}]}'")
+			}
+			return exec.Command("sh", "-c", "printf '%s' '{}'")
+		}
+		posted = true
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	r := GHReviewer{Command: command}
+	if err := r.PostFindings(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.PullRequest{Number: 4}, "finding", 1); err == nil {
+		t.Fatal("first post should report the simulated timeout")
+	}
+	if err := r.PostFindings(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.PullRequest{Number: 4}, "finding", 1); err != nil {
+		t.Fatal(err)
+	}
+	if queries != 2 {
+		t.Fatalf("queries=%d, want two", queries)
 	}
 }
 

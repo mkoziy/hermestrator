@@ -21,6 +21,49 @@ type GHReviewer struct {
 	MaxDiffBytes   int
 }
 
+// ReviewCommenter publishes review findings without duplicating comments when
+// a request is retried after the GitHub mutation may already have succeeded.
+type ReviewCommenter interface {
+	PostFindings(context.Context, dashboard.Repository, dashboard.PullRequest, string, int) error
+}
+
+const reviewCommentMarker = "<!-- hermestrator-review:%d -->"
+
+func (r GHReviewer) PostFindings(ctx context.Context, repo dashboard.Repository, pr dashboard.PullRequest, findings string, round int) error {
+	command := r.Command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	marker := fmt.Sprintf(reviewCommentMarker, round)
+	comments, err := command(ctx, "gh", "pr", "view", fmt.Sprint(pr.Number), "--repo", repo.FullName, "--json", "comments").Output()
+	if err != nil {
+		return fmt.Errorf("read pull request comments: %w", err)
+	}
+	var data struct {
+		Comments []struct {
+			Body string `json:"body"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(comments, &data); err != nil {
+		return fmt.Errorf("decode pull request comments: %w", err)
+	}
+	for _, comment := range data.Comments {
+		if strings.Contains(comment.Body, marker) {
+			return nil
+		}
+	}
+
+	body := marker + "\n" + strings.TrimSpace(findings)
+	cmd := command(ctx, "gh", "pr", "comment", fmt.Sprint(pr.Number), "--repo", repo.FullName, "--body-file", "-")
+	cmd.Stdin = strings.NewReader(body)
+	if _, err := cmd.Output(); err != nil {
+		return fmt.Errorf("post pull request review findings: %w", err)
+	}
+	return nil
+}
+
+var _ ReviewCommenter = GHReviewer{}
+
 var _ dashboard.Reviewer = GHReviewer{}
 
 func (r GHReviewer) Review(ctx context.Context, repo dashboard.Repository, pr dashboard.PullRequest, status dashboard.IntakeStatus) (dashboard.ReviewResult, error) {
