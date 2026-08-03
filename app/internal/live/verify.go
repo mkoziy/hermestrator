@@ -47,7 +47,9 @@ type VerificationRunner struct {
 // project. Callers that need different checks can supply their own slice.
 func DefaultVerificationChecks() []CheckSpec {
 	return []CheckSpec{
+		{Name: "go build", Command: "go", Args: []string{"build", "./..."}},
 		{Name: "go vet", Command: "go", Args: []string{"vet", "./..."}},
+		{Name: "golangci-lint", Command: "go", Args: []string{"tool", "golangci-lint", "run"}},
 		{Name: "go test", Command: "go", Args: []string{"test", "./..."}},
 		{Name: "go test -race", Command: "go", Args: []string{"test", "-race", "./..."}},
 	}

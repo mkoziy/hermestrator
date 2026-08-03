@@ -325,8 +325,8 @@ func TestVerifyWorkspaceForPRConvenience(t *testing.T) {
 	if !result.ReadyForPR {
 		t.Error("ReadyForPR = false, want true")
 	}
-	if len(result.Checks) != 3 {
-		t.Fatalf("expected 3 default checks, got %d", len(result.Checks))
+	if len(result.Checks) != 5 {
+		t.Fatalf("expected 5 default checks, got %d", len(result.Checks))
 	}
 	if !invoked["go"] {
 		t.Error("go binary not invoked via default checks")
