@@ -147,6 +147,21 @@ ListActive` (which only carries `run_id`/`repository_id`/`issue_number`/
 `executor_kind` — no PR number or repo full name, so it cannot itself drive
 a `gh pr view` call).
 
+**Orphaned-lease gap**: `Acquire` (writing to `implementation_runs`) and
+persisting the returned `run_id` onto the `intakes` row are two separate
+writes (Task 2). A crash between them leaves an `active` lease in
+`implementation_runs` that no `intakes` row references — the
+`intakes`-as-source-of-truth reconciliation above can never find it, so it
+never gets released, and `Acquire`'s own-repo-active-run check then
+deadlocks that repository permanently. To close this, `Acquire` and the
+`intakes.run_id` write happen in a fixed order (`Acquire` first, `run_id`
+persisted immediately after, before any other repository-scoped work
+proceeds) **and** recovery adds a second, independent pass: call
+`ImplementationRunStore.ListActive` directly and, for any active lease whose
+`run_id` does not appear in any `intakes.run_id` column, release it — this
+is the only path that catches a crash in that specific window, since it
+does not go through `intakes` at all.
+
 Key design decisions:
 
 - **State lives in the existing enum/table**, not a parallel table — avoids
@@ -160,6 +175,18 @@ Key design decisions:
 - **Cleanup only ever runs after GitHub itself confirms the merge** (`gh pr
   view --json state,mergedAt`), never from local state alone, per the
   issue's explicit constraint.
+- **Fix-round cost is bounded by `MaxReviewRounds` (3), not a separate
+  budget.** Each round invokes one executor run; capping rounds already
+  caps the worst case at 3 extra executor invocations per PR. No
+  additional cost tracking is added — the existing per-run cost/artifact
+  persistence (Task 10) is for audit, not enforcement. Revisit only if
+  real usage shows 3 rounds is itself too expensive.
+- **`app.go` keeps growing as the executor-state file** — this plan adds
+  ten states and their handlers to it rather than splitting by phase. Left
+  as-is deliberately: splitting now would be a refactor with no test-driven
+  reason to do it as part of this plan. If `app.go` becomes hard to
+  navigate after this lands, split by phase (`executor_pr.go`,
+  `executor_review.go`, `executor_merge.go`) as a follow-up, not here.
 
 ## Technical Details
 
@@ -251,9 +278,10 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/dashboard/app_test.go`, `app/internal/live/dashboard_executor_test.go`
 
 - [ ] add `RunLease RunLease` to `Dependencies` and a `run_id` column to `intakes`
-- [ ] call `RunLease.Acquire` once, when a run first enters `executorRunning` (or `VerificationOnly` starts), and persist the returned run ID on the intake row
+- [ ] call `RunLease.Acquire` once, when a run first enters `executorRunning` (or `VerificationOnly` starts), and persist the returned run ID on the intake row **immediately afterward, before any other work for that run proceeds** — this ordering is required so a crash between the two always leaves a lease findable by the Task 12 orphan-scan (see Solution Overview's "Orphaned-lease gap")
 - [ ] pass `RunLease.RecentFailures` into `SelectExecutor`'s `priorFailures` argument in the executor-select handler (currently always empty)
 - [ ] write tests for `Acquire` being called exactly once per run and its failure (repo already has an active run) surfacing as an HTTP error
+- [ ] write a test simulating a crash between `Acquire` succeeding and the `run_id` persist (e.g. by not calling the persist step) and confirming the row is not silently lost — covered fully by Task 12's orphan-lease test, cross-referenced here
 - [ ] write tests confirming prior failures reach `SelectExecutor`
 - [ ] run tests — must pass before task 3
 
@@ -281,10 +309,12 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 
 - [ ] define `ReviewModelFunc` (two calls: one prompted for standards compliance, one for spec/issue-acceptance-criteria compliance), mirroring `CritiqueModelFunc`'s shape
 - [ ] `Reviewer.Review` reads the full diff (`gh pr diff <number>`), the stored verification output artifact, and the original issue body/acceptance criteria as review input — never accepts executor self-review output as the gate
+- [ ] if the diff exceeds a fixed size threshold (e.g. a byte/line cap matched to the model's context budget), do not silently truncate mid-hunk: transition straight to `executorReviewBlocked` with a findings message stating the diff was too large for automated review, so an operator sees it explicitly instead of getting a false "approved" from a partial read
 - [ ] combine both axes' findings into one English `ReviewResult`; `Approved` only when both axes report no material findings
+- [ ] treat this model review as advisory, not authoritative: it only decides whether the fix loop re-runs (Task 6) or the run reaches `executorMergeReady`; the operator's merge approval (Task 8) is the actual safety gate and re-checks mergeability independently, so a wrong `Approved` here delays or wastes a fix round rather than merging bad code
 - [ ] transition `executorPRCreated` → `executorReviewing` → (`executorMergeReady` on approval, else `executorReviewBlocked` with findings persisted)
 - [ ] on entry to `executorMergeReady`, send the read-only Telegram merge-approval notification with the PR URL / dashboard link (reuse `Telegram.Notify`; a notification failure never blocks the state transition) — this is the action-required moment per CLAUDE.md, not the later approval itself
-- [ ] write tests with a fake `ReviewModelFunc` for: clean approval, standards-only findings, spec-only findings, both
+- [ ] write tests with a fake `ReviewModelFunc` for: clean approval, standards-only findings, spec-only findings, both, and a diff over the size threshold (→ `executorReviewBlocked`, model never called)
 - [ ] write a test confirming the Telegram notification fires exactly once on first entry to `executorMergeReady` (not on every subsequent poll/reconciliation) and that a notify failure doesn't block the transition
 - [ ] run tests — must pass before task 5
 
@@ -384,10 +414,12 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/cmd/pm/main.go`
 
 - [ ] treat `intakes.executor_state` as the source of truth for reconciliation, not `ImplementationRunStore.ListActive` — `ListActive` only carries `run_id`/`repository_id`/`issue_number`/`executor_kind`, with no PR number or repo full name to drive a `gh pr view` call; the reconciliation query reads `intakes` (joined with `repositories` for the full name) for every row whose `executor_state` is in `{pr_created, reviewing, review_blocked, fixing, merge_ready, merge_approved, merging}`
+- [ ] cap and pace the reconciliation pass: process rows with a bounded concurrency (e.g. a small worker pool, not one goroutine per row) and a short backoff on `gh` errors, so a startup with many stuck rows can't burn through GitHub API rate limits in one burst
 - [ ] for each such row, query live PR state (`gh pr view --json state,mergedAt`) and reconcile to the correct `executor_state` (e.g. PR already merged on GitHub while locally still `merging` → treat as `executorMerged` and continue to cleanup; PR closed without merge → `executorFailed`; PR still open and unreviewed → resume at `executorReviewing`)
 - [ ] after reconciling an intake to a terminal state (`cleanup_done` or `failed`), if its `run_id` still has an `active` row in `implementation_runs`, call `RunLease.Release` for it — this is the recovery path for the cross-DB crash gap described in Solution Overview (a crash between an `intakes` terminal write and the corresponding `Release`)
+- [ ] add a second, independent orphan-lease pass: call `ImplementationRunStore.ListActive` directly and release any active lease whose `run_id` does not appear in any `intakes.run_id` column — this is the only path that recovers a crash between `Acquire` succeeding and the `run_id` persist in Task 2 (the "Orphaned-lease gap" in Solution Overview), since that lease has no `intakes` row to reconcile from
 - [ ] call this reconciliation and the existing `RecoverLocks` from `cmd/pm/main.go` at startup (currently neither is invoked), wiring the real `ImplementationRunStore`, `WorkspaceClassifier`, and dashboard DB handle
-- [ ] write tests for each reconciliation case: PR merged remotely but local state behind, PR closed without merge (→ `executorFailed`), PR still open and unreviewed (resume at `executorReviewing`), and an intake reconciled to terminal state whose lease was still `active` (asserting `Release` is called and is safe to call again on a subsequent startup)
+- [ ] write tests for each reconciliation case: PR merged remotely but local state behind, PR closed without merge (→ `executorFailed`), PR still open and unreviewed (resume at `executorReviewing`), an intake reconciled to terminal state whose lease was still `active` (asserting `Release` is called and is safe to call again on a subsequent startup), and an orphaned lease with no matching `intakes.run_id` (asserting the second pass releases it)
 - [ ] run tests — must pass before task 13
 
 ### Task 13: Idempotency-key regression coverage across all new mutations
