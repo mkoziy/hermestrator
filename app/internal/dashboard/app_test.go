@@ -118,11 +118,16 @@ func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ Execut
 	return "# Plan: test\n\n### Task 1: test", nil
 }
 
-type fakeVerificationRunner struct{ calls int }
+type fakeVerificationRunner struct {
+	calls int
+	ready bool
+	fail  bool
+	err   error
+}
 
 func (f *fakeVerificationRunner) Run(context.Context, string, []CheckSpec) (VerificationResult, error) {
 	f.calls++
-	return VerificationResult{ReadyForPR: true}, nil
+	return VerificationResult{ReadyForPR: f.ready || !f.fail}, f.err
 }
 
 func (f *fakeExecutorRunner) Run(_ context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
@@ -1418,6 +1423,55 @@ func TestVerificationOnlySkipsPlanningAndApproval(t *testing.T) {
 	if response.Code != http.StatusSeeOther || verification.calls != 1 {
 		t.Fatalf("verification response=%d body=%q calls=%d, want redirect and one call", response.Code, response.Body.String(), verification.calls)
 	}
+}
+
+func TestExecutorRunVerifiesBeforeBecomingVerified(t *testing.T) {
+	verification := &fakeVerificationRunner{ready: true}
+	runner := &fakeExecutorRunner{exitCode: 0}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: runner, VerificationRunner: verification})
+	setupExecutorRun(t, app)
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want redirect", response.Code)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ExecutorState != executorVerified || verification.calls != 1 {
+		t.Fatalf("state=%q verification calls=%d, want verified and one call", status.ExecutorState, verification.calls)
+	}
+}
+
+func TestExecutorVerificationFailureLandsFailed(t *testing.T) {
+	verification := &fakeVerificationRunner{fail: true}
+	runner := &fakeExecutorRunner{exitCode: 0}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: runner, VerificationRunner: verification})
+	setupExecutorRun(t, app)
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ExecutorState != executorFailed {
+		t.Fatalf("state=%q, want failed", status.ExecutorState)
+	}
+}
+
+func setupExecutorRun(t *testing.T, app http.Handler) {
+	t.Helper()
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
 }
 
 func TestExecutorSelectionSurvivesRestart(t *testing.T) {

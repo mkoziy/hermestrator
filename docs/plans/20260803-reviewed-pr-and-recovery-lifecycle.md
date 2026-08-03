@@ -262,13 +262,13 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/dashboard/app.go` (executor run handler, new `executorVerifying`/`executorVerified` states)
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `executorVerifying`, `executorVerified` to the `executorState` enum
-- [ ] after the executor subprocess in `executorRun` reaches `executorCompleted`, atomically transition to `executorVerifying` and invoke `a.deps.VerificationRunner.Run` on the workspace before returning
-- [ ] transition to `executorVerified` on `ReadyForPR`, or `executorFailed` (with failure reason from the failing check) otherwise
-- [ ] keep the existing `VerificationOnly` path (`runVerification`) but have it land on the same `executorVerified`/`executorFailed` states for consistency
-- [ ] write tests for the new verification-after-execution path (success and each individual check failing)
-- [ ] write tests confirming `VerificationOnly` still short-circuits planning/critique/execution and lands on `executorVerified`/`executorFailed`
-- [ ] run tests — must pass before task 2
+- [x] add `executorVerifying`, `executorVerified` to the `executorState` enum
+- [x] after the executor subprocess in `executorRun` reaches `executorCompleted`, atomically transition to `executorVerifying` and invoke `a.deps.VerificationRunner.Run` on the workspace before returning
+- [x] transition to `executorVerified` on `ReadyForPR`, or `executorFailed` (with failure reason from the failing check) otherwise
+- [x] keep the existing `VerificationOnly` path (`runVerification`) but have it land on the same `executorVerified`/`executorFailed` states for consistency
+- [x] write tests for the new verification-after-execution path (success and each individual check failing)
+- [x] write tests confirming `VerificationOnly` still short-circuits planning/critique/execution and lands on `executorVerified`/`executorFailed`
+- [x] run tests — must pass before task 2
 
 ### Task 2: Wire the existing `ImplementationRunStore` lease into the executor lifecycle
 

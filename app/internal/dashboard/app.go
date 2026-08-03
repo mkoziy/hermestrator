@@ -173,6 +173,8 @@ const (
 	executorApproved  executorState = "approved"
 	executorRunning   executorState = "running"
 	executorCompleted executorState = "completed"
+	executorVerifying executorState = "verifying"
+	executorVerified  executorState = "verified"
 	executorFailed    executorState = "failed"
 )
 
@@ -1744,6 +1746,32 @@ func (a *application) executorApprove(w http.ResponseWriter, r *http.Request) {
 	a.redirectWorkspace(w, r, id)
 }
 
+// verifyExecutorRun runs the canonical checks after a coding executor has
+// completed successfully. The state transition is compare-and-swap guarded
+// so a run cannot be verified twice by competing requests.
+func (a *application) verifyExecutorRun(id, workspacePath string) bool {
+	if a.deps.VerificationRunner == nil {
+		// Deployments without the optional verifier retain the historical
+		// completed state; configured deployments always pass through checks.
+		return true
+	}
+	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorCompleted)
+	if err != nil {
+		return false
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return false
+	}
+	verification, err := a.deps.VerificationRunner.Run(a.ctx, workspacePath, nil)
+	state := executorVerified
+	if err != nil || !verification.ReadyForPR {
+		state = executorFailed
+	}
+	_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying)
+	return state == executorVerified
+}
+
 func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	status, err := a.intakeStatus(r.Context(), id)
@@ -1890,6 +1918,9 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not persist executor result", http.StatusInternalServerError)
 		return
 	}
+	if terminalState == executorCompleted {
+		a.verifyExecutorRun(id, workspacePath)
+	}
 	a.redirectWorkspace(w, r, id)
 }
 
@@ -1940,16 +1971,22 @@ func (a *application) runVerification(w http.ResponseWriter, r *http.Request, id
 		http.Error(w, "verification runner is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	result, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?,?)`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorSelected, executorApproved, executorPlanning)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("verification failed: %v", err), http.StatusInternalServerError)
+		http.Error(w, "could not start verification", http.StatusInternalServerError)
 		return
 	}
-	state := executorCompleted
-	if !result.ReadyForPR {
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before verification could start", http.StatusConflict)
+		return
+	}
+	verification, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
+	state := executorVerified
+	if err != nil || !verification.ReadyForPR {
 		state = executorFailed
 	}
-	if _, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying); err != nil {
 		http.Error(w, "could not record verification result", http.StatusInternalServerError)
 		return
 	}
