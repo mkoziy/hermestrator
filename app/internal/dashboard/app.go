@@ -79,6 +79,14 @@ type PublishedIssue struct {
 	URL    string
 }
 
+type PullRequest struct {
+	Number     int
+	URL, State string
+}
+type PRCreator interface {
+	CreateOrReuse(context.Context, Repository, IntakeStatus) (PullRequest, error)
+}
+
 // Publisher owns the only tracker mutation available in the intake slice.
 // Implementations must not publish an unconfirmed draft.
 type Publisher interface {
@@ -175,6 +183,7 @@ const (
 	executorCompleted executorState = "completed"
 	executorVerifying executorState = "verifying"
 	executorVerified  executorState = "verified"
+	executorPRCreated executorState = "pr_created"
 	executorFailed    executorState = "failed"
 )
 
@@ -196,6 +205,7 @@ type IntakeStatus struct {
 	ExecutorCompleted     bool
 	ExecutorWorkspacePath string
 	RunID                 string
+	PR                    PullRequest
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -258,6 +268,7 @@ type Dependencies struct {
 	Preflight                 Preflight
 	VerificationRunner        VerificationRunner
 	RunLease                  RunLease
+	PRCreator                 PRCreator
 	RalphexExecutionConfigDir string
 }
 
@@ -390,6 +401,12 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "pr_number", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "pr_url", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err = addColumnIfMissing(db, "intakes", "run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -432,6 +449,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/plan", a.executorPlan)
 	mux.HandleFunc("POST /repositories/{id}/executor/approve", a.executorApprove)
 	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
+	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
@@ -1954,6 +1972,38 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	a.redirectWorkspace(w, r, id)
 }
 
+func (a *application) executorCreatePR(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.PRCreator == nil {
+		http.Error(w, "pull request creator is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorVerified {
+		http.Error(w, "pull request creation requires verified work", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", http.StatusInternalServerError)
+		return
+	}
+	pr, err := a.deps.PRCreator.CreateOrReuse(r.Context(), repo, status)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not create pull request: %v", err), http.StatusBadGateway)
+		return
+	}
+	if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,pr_number=?,pr_url=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPRCreated, pr.Number, pr.URL, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerified); err != nil {
+		http.Error(w, "could not persist pull request", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
 // executorWorkspace returns the durable clone for an implementation issue,
 // creating it exactly once before planning or verification. Intake clones are
 // deliberately never reused for executor work.
@@ -2342,8 +2392,11 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var executorStateStr string
 	var durationNs int64
 	var cancelledInt int
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID)
+	var prNumber int
+	var prURL string
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL)
 	status.ExecutorState = executorState(executorStateStr)
+	status.PR = PullRequest{Number: prNumber, URL: prURL, State: "open"}
 	status.ExecutorDuration = time.Duration(durationNs)
 	status.ExecutorCancelled = cancelledInt != 0
 	status.ExecutorCompleted = status.ExecutorState == executorCompleted || status.ExecutorState == executorFailed

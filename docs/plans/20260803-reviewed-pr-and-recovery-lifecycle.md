@@ -292,13 +292,13 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Create: `app/internal/live/pr_test.go`
 - Modify: `app/internal/dashboard/app.go` (`PRCreator` interface, `executorPRCreate` handler, template button)
 
-- [ ] define `GHPRCreator` with injectable `Command`, mirroring `GHPublisher`'s shape
-- [ ] `CreateOrReuse` first runs `gh pr list --head <branch> --json number,url,state` (or `gh pr view <branch>`) and returns the existing PR if found; only runs `gh pr create` when none exists
-- [ ] push the workspace branch with an explicit remote ref before creating the PR (`git push -u origin <branch>`), erroring clearly if the push fails
-- [ ] on success, persist `pr_number`/`pr_url` and transition `executorVerified` → `executorPRCreated`
-- [ ] write tests for: no existing PR (create), existing PR (reuse, no duplicate `gh pr create` call), push failure
-- [ ] write a table-driven idempotency regression test: a simulated timed-out first `gh pr create` attempt followed by a retry that queries first and does not create a duplicate PR
-- [ ] run tests — must pass before task 4
+- [x] define `GHPRCreator` with injectable `Command`, mirroring `GHPublisher`'s shape
+- [x] `CreateOrReuse` first runs `gh pr list --head <branch> --json number,url,state` (or `gh pr view <branch>`) and returns the existing PR if found; only runs `gh pr create` when none exists
+- [x] push the workspace branch with an explicit remote ref before creating the PR (`git push -u origin <branch>`), erroring clearly if the push fails
+- [x] on success, persist `pr_number`/`pr_url` and transition `executorVerified` → `executorPRCreated`
+- [x] write tests for: no existing PR (create), existing PR (reuse, no duplicate `gh pr create` call), push failure
+- [x] write a table-driven idempotency regression test: a simulated timed-out first `gh pr create` attempt followed by a retry that queries first and does not create a duplicate PR
+- [x] run tests — must pass before task 4
 
 ### Task 4: Standards + spec review
 
