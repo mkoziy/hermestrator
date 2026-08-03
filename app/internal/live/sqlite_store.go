@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	aix "github.com/firebase/genkit/go/ai/exp"
 	"github.com/google/uuid"
+	"github.com/mkoziy/hermestrator/internal/dashboard"
 	_ "modernc.org/sqlite"
 )
 
@@ -104,4 +106,179 @@ func (s *SQLiteSessionStore[State]) SaveSnapshot(ctx context.Context, id string,
 		return nil, fmt.Errorf("commit Genkit snapshot: %w", err)
 	}
 	return next, nil
+}
+
+// ImplementationRunStore enforces at most one active implementation run per
+// repository via a partial unique index, and records terminal run history for
+// executor selection (priorFailures).
+type ImplementationRunStore struct{ db *sql.DB }
+
+// Close releases the underlying database connection.
+func (s *ImplementationRunStore) Close() error { return s.db.Close() }
+
+// NewImplementationRunStore opens the SQLite database at path, creates the
+// implementation_runs table and partial unique index if they do not exist,
+// and returns a store ready for use.
+func NewImplementationRunStore(path string) (*ImplementationRunStore, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open implementation run store: %w", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS implementation_runs (
+			run_id          TEXT PRIMARY KEY,
+			repository_id   TEXT NOT NULL,
+			issue_number    INTEGER NOT NULL,
+			executor_kind   TEXT NOT NULL,
+			state           TEXT NOT NULL DEFAULT 'active',
+			failure_reason  TEXT NOT NULL DEFAULT '',
+			created_at      TEXT NOT NULL,
+			updated_at      TEXT NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS one_active_implementation_per_repository
+			ON implementation_runs(repository_id) WHERE state = 'active';
+	`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize implementation run store: %w", err)
+	}
+	return &ImplementationRunStore{db: db}, nil
+}
+
+// runState constants mirror the intent of the one_active_implementation_per_repository index.
+const (
+	runStateActive    = "active"
+	runStateCompleted = "completed"
+	runStateFailed    = "failed"
+)
+
+// Acquire inserts an active run row for repositoryID and issueNumber. It returns a unique
+// run ID and an error. If another active run already exists for the same
+// repository, Acquire returns an error because the partial unique index
+// prevents a second active row.
+func (s *ImplementationRunStore) Acquire(ctx context.Context, repositoryID string, issueNumber int, kind dashboard.ExecutorKind) (string, error) {
+	if strings.TrimSpace(repositoryID) == "" {
+		return "", fmt.Errorf("repository ID is required")
+	}
+	if issueNumber < 1 {
+		return "", fmt.Errorf("issue number is required")
+	}
+	if kind == "" {
+		return "", fmt.Errorf("executor kind is required")
+	}
+	runID := uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO implementation_runs(run_id, repository_id, issue_number, executor_kind, state, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,
+		runID, repositoryID, issueNumber, string(kind), runStateActive, now, now)
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			return "", fmt.Errorf("repository %q already has an active implementation run", repositoryID)
+		}
+		return "", fmt.Errorf("acquire implementation lock: %w", err)
+	}
+	return runID, nil
+}
+
+// Release transitions a run to a terminal state. If terminalState is
+// runStateFailed the failureReason is recorded; otherwise it is ignored.
+func (s *ImplementationRunStore) Release(ctx context.Context, runID string, terminalState string, failureReason string) error {
+	if strings.TrimSpace(runID) == "" {
+		return fmt.Errorf("run ID is required")
+	}
+	if terminalState != runStateCompleted && terminalState != runStateFailed {
+		return fmt.Errorf("terminal state must be %q or %q, got %q", runStateCompleted, runStateFailed, terminalState)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE implementation_runs SET state=?, failure_reason=?, updated_at=? WHERE run_id=? AND state=?`,
+		terminalState, failureReason, now, runID, runStateActive)
+	if err != nil {
+		return fmt.Errorf("release implementation lock: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check release result: %w", err)
+	}
+	if changed == 0 {
+		return fmt.Errorf("run %q is not in active state; cannot release", runID)
+	}
+	return nil
+}
+
+// RecentFailures returns up to limit most recent failed runs
+// (state = 'failed') for repositoryID, ordered by most recent first.
+// Only failed runs are returned because callers feed these into
+// SelectExecutor's priorFailures to avoid re-selecting executors that
+// have already failed. Completed (successful) runs are intentionally
+// excluded.
+func (s *ImplementationRunStore) RecentFailures(ctx context.Context, repositoryID string, limit int) ([]dashboard.FailureRecord, error) {
+	if strings.TrimSpace(repositoryID) == "" {
+		return nil, fmt.Errorf("repository ID is required")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT executor_kind, failure_reason FROM implementation_runs WHERE repository_id=? AND state=? ORDER BY created_at DESC LIMIT ?`,
+		repositoryID, runStateFailed, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query recent failures: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var records []dashboard.FailureRecord
+	for rows.Next() {
+		var kind, reason string
+		if err := rows.Scan(&kind, &reason); err != nil {
+			return nil, fmt.Errorf("scan recent failure: %w", err)
+		}
+		records = append(records, dashboard.FailureRecord{
+			Kind:   dashboard.ExecutorKind(kind),
+			Reason: reason,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent failures: %w", err)
+	}
+	return records, nil
+}
+
+// ActiveRun is a lightweight record of an in-flight implementation run.
+type ActiveRun struct {
+	RunID        string
+	RepositoryID string
+	IssueNumber  int
+	ExecutorKind string
+	CreatedAt    string
+}
+
+// ListActive returns all implementation runs currently in the active state.
+func (s *ImplementationRunStore) ListActive(ctx context.Context) ([]ActiveRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT run_id, repository_id, issue_number, executor_kind, created_at FROM implementation_runs WHERE state=? ORDER BY created_at ASC`,
+		runStateActive)
+	if err != nil {
+		return nil, fmt.Errorf("list active implementation runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var runs []ActiveRun
+	for rows.Next() {
+		var r ActiveRun
+		if err := rows.Scan(&r.RunID, &r.RepositoryID, &r.IssueNumber, &r.ExecutorKind, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan active run: %w", err)
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active runs: %w", err)
+	}
+	return runs, nil
+}
+
+// isUniqueConstraintError returns true when err is an SQLite
+// UNIQUE constraint violation.
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

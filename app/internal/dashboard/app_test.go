@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -90,6 +91,71 @@ func (f *fakeTelegram) Notify(_ context.Context, notification Notification) erro
 type failingTelegram struct{ err error }
 
 func (f failingTelegram) Notify(context.Context, Notification) error { return f.err }
+
+type fakeExecutorRunner struct {
+	lines     []string
+	exitCode  int
+	duration  time.Duration
+	cancelled bool
+}
+
+type fakeIssueWorkspace struct {
+	path   string
+	starts int
+}
+
+func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (string, error) {
+	f.starts++
+	return f.path, nil
+}
+
+func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { return nil }
+
+type fakePlanner struct{ workspace string }
+
+func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, _ string) (string, error) {
+	f.workspace = workspace
+	return "# Plan: test\n\n### Task 1: test", nil
+}
+
+type fakeVerificationRunner struct{ calls int }
+
+func (f *fakeVerificationRunner) Run(context.Context, string, []CheckSpec) (VerificationResult, error) {
+	f.calls++
+	return VerificationResult{ReadyForPR: true}, nil
+}
+
+func (f *fakeExecutorRunner) Run(_ context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	for _, line := range f.lines {
+		if err := onLine(line); err != nil {
+			return ExecutorRunResult{}, err
+		}
+	}
+	return ExecutorRunResult{ExitCode: f.exitCode, Duration: f.duration, Cancelled: f.cancelled}, nil
+}
+
+// hangExecutorRunner emits the given lines and then blocks until context
+// cancellation, simulating a long-running executor. Used for cancel tests.
+type hangExecutorRunner struct {
+	lines []string
+	mu    sync.Mutex
+	run   bool
+}
+
+func (h *hangExecutorRunner) Run(ctx context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	h.mu.Lock()
+	h.run = true
+	h.mu.Unlock()
+
+	start := time.Now()
+	for _, line := range h.lines {
+		if err := onLine(line); err != nil {
+			return ExecutorRunResult{}, err
+		}
+	}
+	<-ctx.Done()
+	return ExecutorRunResult{ExitCode: -1, Duration: time.Since(start), Cancelled: true}, nil
+}
 
 type fakePublisher struct {
 	publications []Publication
@@ -1241,4 +1307,414 @@ func requestHTMX(t *testing.T, app http.Handler, method, target, body, user stri
 	w := httptest.NewRecorder()
 	app.ServeHTTP(w, r)
 	return w
+}
+
+func TestExecutorSelectionIsVisiblePrePlan(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Before selection, the workspace shows the "Select executor" button.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Select executor") {
+		t.Fatalf("workspace missing executor selection trigger: %q", workspace.Body.String())
+	}
+	if strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("planning button visible before executor selection: %q", workspace.Body.String())
+	}
+
+	// Select executor and verify it is rendered.
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("executor select status = %d, want %d", response.Code, http.StatusSeeOther)
+	}
+
+	workspace = request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("planning button not visible after executor selection: %q", workspace.Body.String())
+	}
+	// Rationale must be visible to the operator.
+	if !strings.Contains(workspace.Body.String(), "medium scope") {
+		t.Fatalf("executor rationale not visible: %q", workspace.Body.String())
+	}
+}
+
+func TestPlanningRejectedBeforeExecutorSelection(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Planning must fail before executor is selected.
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("plan before selection status = %d, want %d", response.Code, http.StatusConflict)
+	}
+	if !strings.Contains(response.Body.String(), "executor must be selected") {
+		t.Fatalf("plan before selection message = %q", response.Body.String())
+	}
+
+	// After selection, planning is accepted.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	response = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("plan after selection status = %d, want %d", response.Code, http.StatusAccepted)
+	}
+}
+
+func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	clone := &fakeIssueWorkspace{path: workspace}
+	planner := &fakePlanner{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, IssueWorkspace: clone, Planner: planner})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned an unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_, err := executorApp.db.Exec(`UPDATE intakes SET issue_number=73,issue_url='https://github.com/mkoziy/hermestrator/issues/73' WHERE repository_id='42'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("plan status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	if planner.workspace != workspace || clone.starts != 1 {
+		t.Fatalf("planner workspace=%q starts=%d, want %q and 1", planner.workspace, clone.starts, workspace)
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorWorkspacePath != workspace {
+		t.Fatalf("persisted workspace=%q err=%v, want %q", status.ExecutorWorkspacePath, err, workspace)
+	}
+}
+
+func TestVerificationOnlySkipsPlanningAndApproval(t *testing.T) {
+	verification := &fakeVerificationRunner{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, VerificationRunner: verification})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned an unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_, err := executorApp.db.Exec(`UPDATE intakes SET executor_kind='verification-only',executor_state='selected',executor_workspace_path=? WHERE repository_id='42'`, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if response.Code != http.StatusSeeOther || verification.calls != 1 {
+		t.Fatalf("verification response=%d body=%q calls=%d, want redirect and one call", response.Code, response.Body.String(), verification.calls)
+	}
+}
+
+func TestExecutorSelectionSurvivesRestart(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	deps := Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        database,
+		AllowedUsers: map[string]bool{"michael": true},
+	}
+	app := mustApp(t, deps)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+
+	restarted := mustApp(t, deps)
+	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Start planning") {
+		t.Fatalf("executor selection not durable across restart: %q", workspace.Body.String())
+	}
+	if !strings.Contains(workspace.Body.String(), "medium scope") {
+		t.Fatalf("executor rationale not durable across restart: %q", workspace.Body.String())
+	}
+}
+
+func TestApprovalUnlocksExecution(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"task 1 done", "task 2 done"}, exitCode: 0, duration: 150 * time.Millisecond}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Select executor and plan.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	planResponse := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	if planResponse.Code != http.StatusAccepted {
+		t.Fatalf("plan status = %d, want %d", planResponse.Code, http.StatusAccepted)
+	}
+
+	// Execution must fail before approval.
+	runResponse := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run before approval status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run before approval message = %q", runResponse.Body.String())
+	}
+
+	// Approve the plan.
+	approveResponse := request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+	if approveResponse.Code != http.StatusSeeOther {
+		t.Fatalf("approve status = %d, want %d", approveResponse.Code, http.StatusSeeOther)
+	}
+
+	// After approval, the workspace shows the Run button.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), ">Run<") {
+		t.Fatalf("workspace missing Run button after approval: %q", workspace.Body.String())
+	}
+
+	// Execution now succeeds and redirects to workspace.
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusSeeOther {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusSeeOther)
+	}
+}
+
+func TestExecutionRejectedPreApproval(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"ok"}, exitCode: 0}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	// Execution before executor selection.
+	runResponse := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run before selection status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "executor must be selected") {
+		t.Fatalf("run before selection message = %q", runResponse.Body.String())
+	}
+
+	// Execution after selection but before planning.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run after selection status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run after selection message = %q", runResponse.Body.String())
+	}
+
+	// Execution after planning but before approval.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusConflict {
+		t.Fatalf("run after plan status = %d, want %d", runResponse.Code, http.StatusConflict)
+	}
+	if !strings.Contains(runResponse.Body.String(), "requires operator approval") {
+		t.Fatalf("run after plan message = %q", runResponse.Body.String())
+	}
+
+	// Approve and then execution works.
+	approveResponse := request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+	if approveResponse.Code != http.StatusSeeOther {
+		t.Fatalf("approve status = %d, want %d", approveResponse.Code, http.StatusSeeOther)
+	}
+	runResponse = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResponse.Code != http.StatusSeeOther {
+		t.Fatalf("run after approval status = %d, want %d", runResponse.Code, http.StatusSeeOther)
+	}
+}
+
+func TestExecutorOutputRedactsSecretsBeforeRendering(t *testing.T) {
+	// A fake executor that outputs a Telegram bot token pattern.
+	secretToken := "123456789:AAabcdefghijklmnopqrstuvwxyz123456789"
+	runner := &fakeExecutorRunner{
+		lines:    []string{"using token " + secretToken, "task complete"},
+		exitCode: 0,
+		duration: 200 * time.Millisecond,
+	}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Run the executor and check the workspace page.
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+
+	// The raw secret must never appear.
+	if strings.Contains(workspace.Body.String(), secretToken) {
+		t.Fatalf("executor output leaked secret token: %q", workspace.Body.String())
+	}
+	// The redacted placeholder must appear instead.
+	if !strings.Contains(workspace.Body.String(), "[redacted]") {
+		t.Fatalf("executor output missing [redacted] placeholder: %q", workspace.Body.String())
+	}
+	// The non-secret output line must still be visible.
+	if !strings.Contains(workspace.Body.String(), "task complete") {
+		t.Fatalf("non-secret executor output missing: %q", workspace.Body.String())
+	}
+}
+
+func TestExecutorRunRendersHeartbeatDurationAndExitStatus(t *testing.T) {
+	runner := &fakeExecutorRunner{
+		lines:    []string{"building...", "testing...", "done"},
+		exitCode: 0,
+		duration: 3500 * time.Millisecond,
+	}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+
+	// Duration must be visible.
+	if !strings.Contains(workspace.Body.String(), "3.5s") {
+		t.Fatalf("executor duration not rendered: %q", workspace.Body.String())
+	}
+	// Exit code must be visible.
+	if !strings.Contains(workspace.Body.String(), "Exit code: 0") {
+		t.Fatalf("executor exit code not rendered: %q", workspace.Body.String())
+	}
+	// Completed state must be visible.
+	if !strings.Contains(workspace.Body.String(), "State: completed") {
+		t.Fatalf("executor completed state not rendered: %q", workspace.Body.String())
+	}
+	// Output artifact must contain the lines.
+	if !strings.Contains(workspace.Body.String(), "building...") {
+		t.Fatalf("executor output lines not rendered: %q", workspace.Body.String())
+	}
+}
+
+func TestCancelMidRunTerminatesProcessAndPreservesPartialOutput(t *testing.T) {
+	hang := &hangExecutorRunner{lines: []string{"starting build", "compiling..."}}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: hang,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Start executor in a goroutine - it will hang after emitting its lines.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	}()
+
+	// Wait for the executor to enter running state (heartbeat appears).
+	var running bool
+	for i := 0; i < 50; i++ {
+		workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+		if strings.Contains(workspace.Body.String(), "State: running") {
+			running = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !running {
+		t.Fatal("executor never entered running state")
+	}
+
+	// Cancel the run.
+	cancelResp := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+	if cancelResp.Code != http.StatusSeeOther {
+		t.Fatalf("cancel status = %d, want %d", cancelResp.Code, http.StatusSeeOther)
+	}
+
+	// Wait for executorRun goroutine to finish.
+	runResp := <-done
+	if runResp.Code != http.StatusSeeOther {
+		t.Fatalf("run status after cancel = %d, want %d", runResp.Code, http.StatusSeeOther)
+	}
+
+	// Verify the workspace shows it was cancelled.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "Run was cancelled") {
+		t.Fatalf("workspace missing cancellation indicator: %q", workspace.Body.String())
+	}
+	// Partial output must be preserved.
+	if !strings.Contains(workspace.Body.String(), "starting build") {
+		t.Fatalf("partial output 'starting build' not preserved: %q", workspace.Body.String())
+	}
+	if !strings.Contains(workspace.Body.String(), "compiling...") {
+		t.Fatalf("partial output 'compiling...' not preserved: %q", workspace.Body.String())
+	}
+}
+
+func TestCancelAfterCompleteIsNoOp(t *testing.T) {
+	runner := &fakeExecutorRunner{lines: []string{"ok"}, exitCode: 0}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
+
+	// Run to completion.
+	runResp := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if runResp.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want %d", runResp.Code, http.StatusSeeOther)
+	}
+
+	// Cancel after complete must not error.
+	cancelResp := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+	if cancelResp.Code != http.StatusSeeOther {
+		t.Fatalf("cancel after complete status = %d, want %d", cancelResp.Code, http.StatusSeeOther)
+	}
+
+	// Workspace still shows completed (not cancelled) state.
+	workspace := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
+	if !strings.Contains(workspace.Body.String(), "State: completed") {
+		t.Fatalf("workspace state changed after cancel of completed run: %q", workspace.Body.String())
+	}
+	if strings.Contains(workspace.Body.String(), "Run was cancelled") {
+		t.Fatalf("completed run incorrectly shows cancellation: %q", workspace.Body.String())
+	}
 }

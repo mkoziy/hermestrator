@@ -23,6 +23,10 @@ func main() {
 	defer func() { _ = model.Close() }()
 	dashboardURL := envOr("PM_DASHBOARD_URL", "http://localhost:8080")
 	intakeBase := envOr("PM_INTAKE_DIR", filepath.Join(os.TempDir(), "hermestrator-intakes"))
+	issueWorkspaceBase := envOr("PM_EXECUTOR_WORKSPACE_DIR", filepath.Join(os.TempDir(), "hermestrator-executor-workspaces"))
+	planningProfile := envOr("PM_PLANNING_PROFILE", filepath.Join(os.TempDir(), "hermestrator-planning-profile.json"))
+	processRunner := &live.ProcessRunner{}
+	planner := &live.Planner{Runner: processRunner, ProfilePath: planningProfile, RalphexPlanningConfigDir: envOr("PM_RALPHEX_PLANNING_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-planning"))}
 	app, err := dashboard.New(dashboard.Dependencies{
 		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
 		Model:       model,
@@ -33,9 +37,19 @@ func main() {
 			BaseDir:      intakeBase,
 			WorkspaceDir: envOr("PM_ISSUE_WORKSPACE_DIR", "issue-workspaces"),
 		},
-		Store:        store,
-		AllowedUsers: live.AllowedUsers(os.Getenv("PM_ALLOWED_GITHUB_USERS")),
-		DashboardURL: dashboardURL,
+		Store:          store,
+		AllowedUsers:   live.AllowedUsers(os.Getenv("PM_ALLOWED_GITHUB_USERS")),
+		DashboardURL:   dashboardURL,
+		ExecutorRunner: live.DashboardExecutorRunner{Runner: processRunner},
+		Planner:        planner,
+		Critiquer: live.DashboardCritiquer{Critiquer: &live.Critiquer{
+			Planner:   planner,
+			ModelFunc: live.NewCritiqueModelFunc(model.Genkit(), envOr("PM_MODEL_CRITIQUE", envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini")), 0),
+		}},
+		IssueWorkspace:            live.IssueWorkspace{BaseDir: issueWorkspaceBase},
+		Preflight:                 live.DashboardPreflight{Preflight: &live.Preflight{}},
+		VerificationRunner:        live.DashboardVerificationRunner{Runner: &live.VerificationRunner{Runner: processRunner}},
+		RalphexExecutionConfigDir: envOr("PM_RALPHEX_EXECUTION_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-execution")),
 	})
 	if err != nil {
 		log.Fatal(err)

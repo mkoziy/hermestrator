@@ -37,3 +37,27 @@ after GitHub accepts an issue, a failed clone promotion remains retryable
 without creating another issue. A successful promotion moves the intake clone
 into `PM_ISSUE_WORKSPACE_DIR/issues/<number>`; abandoning an unpublished
 intake removes only its verified temporary clone.
+
+## Executor orchestration
+
+Implementation runs (Ticket 3 / issue #4) use a separate workspace layout
+from discovery intakes. Three directories are needed at runtime:
+
+- **Executor workspace root** — per-issue implementation clones live under
+  a configurable base directory, keyed by issue number. This is distinct
+  from `PM_INTAKE_DIR` (temporary discovery clones) and
+  `PM_ISSUE_WORKSPACE_DIR` (promoted intake workspaces).
+- **Planning profile** — a PM-owned JSON file selecting the plan generator
+  (`codex` or `pi`), model, effort level, and sandbox mode. The format is
+  purpose-built for the PM; it does not use ralphex's `read_cfg` schema.
+  When the file is absent or unset, safe defaults apply (codex, medium
+  effort, no sandbox).
+- **Execution profile directory** — a PM-owned directory passed to ralphex
+  via `--config-dir` during non-interactive execution. This directory
+  contains ralphex's own configuration files and must not reuse the
+  existing `./ralphex/` trees from Hermes.
+
+Executor binaries (`ralphex`, `codex`, `pi`, `gh`) are invoked directly
+through a streaming subprocess runner that captures heartbeat, duration,
+and exit status. All executor stdout/stderr is sanitised through
+`redaction.Secrets` before it reaches dashboard storage or rendering.

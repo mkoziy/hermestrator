@@ -29,7 +29,7 @@ separate follow-up.
 ## Build the image locally
 
 The `Dockerfile` lives at `docker/Dockerfile`; the build context is the repo root
-(the image `COPY`s `ralphex/` profiles and the `docker/*.sh` scripts from there), so
+(the image `COPY`s `ralphex/` profiles from there), so
 build with an explicit `-f`:
 
 ```sh
@@ -247,32 +247,9 @@ task-effort setting as task execution within a single profile (there's no
 separate "plan model" key), so running `--plan` on a task-tuned profile would
 create plans at the same reduced effort.
 
-Inside this Docker image specifically, bare `ralphex` and upstream
-`ralphex --plan` are intentionally intercepted by a small wrapper script.
-Upstream ralphex plan creation is interactive by design: after generating a
-draft it waits for an accept/revise/open-in-`$EDITOR`/reject choice, and bare
-`ralphex` can also enter an interactive picker. Hermes runs headlessly (no
-usable stdin/TTY for that review step), so allowing those paths only produces a
-late `read input: EOF` failure after the draft is already generated.
-
-Use `ralphex-headless-plan "your request"` instead. This image-local helper:
-- calls `codex exec` non-interactively using either:
-  - an explicitly selected baked-in profile via `--profile codex|codex-planning|pi|pi-planning`
-  - an explicit profile directory via `--profile-dir /path/to/profile`
-  - or, if neither is passed, the current `RALPHEX_CONFIG_DIR` / active config
-    for either `codex_*` settings or `claude_command` + `task_model`
-- writes the generated plan to `docs/plans/YYYYMMDD-<slug>.md`
-- exits immediately after creating the plan file; it does not start execution
-
-`ralphex-headless-plan` supports both baked-in `codex*` and `pi*` profiles.
-The simplest deterministic invocation is to point it at the baked-in planning
-profile directly:
-
-```sh
-ralphex-headless-plan --profile-dir /opt/ralphex-profiles/codex-planning "add health check endpoint"
-ralphex-headless-plan --profile-dir /opt/ralphex-profiles/pi-planning "add health check endpoint"
-ralphex docs/plans/<generated-plan>.md
-```
+The PM service owns headless planning. It reads a dedicated planning profile
+and invokes its configured planner directly; the image no longer contains a
+Hermes-specific ralphex wrapper or headless-plan helper.
 
 ## Agent skills (codex / pi)
 
