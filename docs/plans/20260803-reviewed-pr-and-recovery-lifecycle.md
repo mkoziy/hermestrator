@@ -435,8 +435,8 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 **Files:**
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `httptest`-based tests driving the full handler for: a duplicate webhook-less retry of each new endpoint, a simulated process crash mid-`fixing` followed by restart recovery reaching the correct state, a merge rejected by GitHub (still completes cleanly without cleanup), and cleanup safety (never triggered before confirmed merge even under a forced local-state edit)
-- [ ] run tests — must pass before task 15
+- [x] add `httptest`-based tests driving the full handler for: a duplicate webhook-less retry of each new endpoint, a simulated process crash mid-`fixing` followed by restart recovery reaching the correct state, a merge rejected by GitHub (still completes cleanly without cleanup), and cleanup safety (never triggered before confirmed merge even under a forced local-state edit)
+- [x] run tests — must pass before task 15
 
 ### Task 15: Verify acceptance criteria
 
