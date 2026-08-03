@@ -91,22 +91,31 @@ func (p GHPRCreator) CreateOrReuse(ctx context.Context, repo dashboard.Repositor
 	if branch == "" {
 		return dashboard.PullRequest{}, fmt.Errorf("workspace branch is empty")
 	}
-	view := command(ctx, "gh", "pr", "list", "--repo", repo.FullName, "--head", branch, "--json", "number,url,state", "--limit", "1")
+	marker := fmt.Sprintf("<!-- hermestrator-pr:%d -->", status.PublishedIssue.Number)
+	view := command(ctx, "gh", "pr", "list", "--repo", repo.FullName, "--head", branch, "--state", "all", "--json", "number,url,state,body", "--limit", "100")
 	output, err := view.Output()
 	if err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("find pull request: %w", err)
 	}
-	var prs []dashboard.PullRequest
+	var prs []struct {
+		dashboard.PullRequest
+		Body string `json:"body"`
+	}
 	if err := json.Unmarshal(output, &prs); err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("decode pull request list: %w", err)
 	}
+	for _, pr := range prs {
+		if strings.Contains(pr.Body, marker) {
+			return pr.PullRequest, nil
+		}
+	}
 	if len(prs) > 0 {
-		return prs[0], nil
+		return prs[0].PullRequest, nil
 	}
 	if output, err := command(ctx, "git", "-C", status.ExecutorWorkspacePath, "push", "-u", "origin", branch).CombinedOutput(); err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("push workspace branch: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	body := fmt.Sprintf("Implement GitHub issue #%d.\n\n<!-- hermestrator-pr:%d -->", status.PublishedIssue.Number, status.PublishedIssue.Number)
+	body := fmt.Sprintf("Implement GitHub issue #%d.\n\n%s", status.PublishedIssue.Number, marker)
 	created, err := command(ctx, "gh", "pr", "create", "--repo", repo.FullName, "--head", branch, "--title", fmt.Sprintf("Implement issue #%d", status.PublishedIssue.Number), "--body", body).Output()
 	if err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("create pull request: %w", err)

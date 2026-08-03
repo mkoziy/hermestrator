@@ -1132,8 +1132,8 @@ func TestFixingStateRecoversAtStartupWithoutReplayingFix(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := restarted.intakeStatus(context.Background(), "42")
-	if err != nil || status.ExecutorState != executorFixing {
-		t.Fatalf("recovered state=%q err=%v, want fixing for safe resume", status.ExecutorState, err)
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		t.Fatalf("recovered state=%q err=%v, want review_blocked for safe fix retry", status.ExecutorState, err)
 	}
 }
 
@@ -1737,7 +1737,8 @@ func (l *startupLease) Release(ctx context.Context, id, state, reason string) er
 
 func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
 	lease := &startupLease{active: []ActiveRun{{RunID: "orphan"}}}
-	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease})
+	merge := &endToEndMergeExecutor{}
+	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease, MergeExecutor: merge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1754,6 +1755,9 @@ func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
 	}
 	if state != "merged" {
 		t.Fatalf("state = %q, want merged", state)
+	}
+	if merge.closeCalls != 1 {
+		t.Fatalf("issue close calls = %d, want 1", merge.closeCalls)
 	}
 	if len(lease.released) != 1 || lease.released[0] != "orphan" {
 		t.Fatalf("released %v, want only orphan lease; merged work retains its lease until cleanup", lease.released)

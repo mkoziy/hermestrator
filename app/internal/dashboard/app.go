@@ -206,6 +206,7 @@ const (
 	executorCompleted     executorState = "completed"
 	executorVerifying     executorState = "verifying"
 	executorVerified      executorState = "verified"
+	executorCreatingPR    executorState = "creating_pr"
 	executorPRCreated     executorState = "pr_created"
 	executorReviewing     executorState = "reviewing"
 	executorReviewBlocked executorState = "review_blocked"
@@ -473,7 +474,7 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-pr"><button class="btn btn-outline-primary">Retry pull request</button></form>{{else if .Intake.ExecutorCompleted}}`
+	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-pr"><button class="btn btn-outline-primary">Retry pull request</button></form>{{else if .Intake.ExecutorCompleted}}`
 	t, err := template.New("page").Parse(strings.Replace(pageTemplate, `{{else if .Intake.ExecutorCompleted}}`, executorControls, 1))
 	if err != nil {
 		_ = db.Close()
@@ -529,15 +530,15 @@ func New(deps Dependencies) (*application, error) {
 // authority for PR state; the lease scan is intentionally independent so a
 // crash before run_id was persisted is recoverable too.
 func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,i.pr_number,i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','failed','cleanup_done')`)
+	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),COALESCE(i.issue_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','failed','cleanup_done')`)
 	if err != nil {
 		return fmt.Errorf("startup reconciliation: query intakes: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id, fullName, runID, state string
-		var number int
-		if err := rows.Scan(&id, &fullName, &number, &state, &runID); err != nil {
+		var number, issueNumber int
+		if err := rows.Scan(&id, &fullName, &number, &issueNumber, &state, &runID); err != nil {
 			return err
 		}
 		if (state == string(executorFailed) || state == string(executorCleanupDone)) && runID != "" && a.deps.RunLease != nil {
@@ -546,6 +547,15 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 				leaseState = "completed"
 			}
 			_ = a.deps.RunLease.Release(ctx, runID, leaseState, "startup terminal reconciliation")
+			continue
+		}
+		if state == string(executorCreatingPR) {
+			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR); err != nil {
+				return err
+			}
+			if runID != "" && a.deps.RunLease != nil {
+				_ = a.deps.RunLease.Release(ctx, runID, string(executorFailed), "startup recovery during pull request creation")
+			}
 			continue
 		}
 		if prs == nil || number == 0 {
@@ -558,12 +568,21 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 		next := executorState(state)
 		switch remote {
 		case "MERGED":
+			if a.deps.MergeExecutor == nil {
+				continue
+			}
+			if err := a.deps.MergeExecutor.CloseIssue(ctx, Repository{ID: id, FullName: fullName}, issueNumber); err != nil {
+				return fmt.Errorf("startup reconciliation: close issue #%d: %w", issueNumber, err)
+			}
 			next = executorMerged
 		case "CLOSED":
 			next = executorFailed
 		case "OPEN":
-			if next == executorPRCreated || next == executorReviewing {
+			switch next {
+			case executorPRCreated, executorReviewing:
 				next = executorReviewing
+			case executorFixing:
+				next = executorReviewBlocked
 			}
 		}
 		if next != executorState(state) {
@@ -2179,17 +2198,29 @@ func (a *application) executorCreatePR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pull request creation requires verified work", http.StatusConflict)
 		return
 	}
+	claim, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCreatingPR, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerified)
+	if err != nil {
+		http.Error(w, "could not claim pull request creation", http.StatusInternalServerError)
+		return
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "executor state changed before pull request creation could start", http.StatusConflict)
+		return
+	}
 	repo, err := a.repository(r.Context(), id)
 	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerified, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR)
 		http.Error(w, "could not load repository", http.StatusInternalServerError)
 		return
 	}
 	pr, err := a.deps.PRCreator.CreateOrReuse(r.Context(), repo, status)
 	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerified, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR)
 		http.Error(w, fmt.Sprintf("could not create pull request: %v", err), http.StatusBadGateway)
 		return
 	}
-	if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,pr_number=?,pr_url=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPRCreated, pr.Number, pr.URL, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerified); err != nil {
+	if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,pr_number=?,pr_url=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPRCreated, pr.Number, pr.URL, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR); err != nil {
 		http.Error(w, "could not persist pull request", http.StatusInternalServerError)
 		return
 	}
@@ -2216,8 +2247,14 @@ func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load repository", 500)
 		return
 	}
-	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated); err != nil {
+	claim, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated)
+	if err != nil {
 		http.Error(w, "could not start review", 500)
+		return
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "review state changed before it could start", http.StatusConflict)
 		return
 	}
 	result, err := a.deps.Reviewer.Review(r.Context(), repo, status.PR, status)
@@ -2309,8 +2346,12 @@ func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFixing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewBlocked)
+	if err != nil {
+		http.Error(w, "could not claim review fix", http.StatusInternalServerError)
+		return
+	}
 	changed, rowsErr := result.RowsAffected()
-	if err != nil || rowsErr != nil || changed != 1 {
+	if rowsErr != nil || changed != 1 {
 		http.Error(w, "review state changed before fix could start", http.StatusConflict)
 		return
 	}
