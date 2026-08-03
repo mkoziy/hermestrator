@@ -401,10 +401,10 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/dashboard/app.go` (retry endpoints for `pr_created`/`reviewing`/`merging` failures)
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add authenticated, XSRF-protected retry endpoints for each new mutating step (PR create, review, merge, cleanup) that re-enter the same idempotent call rather than re-running prior steps
-- [ ] extend the existing cancel handler (`executorCancel`) to cover the new in-flight states (`reviewing`, `merging`) where cancellation means "stop and mark failed", not "kill a subprocess" (there is none to kill in those states)
-- [ ] write tests for retry-after-failure at each new step and cancel during `reviewing`/`merging`
-- [ ] run tests — must pass before task 12
+- [x] add authenticated, XSRF-protected retry endpoints for each new mutating step (PR create, review, merge, cleanup) that re-enter the same idempotent call rather than re-running prior steps
+- [x] extend the existing cancel handler (`executorCancel`) to cover the new in-flight states (`reviewing`, `merging`) where cancellation means "stop and mark failed", not "kill a subprocess" (there is none to kill in those states)
+- [x] write tests for retry-after-failure at each new step and cancel during `reviewing`/`merging`
+- [x] run tests — must pass before task 12
 
 ### Task 12: Startup PR/merge-state reconciliation
 

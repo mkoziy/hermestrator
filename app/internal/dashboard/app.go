@@ -495,6 +495,10 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/cleanup", a.executorCleanup)
 	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-pr", a.executorRetryPR)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-review", a.executorRetryReview)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-merge", a.executorRetryMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-cleanup", a.executorRetryCleanup)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
 	if err := a.resumePendingTurns(); err != nil {
@@ -2370,6 +2374,21 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load intake", http.StatusInternalServerError)
 		return
 	}
+	if status.ExecutorState == executorReviewing || status.ExecutorState == executorMerging {
+		result, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing, executorMerging)
+		if updateErr != nil {
+			http.Error(w, "could not cancel executor phase", http.StatusInternalServerError)
+			return
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			http.Error(w, "executor phase already changed", http.StatusConflict)
+			return
+		}
+		a.releaseFailedLease(r.Context(), status)
+		a.redirectWorkspace(w, r, id)
+		return
+	}
 	if status.ExecutorState != executorRunning {
 		// Already finished — cancellation is a no-op, not an error.
 		a.redirectWorkspace(w, r, id)
@@ -2388,6 +2407,60 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.redirectWorkspace(w, r, id)
+}
+
+// Retry endpoints only rewind the failed phase's own state. The phase handler
+// then performs its normal idempotent GitHub query before mutating anything.
+func (a *application) executorRetryPR(w http.ResponseWriter, r *http.Request) {
+	a.retryPhase(w, r, executorVerified, executorPRCreated)
+}
+
+func (a *application) executorRetryReview(w http.ResponseWriter, r *http.Request) {
+	a.retryPhase(w, r, executorPRCreated, executorReviewing)
+}
+
+func (a *application) executorRetryMerge(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeReady)
+	if err != nil {
+		http.Error(w, "could not retry merge", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "merge retry requires a merge-ready intake", http.StatusConflict)
+		return
+	}
+	a.executorMerge(w, r)
+}
+
+func (a *application) executorRetryCleanup(w http.ResponseWriter, r *http.Request) {
+	a.executorCleanup(w, r)
+}
+
+func (a *application) retryPhase(w http.ResponseWriter, r *http.Request, from, to executorState) {
+	id := r.PathValue("id")
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, from, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed)
+	if err != nil {
+		http.Error(w, "could not retry executor phase", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "retry requires a failed phase", http.StatusConflict)
+		return
+	}
+	if to == executorPRCreated {
+		a.executorCreatePR(w, r)
+		return
+	}
+	a.executorReview(w, r)
+}
+
+func (a *application) releaseFailedLease(ctx context.Context, status IntakeStatus) {
+	if a.deps.RunLease != nil && status.RunID != "" {
+		_ = a.deps.RunLease.Release(ctx, status.RunID, "failed", "operator cancelled")
+	}
 }
 
 func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {

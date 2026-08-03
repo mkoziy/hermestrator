@@ -1030,6 +1030,42 @@ func TestProtectedRoutesRejectUnapprovedOperator(t *testing.T) {
 	}
 }
 
+func TestExecutorCancelMarksReviewAndMergePhasesFailed(t *testing.T) {
+	for _, state := range []executorState{executorReviewing, executorMerging} {
+		t.Run(string(state), func(t *testing.T) {
+			app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+			a, ok := app.(*application)
+			if !ok {
+				t.Fatal("mustApp returned unexpected handler type")
+			}
+			_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+			_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+			_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+			if _, err := a.db.Exec(`UPDATE intakes SET executor_state=? WHERE repository_id='42'`, state); err != nil {
+				t.Fatal(err)
+			}
+			response := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("status=%d", response.Code)
+			}
+			status, err := a.intakeStatus(context.Background(), "42")
+			if err != nil || status.ExecutorState != executorFailed {
+				t.Fatalf("state=%q err=%v", status.ExecutorState, err)
+			}
+		})
+	}
+}
+
+func TestExecutorRetryEndpointsRequireTheirPhase(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	for _, endpoint := range []string{"retry-pr", "retry-review", "retry-merge", "retry-cleanup"} {
+		response := request(t, app, http.MethodPost, "/repositories/42/executor/"+endpoint, "", "michael")
+		if response.Code != http.StatusConflict && response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d", endpoint, response.Code)
+		}
+	}
+}
+
 func TestProtectedRoutesMatchGitHubLoginsCaseInsensitively(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	response := request(t, app, http.MethodGet, "/repositories", "", "Michael")
