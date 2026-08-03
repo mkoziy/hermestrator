@@ -427,8 +427,8 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 **Files:**
 - Modify: `app/internal/live/pr_test.go`, `review_test.go`, `merge_test.go`
 
-- [ ] confirm the per-mutation idempotency regression tests added in Tasks 3, 5, and 9 collectively cover: PR create, review-comment post, merge, and issue-close each querying first and only mutating when the query shows the action has not already happened — this task is a coverage check, not new test code, unless a gap is found
-- [ ] run tests — must pass before task 14
+- [x] confirm the per-mutation idempotency regression tests added in Tasks 3, 5, and 9 collectively cover: PR create, review-comment post, merge, and issue-close each querying first and only mutating when the query shows the action has not already happened — added the missing timed-out PR-create retry regression test
+- [x] run tests — must pass before task 14
 
 ### Task 14: End-to-end handler coverage for crash/duplicate/rejection scenarios
 
