@@ -143,6 +143,17 @@ type fakeVerificationRunner struct {
 	err   error
 }
 
+type fakeMergeabilityChecker struct {
+	mergeable bool
+	reason    string
+	calls     int
+}
+
+func (f *fakeMergeabilityChecker) CheckMergeable(context.Context, Repository, int) (bool, string, error) {
+	f.calls++
+	return f.mergeable, f.reason, nil
+}
+
 func (f *fakeVerificationRunner) Run(context.Context, string, []CheckSpec) (VerificationResult, error) {
 	f.calls++
 	return VerificationResult{ReadyForPR: f.ready || !f.fail}, f.err
@@ -962,6 +973,52 @@ func TestNonHTMXConversationPostRedirectsToWorkspace(t *testing.T) {
 	response := request(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"a dashboard"}}.Encode(), "michael")
 	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/repositories/42" {
 		t.Fatalf("response = %d location=%q", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestApproveMergeChecksFreshMergeability(t *testing.T) {
+	checker := &fakeMergeabilityChecker{mergeable: true}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeabilityChecker: checker})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := executorApp.db.Exec(`UPDATE intakes SET executor_state='merge_ready',pr_number=17,pr_url='https://github.com/acme/repo/pull/17' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/approve-merge", "", "michael")
+	if response.Code != http.StatusSeeOther || checker.calls != 1 {
+		t.Fatalf("response=%d calls=%d", response.Code, checker.calls)
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeApproved {
+		t.Fatalf("state=%q err=%v", status.ExecutorState, err)
+	}
+}
+
+func TestApproveMergeRejectsFreshConflict(t *testing.T) {
+	checker := &fakeMergeabilityChecker{reason: "GitHub merge state is dirty"}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeabilityChecker: checker})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := executorApp.db.Exec(`UPDATE intakes SET executor_state='merge_ready',pr_number=17 WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/approve-merge", "", "michael")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "dirty") {
+		t.Fatalf("response=%d body=%q", response.Code, response.Body.String())
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeReady {
+		t.Fatalf("state=%q err=%v", status.ExecutorState, err)
 	}
 }
 

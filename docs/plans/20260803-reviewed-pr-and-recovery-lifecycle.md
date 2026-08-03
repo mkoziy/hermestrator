@@ -362,10 +362,10 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/dashboard/app.go` (`executorApproveMerge` handler, template)
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `POST /repositories/{id}/executor/approve-merge`, authenticated + XSRF-protected like every other mutating route, atomically transitioning `executorMergeReady` → `executorMergeApproved` only after a fresh `CheckMergeable` (Task 7)
-- [ ] add the "Approve merge" button and PR link to the workspace template, following the existing conditional-`{{if eq .Intake.ExecutorState ...}}` pattern
-- [ ] write tests for: approval success, approval blocked by a fresh conflict
-- [ ] run tests — must pass before task 9
+- [x] add `POST /repositories/{id}/executor/approve-merge`, authenticated + XSRF-protected like every other mutating route, atomically transitioning `executorMergeReady` → `executorMergeApproved` only after a fresh `CheckMergeable` (Task 7)
+- [x] add the "Approve merge" button and PR link to the workspace template, following the existing conditional-`{{if eq .Intake.ExecutorState ...}}` pattern
+- [x] write tests for: approval success, approval blocked by a fresh conflict
+- [x] run tests — must pass before task 9
 
 ### Task 9: Idempotent merge and issue closure
 

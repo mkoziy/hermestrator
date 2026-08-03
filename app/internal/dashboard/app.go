@@ -94,6 +94,9 @@ type ReviewResult struct {
 type Reviewer interface {
 	Review(context.Context, Repository, PullRequest, IntakeStatus) (ReviewResult, error)
 }
+type MergeabilityChecker interface {
+	CheckMergeable(context.Context, Repository, int) (bool, string, error)
+}
 
 // Publisher owns the only tracker mutation available in the intake slice.
 // Implementations must not publish an unconfirmed draft.
@@ -198,6 +201,7 @@ const (
 	executorReviewBlocked executorState = "review_blocked"
 	executorFixing        executorState = "fixing"
 	executorMergeReady    executorState = "merge_ready"
+	executorMergeApproved executorState = "merge_approved"
 	executorFailed        executorState = "failed"
 )
 
@@ -286,6 +290,7 @@ type Dependencies struct {
 	VerificationRunner        VerificationRunner
 	RunLease                  RunLease
 	PRCreator                 PRCreator
+	MergeabilityChecker       MergeabilityChecker
 	Reviewer                  Reviewer
 	RalphexExecutionConfigDir string
 }
@@ -443,7 +448,8 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	t, err := template.New("page").Parse(pageTemplate)
+	templateSource := strings.Replace(pageTemplate, `{{else if .Intake.ExecutorCompleted}}`, `{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if .Intake.ExecutorCompleted}}`, 1)
+	t, err := template.New("page").Parse(templateSource)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -475,6 +481,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
 	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
 	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
+	mux.HandleFunc("POST /repositories/{id}/executor/approve-merge", a.executorApproveMerge)
 	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
@@ -2070,6 +2077,48 @@ func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
 	}
 	if state == executorMergeReady && a.deps.Telegram != nil {
 		_ = a.deps.Telegram.Notify(r.Context(), Notification{Text: "Pull request is ready for merge approval", URL: strings.TrimRight(a.deps.DashboardURL, "/") + "/repositories/" + id})
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorApproveMerge(w http.ResponseWriter, r *http.Request) {
+	if a.deps.MergeabilityChecker == nil {
+		http.Error(w, "mergeability checker is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorMergeReady {
+		http.Error(w, "merge approval requires a review-ready pull request", http.StatusConflict)
+		return
+	}
+	mergeable, reason, err := a.deps.MergeabilityChecker.CheckMergeable(r.Context(), repo, status.PR.Number)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not check pull request mergeability: %v", err), http.StatusBadGateway)
+		return
+	}
+	if !mergeable {
+		http.Error(w, reason, http.StatusConflict)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeReady)
+	if err != nil {
+		http.Error(w, "could not record merge approval", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before merge approval could be recorded", http.StatusConflict)
+		return
 	}
 	a.redirectWorkspace(w, r, id)
 }
