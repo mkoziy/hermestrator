@@ -182,6 +182,8 @@ const (
 
 type executorState string
 
+const MaxReviewRounds = 3
+
 const (
 	executorSelected      executorState = "selected"
 	executorPlanning      executorState = "planning"
@@ -194,6 +196,7 @@ const (
 	executorPRCreated     executorState = "pr_created"
 	executorReviewing     executorState = "reviewing"
 	executorReviewBlocked executorState = "review_blocked"
+	executorFixing        executorState = "fixing"
 	executorMergeReady    executorState = "merge_ready"
 	executorFailed        executorState = "failed"
 )
@@ -216,6 +219,8 @@ type IntakeStatus struct {
 	ExecutorCompleted     bool
 	ExecutorWorkspacePath string
 	RunID                 string
+	ReviewRound           int
+	ReviewFindings        string
 	PR                    PullRequest
 	VerificationOutput    string
 }
@@ -420,6 +425,9 @@ func New(deps Dependencies) (*application, error) {
 	if err = addColumnIfMissing(db, "intakes", "review_findings", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, fmt.Errorf("add review findings column: %w", err)
 	}
+	if err = addColumnIfMissing(db, "intakes", "review_round", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("add review round column: %w", err)
+	}
 	if err = addColumnIfMissing(db, "intakes", "pr_url", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -467,6 +475,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
 	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
 	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
+	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
@@ -1808,7 +1817,7 @@ func (a *application) verifyExecutorRun(id, workspacePath string) bool {
 		// completed state; configured deployments always pass through checks.
 		return true
 	}
-	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorCompleted)
+	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorCompleted, executorVerifying)
 	if err != nil {
 		return false
 	}
@@ -2062,6 +2071,56 @@ func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
 	if state == executorMergeReady && a.deps.Telegram != nil {
 		_ = a.deps.Telegram.Notify(r.Context(), Notification{Text: "Pull request is ready for merge approval", URL: strings.TrimRight(a.deps.DashboardURL, "/") + "/repositories/" + id})
 	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.ExecutorRunner == nil {
+		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		http.Error(w, "review fix requires blocked review", http.StatusConflict)
+		return
+	}
+	if status.ReviewRound >= MaxReviewRounds {
+		http.Error(w, "maximum review fix rounds exhausted", http.StatusConflict)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFixing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewBlocked)
+	changed, rowsErr := result.RowsAffected()
+	if err != nil || rowsErr != nil || changed != 1 {
+		http.Error(w, "review state changed before fix could start", http.StatusConflict)
+		return
+	}
+	prompt := fmt.Sprintf("Fix the following independent review findings in the workspace, then run the relevant checks:\n\n%s", status.ReviewFindings)
+	var name string
+	var args []string
+	switch ExecutorKind(status.ExecutorKind) {
+	case Ralphex:
+		name, args = "ralphex", []string{"--config-dir", a.deps.RalphexExecutionConfigDir, "-p", prompt}
+	case Codex:
+		name, args = "codex", []string{"exec", prompt}
+	case Pi:
+		name, args = "pi", []string{"-p", prompt}
+	default:
+		http.Error(w, "unsupported executor kind for review fix", http.StatusBadRequest)
+		return
+	}
+	_, runErr := a.deps.ExecutorRunner.Run(r.Context(), status.ExecutorWorkspacePath, nil, name, args...)
+	if runErr != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorFixing)
+		http.Error(w, "review fix executor failed", http.StatusBadGateway)
+		return
+	}
+	_, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_round=review_round+1,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorFixing)
+	if err != nil {
+		http.Error(w, "could not start post-fix verification", http.StatusInternalServerError)
+		return
+	}
+	a.verifyExecutorRun(id, status.ExecutorWorkspacePath)
 	a.redirectWorkspace(w, r, id)
 }
 
@@ -2455,7 +2514,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var cancelledInt int
 	var prNumber int
 	var prURL string
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings)
 	status.ExecutorState = executorState(executorStateStr)
 	status.PR = PullRequest{Number: prNumber, URL: prURL, State: "open"}
 	_ = a.db.QueryRowContext(ctx, `SELECT body FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, artifactExecutorOutput).Scan(&status.VerificationOutput)

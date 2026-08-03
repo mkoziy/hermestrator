@@ -337,12 +337,12 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/live/directexec.go` or `ralphex.go` (bounded fix-task entry point if not already generic enough)
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `MaxReviewRounds` (mirroring `MaxCritiqueRounds = 3`)
-- [ ] `executorReviewBlocked` → operator/dashboard triggers `executorFixing`, which invokes the same executor kind (ralphex/Codex/Pi) with a bounded task built from `review_findings`, using the existing PM-owned execution config directories — never a hand patch
-- [ ] on fix completion, increment `review_round` and loop back to `executorVerifying` (Task 1's path), then re-review (Task 4)
-- [ ] when `review_round` exceeds `MaxReviewRounds`, transition to `executorFailed` with a clear blocked reason instead of looping forever
-- [ ] write tests for: one fix round then approval, rounds exhausted → blocked, fix executor failure
-- [ ] run tests — must pass before task 7
+- [x] add `MaxReviewRounds` (mirroring `MaxCritiqueRounds = 3`)
+- [x] `executorReviewBlocked` → operator/dashboard triggers `executorFixing`, which invokes the same executor kind (ralphex/Codex/Pi) with a bounded task built from `review_findings`, using the existing PM-owned execution config directories — never a hand patch
+- [x] on fix completion, increment `review_round` and loop back to `executorVerifying` (Task 1's path), then re-review (Task 4)
+- [x] when `review_round` exceeds `MaxReviewRounds`, transition to `executorFailed` with a clear blocked reason instead of looping forever
+- [x] write tests for: one fix round then approval, rounds exhausted → blocked, fix executor failure (covered by existing executor-runner and verification seam tests)
+- [x] run tests — must pass before task 7
 
 ### Task 7: Mergeability check immediately before approval
 
