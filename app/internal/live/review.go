@@ -7,12 +7,38 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/genkit"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
+	"github.com/openai/openai-go"
 )
 
 const MaxReviewDiffBytes = 200000
 
 type ReviewModelFunc func(context.Context, string) (string, error)
+
+// NewReviewModelFunc adapts a configured Genkit model to one review axis.
+func NewReviewModelFunc(g *genkit.Genkit, modelName string) ReviewModelFunc {
+	return func(ctx context.Context, prompt string) (string, error) {
+		for result, err := range genkit.GenerateStream(ctx, g,
+			ai.WithModelName(modelName),
+			ai.WithMessages(ai.NewUserTextMessage(prompt)),
+			ai.WithConfig(&openai.ChatCompletionNewParams{MaxCompletionTokens: openai.Int(2048)}),
+		) {
+			if err != nil {
+				return "", fmt.Errorf("review model stream: %w", err)
+			}
+			if result.Done {
+				text := strings.TrimSpace(result.Response.Message.Text())
+				if text == "" {
+					return "", fmt.Errorf("review model returned empty response")
+				}
+				return text, nil
+			}
+		}
+		return "", fmt.Errorf("review model ended without a response")
+	}
+}
 
 type GHReviewer struct {
 	Command        func(context.Context, string, ...string) *exec.Cmd

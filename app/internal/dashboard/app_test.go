@@ -1755,8 +1755,8 @@ func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
 	if state != "merged" {
 		t.Fatalf("state = %q, want merged", state)
 	}
-	if len(lease.released) != 2 {
-		t.Fatalf("released %v, want terminal and orphan leases", lease.released)
+	if len(lease.released) != 1 || lease.released[0] != "orphan" {
+		t.Fatalf("released %v, want only orphan lease; merged work retains its lease until cleanup", lease.released)
 	}
 }
 
