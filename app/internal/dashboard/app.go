@@ -2396,10 +2396,14 @@ func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "review state changed before fix could start", http.StatusConflict)
 		return
 	}
-	runResult, runErr := a.deps.ExecutorRunner.Run(r.Context(), status.ExecutorWorkspacePath, nil, name, args...)
+	// A review fix may outlive the POST request. Bind it to the application
+	// lifecycle instead, so a client disconnect does not cancel valid work.
+	runCtx, runCancel := context.WithCancel(a.ctx)
+	defer runCancel()
+	runResult, runErr := a.deps.ExecutorRunner.Run(runCtx, status.ExecutorWorkspacePath, nil, name, args...)
 	if runErr != nil || runResult.ExitCode != 0 || runResult.Cancelled {
 		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorFixing)
-		a.releaseLease(r.Context(), status, "review fix executor failed")
+		a.releaseLease(a.ctx, status, "review fix executor failed")
 		http.Error(w, "review fix executor failed", http.StatusBadGateway)
 		return
 	}

@@ -226,6 +226,17 @@ func (h *hangExecutorRunner) Run(ctx context.Context, _ string, onLine func(stri
 	return ExecutorRunResult{ExitCode: -1, Duration: time.Since(start), Cancelled: true}, nil
 }
 
+type blockingExecutorRunner struct {
+	started chan context.Context
+	release chan struct{}
+}
+
+func (b *blockingExecutorRunner) Run(ctx context.Context, _ string, _ func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	b.started <- ctx
+	<-b.release
+	return ExecutorRunResult{}, nil
+}
+
 type fakePublisher struct {
 	publications []Publication
 	issues       []PublishedIssue
@@ -1301,6 +1312,57 @@ func TestExecutorFixRejectsUnsupportedKindWithoutClaimingState(t *testing.T) {
 	status, err := a.intakeStatus(context.Background(), "42")
 	if err != nil || status.ExecutorState != executorReviewBlocked {
 		t.Fatalf("state=%q err=%v, want review_blocked", status.ExecutorState, err)
+	}
+}
+
+func TestExecutorFixOutlivesRequestCancellation(t *testing.T) {
+	runner := &blockingExecutorRunner{started: make(chan context.Context, 1), release: make(chan struct{})}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+		VerificationRunner: &fakeVerificationRunner{
+			ready: true,
+		},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	workspace := t.TempDir()
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,executor_kind=?,executor_workspace_path=?,review_findings=? WHERE repository_id=?`, executorReviewBlocked, Codex, workspace, "fix this", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/repositories/42/executor/fix", nil).WithContext(ctx)
+	request.Header.Set("X-PM-User", "michael")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		app.ServeHTTP(response, request)
+		close(done)
+	}()
+
+	runCtx := <-runner.started
+	cancel()
+	select {
+	case <-runCtx.Done():
+		t.Fatal("review fix run context was cancelled with the request")
+	default:
+	}
+	close(runner.release)
+	<-done
+
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status=%d, want redirect", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorPRCreated {
+		t.Fatalf("state=%q err=%v, want pr_created", status.ExecutorState, err)
 	}
 }
 
