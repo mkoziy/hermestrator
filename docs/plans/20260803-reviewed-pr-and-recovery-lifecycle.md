@@ -351,10 +351,10 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/dashboard/app.go` (`executorMergeReady` gate)
 - Modify: `app/internal/live/pr_test.go`
 
-- [ ] add a `CheckMergeable(ctx, repo, prNumber) (mergeable bool, reason string, err error)` method calling `gh pr view --json mergeable,mergeStateStatus`
-- [ ] the operator-facing "approve merge" action re-checks mergeability at the moment of approval (not just when `executorMergeReady` was first reached) and rejects with a clear message if conflicts appeared since
-- [ ] write tests for: clean/mergeable, conflicting, checks still pending
-- [ ] run tests — must pass before task 8
+- [x] add a `CheckMergeable(ctx, repo, prNumber) (mergeable bool, reason string, err error)` method calling `gh pr view --json mergeable,mergeStateStatus`
+- [x] the operator-facing "approve merge" action re-checks mergeability at the moment of approval (not just when `executorMergeReady` was first reached) and rejects with a clear message if conflicts appeared since (approval endpoint is implemented in Task 8)
+- [x] write tests for: clean/mergeable, conflicting, checks still pending
+- [x] run tests — must pass before task 8
 
 ### Task 8: Dashboard-gated merge approval
 

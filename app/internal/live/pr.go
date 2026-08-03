@@ -18,6 +18,39 @@ type GHPRCreator struct {
 	Command func(context.Context, string, ...string) *exec.Cmd
 }
 
+type mergeabilityResponse struct {
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+}
+
+// CheckMergeable asks GitHub for the current mergeability state. A pull
+// request is mergeable only when GitHub reports both a mergeable tree and a
+// clean merge state; pending checks therefore remain blocked.
+func (p GHPRCreator) CheckMergeable(ctx context.Context, repo dashboard.Repository, prNumber int) (bool, string, error) {
+	if repo.FullName == "" || prNumber <= 0 {
+		return false, "repository and pull request are required", fmt.Errorf("repository and pull request are required")
+	}
+	command := p.Command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	output, err := command(ctx, "gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--repo", repo.FullName, "--json", "mergeable,mergeStateStatus").Output()
+	if err != nil {
+		return false, "could not query pull request mergeability", fmt.Errorf("check pull request mergeability: %w", err)
+	}
+	var state mergeabilityResponse
+	if err := json.Unmarshal(output, &state); err != nil {
+		return false, "could not decode pull request mergeability", fmt.Errorf("decode pull request mergeability: %w", err)
+	}
+	if state.Mergeable != "MERGEABLE" {
+		return false, fmt.Sprintf("GitHub reports pull request is %s", strings.ToLower(state.Mergeable)), nil
+	}
+	if state.MergeStateStatus != "CLEAN" {
+		return false, fmt.Sprintf("GitHub merge state is %s", strings.ToLower(state.MergeStateStatus)), nil
+	}
+	return true, "pull request is mergeable", nil
+}
+
 var _ dashboard.PRCreator = GHPRCreator{}
 
 func (p GHPRCreator) CreateOrReuse(ctx context.Context, repo dashboard.Repository, status dashboard.IntakeStatus) (dashboard.PullRequest, error) {
