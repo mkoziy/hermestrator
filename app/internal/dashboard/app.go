@@ -97,6 +97,10 @@ type Reviewer interface {
 type MergeabilityChecker interface {
 	CheckMergeable(context.Context, Repository, int) (bool, string, error)
 }
+type MergeExecutor interface {
+	Merge(context.Context, Repository, int) error
+	CloseIssue(context.Context, Repository, int) error
+}
 
 // Publisher owns the only tracker mutation available in the intake slice.
 // Implementations must not publish an unconfirmed draft.
@@ -202,6 +206,9 @@ const (
 	executorFixing        executorState = "fixing"
 	executorMergeReady    executorState = "merge_ready"
 	executorMergeApproved executorState = "merge_approved"
+	executorMerging       executorState = "merging"
+	executorMerged        executorState = "merged"
+	executorCleanupDone   executorState = "cleanup_done"
 	executorFailed        executorState = "failed"
 )
 
@@ -291,6 +298,7 @@ type Dependencies struct {
 	RunLease                  RunLease
 	PRCreator                 PRCreator
 	MergeabilityChecker       MergeabilityChecker
+	MergeExecutor             MergeExecutor
 	Reviewer                  Reviewer
 	RalphexExecutionConfigDir string
 }
@@ -482,6 +490,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
 	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
 	mux.HandleFunc("POST /repositories/{id}/executor/approve-merge", a.executorApproveMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/merge", a.executorMerge)
 	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
@@ -2170,6 +2179,53 @@ func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.verifyExecutorRun(id, status.ExecutorWorkspacePath)
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorMerge(w http.ResponseWriter, r *http.Request) {
+	if a.deps.MergeExecutor == nil {
+		http.Error(w, "merge executor is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", 500)
+		return
+	}
+	if status.ExecutorState != executorMergeApproved {
+		http.Error(w, "merge requires approved pull request", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", 500)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerging, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeApproved)
+	if err != nil {
+		http.Error(w, "could not start merge", 500)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "merge approval was already consumed", http.StatusConflict)
+		return
+	}
+	if err = a.deps.MergeExecutor.Merge(r.Context(), repo, status.PR.Number); err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeReady, err.Error(), time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging)
+		http.Error(w, fmt.Sprintf("pull request merge rejected: %v", err), http.StatusConflict)
+		return
+	}
+	if err = a.deps.MergeExecutor.CloseIssue(r.Context(), repo, status.PublishedIssue.Number); err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeReady, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging)
+		http.Error(w, fmt.Sprintf("issue closure failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging); err != nil {
+		http.Error(w, "could not record merged state", 500)
+		return
+	}
 	a.redirectWorkspace(w, r, id)
 }
 

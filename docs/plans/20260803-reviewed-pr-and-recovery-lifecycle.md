@@ -374,12 +374,12 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Create: `app/internal/live/merge_test.go`
 - Modify: `app/internal/dashboard/app.go` (`executorMerge` handler)
 
-- [ ] define `GHMergeExecutor` with injectable `Command`; `Merge` first queries `gh pr view --json state,mergedAt` and treats an already-merged PR as success (no duplicate `gh pr merge` call)
-- [ ] `CloseIssue` similarly queries issue state first and treats an already-closed issue as success
-- [ ] `executorMergeApproved` → `executorMerging` → `executorMerged`, calling `Merge` then `CloseIssue`; a merge rejection (e.g. required check still pending) transitions back to `executorMergeReady` with a surfaced reason, not `executorFailed`
-- [ ] write tests for: fresh merge, already-merged retry, merge rejection, issue-close retry
-- [ ] write a table-driven idempotency regression test: a simulated timed-out first `gh pr merge`/`gh issue close` attempt followed by a retry that queries first and does not double-mutate
-- [ ] run tests — must pass before task 10
+- [x] define `GHMergeExecutor` with injectable `Command`; `Merge` first queries `gh pr view --json state,mergedAt` and treats an already-merged PR as success (no duplicate `gh pr merge` call)
+- [x] `CloseIssue` similarly queries issue state first and treats an already-closed issue as success
+- [x] `executorMergeApproved` → `executorMerging` → `executorMerged`, calling `Merge` then `CloseIssue`; a merge rejection (e.g. required check still pending) transitions back to `executorMergeReady` with a surfaced reason, not `executorFailed`
+- [x] write tests for: fresh merge, already-merged retry, merge rejection, issue-close retry
+- [x] write a table-driven idempotency regression test: a simulated timed-out first `gh pr merge`/`gh issue close` attempt followed by a retry that queries first and does not double-mutate
+- [x] run tests — must pass before task 10
 
 ### Task 10: Safe clone cleanup and retention
 
