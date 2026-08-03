@@ -388,12 +388,12 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Modify: `app/internal/live/workspace.go` (retention helper if needed)
 - Modify: `app/internal/live/workspace_test.go`, `app/internal/dashboard/app_test.go`
 
-- [ ] after `executorMerged`, re-confirm merge via GitHub (`gh pr view --json mergedAt`) — never delete a clone from local state alone — then call `IssueWorkspace.Cleanup` and transition to `executorCleanupDone`
-- [ ] call `RunLease.Release` (Task 2) with `runStateCompleted` exactly once, at `executorCleanupDone`
-- [ ] add a configurable retention window (env-driven, e.g. `PM_FAILED_CLONE_RETENTION`) for `executorFailed`/cancelled clones — a cleanup pass removes clones past retention but always keeps the DB run record, artifacts, cost, and audit history
-- [ ] write tests for: cleanup only after confirmed merge (not before), `RunLease.Release` called exactly once, retention pass respecting the configured window
-- [ ] write a repository-scoped concurrency regression test: a second implementation cannot start for a repository whose lease is still held anywhere in the lifecycle (verifying/pr_created/reviewing/fixing/merge_ready/merge_approved/merging — not just `executorRunning`), the lease releases once `executorCleanupDone`/`executorFailed` is reached, and a different repository is unaffected throughout
-- [ ] run tests — must pass before task 11
+- [x] after `executorMerged`, re-confirm merge via GitHub (`gh pr view --json mergedAt`) — never delete a clone from local state alone — then call `IssueWorkspace.Cleanup` and transition to `executorCleanupDone`
+- [x] call `RunLease.Release` (Task 2) with `runStateCompleted` exactly once, at `executorCleanupDone`
+- [x] add a configurable retention window (env-driven, e.g. `PM_FAILED_CLONE_RETENTION`) for `executorFailed`/cancelled clones — a cleanup pass removes clones past retention but always keeps the DB run record, artifacts, cost, and audit history
+- [x] write tests for: cleanup only after confirmed merge (not before), `RunLease.Release` called exactly once, retention pass respecting the configured window
+- [x] write a repository-scoped concurrency regression test: a second implementation cannot start for a repository whose lease is still held anywhere in the lifecycle (verifying/pr_created/reviewing/fixing/merge_ready/merge_approved/merging — not just `executorRunning`), the lease releases once `executorCleanupDone`/`executorFailed` is reached, and a different repository is unaffected throughout
+- [x] run tests — must pass before task 11
 
 ### Task 11: Dashboard retry/cancel/cleanup controls
 

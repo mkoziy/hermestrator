@@ -98,6 +98,7 @@ type MergeabilityChecker interface {
 	CheckMergeable(context.Context, Repository, int) (bool, string, error)
 }
 type MergeExecutor interface {
+	ConfirmMerged(context.Context, Repository, int) error
 	Merge(context.Context, Repository, int) error
 	CloseIssue(context.Context, Repository, int) error
 }
@@ -491,6 +492,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
 	mux.HandleFunc("POST /repositories/{id}/executor/approve-merge", a.executorApproveMerge)
 	mux.HandleFunc("POST /repositories/{id}/executor/merge", a.executorMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/cleanup", a.executorCleanup)
 	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
@@ -2225,6 +2227,52 @@ func (a *application) executorMerge(w http.ResponseWriter, r *http.Request) {
 	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging); err != nil {
 		http.Error(w, "could not record merged state", 500)
 		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+// executorCleanup removes the implementation workspace only after GitHub
+// confirms that the pull request is merged. Local state is deliberately not
+// sufficient: a crash can leave it ahead of GitHub.
+func (a *application) executorCleanup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.MergeExecutor == nil || a.deps.IssueWorkspace == nil {
+		http.Error(w, "cleanup is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorMerged {
+		http.Error(w, "cleanup requires a merged pull request", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", http.StatusInternalServerError)
+		return
+	}
+	if err := a.deps.MergeExecutor.ConfirmMerged(r.Context(), repo, status.PR.Number); err != nil {
+		http.Error(w, fmt.Sprintf("pull request is not confirmed merged: %v", err), http.StatusConflict)
+		return
+	}
+	if err := a.deps.IssueWorkspace.Cleanup(r.Context(), status.ExecutorWorkspacePath); err != nil {
+		http.Error(w, fmt.Sprintf("cleanup workspace: %v", err), http.StatusInternalServerError)
+		return
+	}
+	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCleanupDone, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerged)
+	if err != nil {
+		http.Error(w, "could not record cleanup", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 1 && a.deps.RunLease != nil && status.RunID != "" {
+		if err := a.deps.RunLease.Release(a.ctx, status.RunID, "completed", ""); err != nil {
+			http.Error(w, "could not release implementation lease", http.StatusInternalServerError)
+			return
+		}
 	}
 	a.redirectWorkspace(w, r, id)
 }

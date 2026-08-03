@@ -49,6 +49,24 @@ func (e GHMergeExecutor) Merge(ctx context.Context, repo dashboard.Repository, n
 	return nil
 }
 
+func (e GHMergeExecutor) ConfirmMerged(ctx context.Context, repo dashboard.Repository, n int) error {
+	if repo.FullName == "" || n < 1 {
+		return fmt.Errorf("repository and pull request are required")
+	}
+	out, err := e.command(ctx, "gh", "pr", "view", fmt.Sprint(n), "--repo", repo.FullName, "--json", "state,mergedAt").Output()
+	if err != nil {
+		return fmt.Errorf("confirm pull request merge: %w", err)
+	}
+	var state mergeState
+	if err := json.Unmarshal(out, &state); err != nil {
+		return fmt.Errorf("decode pull request state: %w", err)
+	}
+	if !strings.EqualFold(state.State, "MERGED") && state.MergedAt == "" {
+		return fmt.Errorf("pull request is not merged")
+	}
+	return nil
+}
+
 func (e GHMergeExecutor) CloseIssue(ctx context.Context, repo dashboard.Repository, n int) error {
 	if repo.FullName == "" || n < 1 {
 		return fmt.Errorf("repository and issue are required")

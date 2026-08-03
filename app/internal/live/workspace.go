@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
@@ -22,6 +23,40 @@ import (
 type IssueWorkspace struct {
 	BaseDir string
 	Command func(context.Context, string, ...string) *exec.Cmd
+}
+
+// CleanupExpired removes only paths older than retention. Callers retain all
+// database records and artifacts; this is filesystem retention, not run
+// deletion.
+func (w IssueWorkspace) CleanupExpired(ctx context.Context, paths []string, retention time.Duration, now time.Time) error {
+	if retention < 0 {
+		return fmt.Errorf("retention window cannot be negative")
+	}
+	cutoff := now.Add(-retention)
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) || err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := w.Cleanup(ctx, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RetentionWindowFromEnv reads the failed-clone retention window. Invalid or
+// absent values use the supplied default so startup remains safe.
+func RetentionWindowFromEnv(defaultWindow time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv("PM_FAILED_CLONE_RETENTION"))
+	if value == "" {
+		return defaultWindow
+	}
+	window, err := time.ParseDuration(value)
+	if err != nil || window < 0 {
+		return defaultWindow
+	}
+	return window
 }
 
 var _ dashboard.IssueClone = IssueWorkspace{}
