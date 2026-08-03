@@ -30,7 +30,7 @@ func TestGHPRCreatorRetriesAfterTimedOutMutation(t *testing.T) {
 		case name == "gh" && strings.Contains(joined, "pr list"):
 			queries++
 			if created {
-				return exec.CommandContext(ctx, "printf", "%s", `[{"number":42,"url":"https://github.com/acme/repo/pull/42","state":"OPEN"}]`)
+				return exec.CommandContext(ctx, "printf", "%s", `[{"number":42,"url":"https://github.com/acme/repo/pull/42","state":"OPEN","body":"<!-- hermestrator-pr:9 -->"}]`)
 			}
 			return exec.CommandContext(ctx, "printf", "%s", "[]")
 		case name == "git" && strings.Contains(joined, "push"):

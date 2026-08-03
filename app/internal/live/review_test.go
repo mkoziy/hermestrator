@@ -124,3 +124,28 @@ func TestGHReviewerCombinesAxisFindings(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestGHReviewerRedactsReviewInputAndFindings(t *testing.T) {
+	secret := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	var prompts []string
+	command := func(_ context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) >= 2 && args[0] == "pr" {
+			return exec.Command("sh", "-c", "printf 'diff "+secret+"'")
+		}
+		return exec.Command("sh", "-c", "printf '{\"title\":\"issue\",\"body\":\"criteria "+secret+"\"}'")
+	}
+	model := func(_ context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "finding " + secret, nil
+	}
+	r := GHReviewer{Command: command, StandardsModel: model, SpecModel: model}
+	result, err := r.Review(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.PullRequest{Number: 4}, dashboard.IntakeStatus{PublishedIssue: dashboard.PublishedIssue{Number: 9}})
+	if err != nil || strings.Contains(result.Findings, secret) || !strings.Contains(result.Findings, "[redacted]") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, prompt := range prompts {
+		if strings.Contains(prompt, secret) {
+			t.Fatalf("model prompt leaked secret: %q", prompt)
+		}
+	}
+}

@@ -239,6 +239,7 @@ type IntakeStatus struct {
 	RunID                 string
 	ReviewRound           int
 	ReviewFindings        string
+	RetryState            executorState
 	PR                    PullRequest
 	VerificationOutput    string
 }
@@ -466,6 +467,10 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "retry_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err = recoverDuplicatePendingTurns(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -474,7 +479,7 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "reviewing"}}<p>State: reviewing pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel review</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merging"}}<p>State: merging pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel merge</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-review"><button class="btn btn-outline-primary">Retry pull request review</button></form>{{else if .Intake.ExecutorCompleted}}`
+	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "reviewing"}}<p>State: reviewing pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel review</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merging"}}<p>State: merging pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel merge</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}{{if eq .Intake.RetryState "creating_pr"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-pr"><button class="btn btn-outline-primary">Retry pull request creation</button></form>{{else if eq .Intake.RetryState "reviewing"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-review"><button class="btn btn-outline-primary">Retry pull request review</button></form>{{else if eq .Intake.RetryState "merging"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-merge"><button class="btn btn-outline-primary">Request merge approval again</button></form>{{end}}{{else if .Intake.ExecutorCompleted}}`
 	t, err := template.New("page").Parse(strings.Replace(pageTemplate, `{{else if .Intake.ExecutorCompleted}}`, executorControls, 1))
 	if err != nil {
 		_ = db.Close()
@@ -530,7 +535,7 @@ func New(deps Dependencies) (*application, error) {
 // authority for PR state; the lease scan is intentionally independent so a
 // crash before run_id was persisted is recoverable too.
 func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','merged','failed','cleanup_done')`)
+	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('planning','running','verifying','creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','merged','failed','cleanup_done')`)
 	if err != nil {
 		return fmt.Errorf("startup reconciliation: query intakes: %w", err)
 	}
@@ -549,12 +554,12 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 			_ = a.deps.RunLease.Release(ctx, runID, leaseState, "startup terminal reconciliation")
 			continue
 		}
-		if state == string(executorCreatingPR) {
-			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR); err != nil {
+		if state == string(executorPlanning) || state == string(executorRunning) || state == string(executorVerifying) || state == string(executorCreatingPR) {
+			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, state, time.Now().UTC().Format(time.RFC3339Nano), id, state); err != nil {
 				return err
 			}
 			if runID != "" && a.deps.RunLease != nil {
-				_ = a.deps.RunLease.Release(ctx, runID, string(executorFailed), "startup recovery during pull request creation")
+				_ = a.deps.RunLease.Release(ctx, runID, string(executorFailed), "startup recovery during interrupted executor phase")
 			}
 			continue
 		}
@@ -573,10 +578,12 @@ func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) e
 			next = executorFailed
 		case "OPEN":
 			switch next {
-			case executorPRCreated, executorReviewing:
-				next = executorReviewing
+			case executorReviewing:
+				next = executorPRCreated
 			case executorFixing:
 				next = executorReviewBlocked
+			case executorMerging:
+				next = executorMergeReady
 			}
 		}
 		if next != executorState(state) {
@@ -1810,10 +1817,16 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 	}
 	selection := SelectExecutor("medium", "", priorFailures)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,updated_at=excluded.updated_at`,
-		id, "", string(selection.Kind), selection.Rationale, string(executorSelected), now); err != nil {
+	result, err := a.db.ExecContext(r.Context(),
+		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,retry_state='',updated_at=excluded.updated_at WHERE intakes.executor_state IN ('','selected','failed','cleanup_done')`,
+		id, "", string(selection.Kind), selection.Rationale, string(executorSelected), now)
+	if err != nil {
 		http.Error(w, "could not store executor selection", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor selection requires a terminal lifecycle state", http.StatusConflict)
 		return
 	}
 	a.redirectWorkspace(w, r, id)
@@ -2258,24 +2271,25 @@ func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := a.deps.Reviewer.Review(r.Context(), repo, status.PR, status)
 	if err != nil {
-		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
 		a.releaseLease(r.Context(), status, "review failed")
 		http.Error(w, "review failed", http.StatusBadGateway)
 		return
 	}
+	findings := redactSecrets(result.Findings)
 	state := executorMergeReady
 	if !result.Approved || result.Blocked {
 		state = executorReviewBlocked
 		if a.deps.ReviewCommenter != nil {
-			if err := a.deps.ReviewCommenter.PostFindings(r.Context(), repo, status.PR, result.Findings, status.ReviewRound); err != nil {
-				_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
+			if err := a.deps.ReviewCommenter.PostFindings(r.Context(), repo, status.PR, findings, status.ReviewRound); err != nil {
+				_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
 				a.releaseLease(r.Context(), status, "publish review findings failed")
 				http.Error(w, "could not publish review findings", http.StatusBadGateway)
 				return
 			}
 		}
 	}
-	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, result.Findings, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing); err != nil {
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, findings, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing); err != nil {
 		http.Error(w, "could not persist review", 500)
 		return
 	}
@@ -2592,7 +2606,7 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status.ExecutorState == executorReviewing || status.ExecutorState == executorMerging {
-		result, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing, executorMerging)
+		result, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state=executor_state,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing, executorMerging)
 		if updateErr != nil {
 			http.Error(w, "could not cancel executor phase", http.StatusInternalServerError)
 			return
@@ -2629,46 +2643,39 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 // Retry endpoints only rewind the failed phase's own state. The phase handler
 // then performs its normal idempotent GitHub query before mutating anything.
 func (a *application) executorRetryPR(w http.ResponseWriter, r *http.Request) {
-	a.retryPhase(w, r, executorVerified, executorPRCreated)
+	a.retryPhase(w, r, executorCreatingPR, executorVerified, executorPRCreated)
 }
 
 func (a *application) executorRetryReview(w http.ResponseWriter, r *http.Request) {
-	a.retryPhase(w, r, executorPRCreated, executorReviewing)
+	a.retryPhase(w, r, executorReviewing, executorPRCreated, executorReviewing)
 }
 
 func (a *application) executorRetryMerge(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeReady)
-	if err != nil {
-		http.Error(w, "could not retry merge", http.StatusInternalServerError)
-		return
-	}
-	changed, _ := result.RowsAffected()
-	if changed != 1 {
-		http.Error(w, "merge retry requires a merge-ready intake", http.StatusConflict)
-		return
-	}
-	a.executorMerge(w, r)
+	a.retryPhase(w, r, executorMerging, executorMergeReady, executorMergeReady)
 }
 
 func (a *application) executorRetryCleanup(w http.ResponseWriter, r *http.Request) {
 	a.executorCleanup(w, r)
 }
 
-func (a *application) retryPhase(w http.ResponseWriter, r *http.Request, from, to executorState) {
+func (a *application) retryPhase(w http.ResponseWriter, r *http.Request, failedPhase, from, to executorState) {
 	id := r.PathValue("id")
-	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, from, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed)
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state='',updated_at=? WHERE repository_id=? AND executor_state=? AND retry_state=?`, from, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed, failedPhase)
 	if err != nil {
 		http.Error(w, "could not retry executor phase", http.StatusInternalServerError)
 		return
 	}
 	changed, _ := result.RowsAffected()
 	if changed != 1 {
-		http.Error(w, "retry requires a failed phase", http.StatusConflict)
+		http.Error(w, "retry requires this failed phase", http.StatusConflict)
 		return
 	}
 	if to == executorPRCreated {
 		a.executorCreatePR(w, r)
+		return
+	}
+	if to == executorMergeReady {
+		a.redirectWorkspace(w, r, id)
 		return
 	}
 	a.executorReview(w, r)
@@ -2961,7 +2968,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var cancelledInt int
 	var prNumber int
 	var prURL string
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState)
 	status.ExecutorState = executorState(executorStateStr)
 	status.PR = PullRequest{Number: prNumber, URL: prURL, State: "open"}
 	_ = a.db.QueryRowContext(ctx, `SELECT body FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, artifactVerificationOutput).Scan(&status.VerificationOutput)

@@ -1109,6 +1109,45 @@ func TestExecutorRetryEndpointsAreSafeToRepeatThroughHandler(t *testing.T) {
 	}
 }
 
+func TestExecutorRetryRequiresMatchingFailedPhase(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='failed',retry_state='reviewing' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/retry-pr", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want conflict", response.Code)
+	}
+}
+
+func TestExecutorSelectionDoesNotResetActiveLifecycle(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='reviewing',executor_kind='codex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want conflict", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorReviewing || status.ExecutorKind != "codex" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
 func TestFixingStateRecoversAtStartupWithoutReplayingFix(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
 	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
@@ -1135,6 +1174,34 @@ func TestFixingStateRecoversAtStartupWithoutReplayingFix(t *testing.T) {
 	status, err := restarted.intakeStatus(context.Background(), "42")
 	if err != nil || status.ExecutorState != executorReviewBlocked {
 		t.Fatalf("recovered state=%q err=%v, want review_blocked for safe fix retry", status.ExecutorState, err)
+	}
+}
+
+func TestReconcileStartupReturnsInterruptedPRPhasesToActionableStates(t *testing.T) {
+	for from, want := range map[executorState]executorState{
+		executorReviewing: executorPRCreated,
+		executorMerging:   executorMergeReady,
+	} {
+		t.Run(string(from), func(t *testing.T) {
+			database := t.TempDir() + "/pm.db"
+			deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+			app := mustApp(t, deps)
+			a, ok := app.(*application)
+			if !ok {
+				t.Fatal("mustApp returned unexpected handler type")
+			}
+			setupExecutorRun(t, app)
+			if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,pr_number=7 WHERE repository_id='42'`, from); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.ReconcileStartup(context.Background(), startupPRState{state: "OPEN"}); err != nil {
+				t.Fatal(err)
+			}
+			status, err := a.intakeStatus(context.Background(), "42")
+			if err != nil || status.ExecutorState != want {
+				t.Fatalf("state=%q err=%v, want %q", status.ExecutorState, err, want)
+			}
+		})
 	}
 }
 

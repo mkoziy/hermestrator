@@ -73,9 +73,6 @@ func main() {
 	if err := app.ReconcileStartup(ctx, live.GHPRCreator{}); err != nil {
 		log.Printf("startup PR reconciliation: %v", err)
 	}
-	if err := live.RecoverLocks(ctx, runStore, live.WorkspaceClassifier{}, issueWorkspaceBase, nil); err != nil {
-		log.Printf("startup implementation-run recovery: %v", err)
-	}
 	if err := app.CleanupExpiredFailedWorkspaces(ctx, live.RetentionWindowFromEnv(7*24*time.Hour)); err != nil {
 		log.Printf("failed workspace retention: %v", err)
 	}

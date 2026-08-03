@@ -10,6 +10,7 @@ import (
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/mkoziy/hermestrator/internal/dashboard"
+	"github.com/mkoziy/hermestrator/internal/redaction"
 	"github.com/openai/openai-go"
 )
 
@@ -116,7 +117,7 @@ func (r GHReviewer) Review(ctx context.Context, repo dashboard.Repository, pr da
 	if err := json.Unmarshal(issue, &issueData); err != nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("decode issue: %w", err)
 	}
-	input := fmt.Sprintf("Repository: %s\nIssue: %s\n%s\nVerification output:\n%s\nFull diff:\n%s", repo.FullName, issueData.Title, issueData.Body, status.VerificationOutput, diff)
+	input := fmt.Sprintf("Repository: %s\nIssue: %s\n%s\nVerification output:\n%s\nFull diff:\n%s", repo.FullName, redaction.Secrets(issueData.Title), redaction.Secrets(issueData.Body), redaction.Secrets(status.VerificationOutput), redaction.Secrets(string(diff)))
 	if r.StandardsModel == nil || r.SpecModel == nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("review models are not configured")
 	}
@@ -130,10 +131,10 @@ func (r GHReviewer) Review(ctx context.Context, repo dashboard.Repository, pr da
 	}
 	findings := []string{}
 	if !approved(standards) {
-		findings = append(findings, "Standards findings:\n"+strings.TrimSpace(standards))
+		findings = append(findings, "Standards findings:\n"+redaction.Secrets(strings.TrimSpace(standards)))
 	}
 	if !approved(spec) {
-		findings = append(findings, "Spec findings:\n"+strings.TrimSpace(spec))
+		findings = append(findings, "Spec findings:\n"+redaction.Secrets(strings.TrimSpace(spec)))
 	}
 	return dashboard.ReviewResult{Approved: len(findings) == 0, Findings: strings.Join(findings, "\n\n")}, nil
 }

@@ -110,7 +110,7 @@ func (p GHPRCreator) CreateOrReuse(ctx context.Context, repo dashboard.Repositor
 		}
 	}
 	if len(prs) > 0 {
-		return prs[0].PullRequest, nil
+		return dashboard.PullRequest{}, fmt.Errorf("existing pull request on branch %q does not belong to issue #%d", branch, status.PublishedIssue.Number)
 	}
 	if output, err := command(ctx, "git", "-C", status.ExecutorWorkspacePath, "push", "-u", "origin", branch).CombinedOutput(); err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("push workspace branch: %w: %s", err, strings.TrimSpace(string(output)))
