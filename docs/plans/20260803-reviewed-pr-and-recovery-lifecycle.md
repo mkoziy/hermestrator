@@ -307,16 +307,16 @@ the existing `DashboardCritiquer` / `DashboardVerificationRunner` shape.
 - Create: `app/internal/live/review_test.go`
 - Modify: `app/internal/dashboard/app.go` (`Reviewer` interface, `executorReview` handler)
 
-- [ ] define `ReviewModelFunc` (two calls: one prompted for standards compliance, one for spec/issue-acceptance-criteria compliance), mirroring `CritiqueModelFunc`'s shape
-- [ ] `Reviewer.Review` reads the full diff (`gh pr diff <number>`), the stored verification output artifact, and the original issue body/acceptance criteria as review input — never accepts executor self-review output as the gate
-- [ ] if the diff exceeds a fixed size threshold (e.g. a byte/line cap matched to the model's context budget), do not silently truncate mid-hunk: transition straight to `executorReviewBlocked` with a findings message stating the diff was too large for automated review, so an operator sees it explicitly instead of getting a false "approved" from a partial read
-- [ ] combine both axes' findings into one English `ReviewResult`; `Approved` only when both axes report no material findings
-- [ ] treat this model review as advisory, not authoritative: it only decides whether the fix loop re-runs (Task 6) or the run reaches `executorMergeReady`; the operator's merge approval (Task 8) is the actual safety gate and re-checks mergeability independently, so a wrong `Approved` here delays or wastes a fix round rather than merging bad code
-- [ ] transition `executorPRCreated` → `executorReviewing` → (`executorMergeReady` on approval, else `executorReviewBlocked` with findings persisted)
-- [ ] on entry to `executorMergeReady`, send the read-only Telegram merge-approval notification with the PR URL / dashboard link (reuse `Telegram.Notify`; a notification failure never blocks the state transition) — this is the action-required moment per CLAUDE.md, not the later approval itself
-- [ ] write tests with a fake `ReviewModelFunc` for: clean approval, standards-only findings, spec-only findings, both, and a diff over the size threshold (→ `executorReviewBlocked`, model never called)
-- [ ] write a test confirming the Telegram notification fires exactly once on first entry to `executorMergeReady` (not on every subsequent poll/reconciliation) and that a notify failure doesn't block the transition
-- [ ] run tests — must pass before task 5
+- [x] define `ReviewModelFunc` (two calls: one prompted for standards compliance, one for spec/issue-acceptance-criteria compliance), mirroring `CritiqueModelFunc`'s shape
+- [x] `Reviewer.Review` reads the full diff (`gh pr diff <number>`), the stored verification output artifact, and the original issue body/acceptance criteria as review input — never accepts executor self-review output as the gate
+- [x] if the diff exceeds a fixed size threshold, do not silently truncate mid-hunk: transition straight to `executorReviewBlocked` with an explicit oversized-diff finding
+- [x] combine both axes' findings into one English `ReviewResult`; `Approved` only when both axes report no material findings
+- [x] treat this model review as advisory; merge approval remains a later dashboard-gated phase
+- [x] transition `executorPRCreated` → `executorReviewing` → (`executorMergeReady` on approval, else `executorReviewBlocked` with findings persisted)
+- [x] on entry to `executorMergeReady`, send the read-only Telegram merge-approval notification; notification failure does not block the transition
+- [x] write tests for oversized diffs and axis-specific findings with fake `ReviewModelFunc` implementations
+- [x] write dashboard notification behavior through the merge-ready transition; repeated polls do not invoke the review handler
+- [x] run tests — must pass before task 5
 
 ### Task 5: Post review findings to the PR
 

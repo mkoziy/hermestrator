@@ -86,6 +86,14 @@ type PullRequest struct {
 type PRCreator interface {
 	CreateOrReuse(context.Context, Repository, IntakeStatus) (PullRequest, error)
 }
+type ReviewResult struct {
+	Approved bool
+	Findings string
+	Blocked  bool
+}
+type Reviewer interface {
+	Review(context.Context, Repository, PullRequest, IntakeStatus) (ReviewResult, error)
+}
 
 // Publisher owns the only tracker mutation available in the intake slice.
 // Implementations must not publish an unconfirmed draft.
@@ -175,16 +183,19 @@ const (
 type executorState string
 
 const (
-	executorSelected  executorState = "selected"
-	executorPlanning  executorState = "planning"
-	executorPlanned   executorState = "planned"
-	executorApproved  executorState = "approved"
-	executorRunning   executorState = "running"
-	executorCompleted executorState = "completed"
-	executorVerifying executorState = "verifying"
-	executorVerified  executorState = "verified"
-	executorPRCreated executorState = "pr_created"
-	executorFailed    executorState = "failed"
+	executorSelected      executorState = "selected"
+	executorPlanning      executorState = "planning"
+	executorPlanned       executorState = "planned"
+	executorApproved      executorState = "approved"
+	executorRunning       executorState = "running"
+	executorCompleted     executorState = "completed"
+	executorVerifying     executorState = "verifying"
+	executorVerified      executorState = "verified"
+	executorPRCreated     executorState = "pr_created"
+	executorReviewing     executorState = "reviewing"
+	executorReviewBlocked executorState = "review_blocked"
+	executorMergeReady    executorState = "merge_ready"
+	executorFailed        executorState = "failed"
 )
 
 type IntakeStatus struct {
@@ -206,6 +217,7 @@ type IntakeStatus struct {
 	ExecutorWorkspacePath string
 	RunID                 string
 	PR                    PullRequest
+	VerificationOutput    string
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -269,6 +281,7 @@ type Dependencies struct {
 	VerificationRunner        VerificationRunner
 	RunLease                  RunLease
 	PRCreator                 PRCreator
+	Reviewer                  Reviewer
 	RalphexExecutionConfigDir string
 }
 
@@ -404,6 +417,9 @@ func New(deps Dependencies) (*application, error) {
 	if err = addColumnIfMissing(db, "intakes", "pr_number", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "review_findings", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("add review findings column: %w", err)
+	}
 	if err = addColumnIfMissing(db, "intakes", "pr_url", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -450,6 +466,7 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/approve", a.executorApprove)
 	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
 	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
+	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
@@ -2004,6 +2021,50 @@ func (a *application) executorCreatePR(w http.ResponseWriter, r *http.Request) {
 	a.redirectWorkspace(w, r, id)
 }
 
+func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.Reviewer == nil {
+		http.Error(w, "reviewer is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", 500)
+		return
+	}
+	if status.ExecutorState != executorPRCreated {
+		http.Error(w, "review requires a created pull request", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", 500)
+		return
+	}
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated); err != nil {
+		http.Error(w, "could not start review", 500)
+		return
+	}
+	result, err := a.deps.Reviewer.Review(r.Context(), repo, status.PR, status)
+	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
+		http.Error(w, "review failed", http.StatusBadGateway)
+		return
+	}
+	state := executorMergeReady
+	if !result.Approved || result.Blocked {
+		state = executorReviewBlocked
+	}
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, result.Findings, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing); err != nil {
+		http.Error(w, "could not persist review", 500)
+		return
+	}
+	if state == executorMergeReady && a.deps.Telegram != nil {
+		_ = a.deps.Telegram.Notify(r.Context(), Notification{Text: "Pull request is ready for merge approval", URL: strings.TrimRight(a.deps.DashboardURL, "/") + "/repositories/" + id})
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
 // executorWorkspace returns the durable clone for an implementation issue,
 // creating it exactly once before planning or verification. Intake clones are
 // deliberately never reused for executor work.
@@ -2397,6 +2458,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL)
 	status.ExecutorState = executorState(executorStateStr)
 	status.PR = PullRequest{Number: prNumber, URL: prURL, State: "open"}
+	_ = a.db.QueryRowContext(ctx, `SELECT body FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, artifactExecutorOutput).Scan(&status.VerificationOutput)
 	status.ExecutorDuration = time.Duration(durationNs)
 	status.ExecutorCancelled = cancelledInt != 0
 	status.ExecutorCompleted = status.ExecutorState == executorCompleted || status.ExecutorState == executorFailed
