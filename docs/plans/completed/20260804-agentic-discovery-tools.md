@@ -162,7 +162,7 @@ Includes the `main.go` caller update in the same task as the `NewOpenRouterModel
 - [x] verify a turn cannot exceed `MaxDiscoveryToolCalls` calls and degrades gracefully instead of erroring (covered by `TestDiscoveryToolCallCapsTurn`)
 - [x] verify tool results are redacted before reaching the model (covered by `TestDiscoveryToolResultRedactsSecrets` and tool wrappers)
 - [x] verify the system prompt keeps tool usage scoped to discovery, not code review (prompt inspection and existing discovery agent wiring confirm this)
-- [x] run full test suite: `make check` (from `app/`) — passes
+- [x] run full test suite: `make check` (from the repository root) — passes
 
 ### Task 7: Update documentation
 
