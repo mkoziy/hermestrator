@@ -38,6 +38,44 @@ func (p DashboardPreflight) Verify(ctx context.Context, workspacePath, expectedR
 
 type DashboardVerificationRunner struct{ Runner *VerificationRunner }
 
+type DashboardRunLease struct{ Store *ImplementationRunStore }
+
+func (l DashboardRunLease) Acquire(ctx context.Context, repositoryID string, issueNumber int, kind dashboard.ExecutorKind) (string, error) {
+	if l.Store == nil {
+		return "", fmt.Errorf("implementation run store is not configured")
+	}
+	return l.Store.Acquire(ctx, repositoryID, issueNumber, kind)
+}
+
+func (l DashboardRunLease) Release(ctx context.Context, runID, state, reason string) error {
+	if l.Store == nil {
+		return fmt.Errorf("implementation run store is not configured")
+	}
+	return l.Store.Release(ctx, runID, state, reason)
+}
+
+func (l DashboardRunLease) RecentFailures(ctx context.Context, repositoryID string, limit int) ([]dashboard.FailureRecord, error) {
+	if l.Store == nil {
+		return nil, fmt.Errorf("implementation run store is not configured")
+	}
+	return l.Store.RecentFailures(ctx, repositoryID, limit)
+}
+
+func (l DashboardRunLease) ListActive(ctx context.Context) ([]dashboard.ActiveRun, error) {
+	if l.Store == nil {
+		return nil, fmt.Errorf("implementation run store is not configured")
+	}
+	runs, err := l.Store.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]dashboard.ActiveRun, len(runs))
+	for i, run := range runs {
+		result[i] = dashboard.ActiveRun{RunID: run.RunID}
+	}
+	return result, nil
+}
+
 func (v DashboardVerificationRunner) Run(ctx context.Context, workspacePath string, checks []dashboard.CheckSpec) (dashboard.VerificationResult, error) {
 	runner := v.Runner
 	if runner == nil {
@@ -64,4 +102,5 @@ var (
 	_ dashboard.Critiquer          = DashboardCritiquer{}
 	_ dashboard.Preflight          = DashboardPreflight{}
 	_ dashboard.VerificationRunner = DashboardVerificationRunner{}
+	_ dashboard.RunLease           = DashboardRunLease{}
 )

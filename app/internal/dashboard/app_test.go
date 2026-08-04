@@ -99,9 +99,33 @@ type fakeExecutorRunner struct {
 	cancelled bool
 }
 
+type fakeRunLease struct {
+	acquires   int
+	released   int
+	failures   []FailureRecord
+	err        error
+	releaseErr error
+}
+
+func (l *fakeRunLease) Acquire(context.Context, string, int, ExecutorKind) (string, error) {
+	l.acquires++
+	if l.err != nil {
+		return "", l.err
+	}
+	return "run-1", nil
+}
+func (l *fakeRunLease) Release(context.Context, string, string, string) error {
+	l.released++
+	return l.releaseErr
+}
+func (l *fakeRunLease) RecentFailures(context.Context, string, int) ([]FailureRecord, error) {
+	return l.failures, nil
+}
+
 type fakeIssueWorkspace struct {
-	path   string
-	starts int
+	path     string
+	starts   int
+	cleanups int
 }
 
 func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (string, error) {
@@ -109,7 +133,7 @@ func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (stri
 	return f.path, nil
 }
 
-func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { return nil }
+func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { f.cleanups++; return nil }
 
 type fakePlanner struct{ workspace string }
 
@@ -118,11 +142,56 @@ func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ Execut
 	return "# Plan: test\n\n### Task 1: test", nil
 }
 
-type fakeVerificationRunner struct{ calls int }
+type fakeVerificationRunner struct {
+	calls int
+	ready bool
+	fail  bool
+	err   error
+}
+
+type fakeMergeabilityChecker struct {
+	mergeable bool
+	reason    string
+	calls     int
+}
+
+type fakeReviewer struct {
+	result ReviewResult
+	err    error
+}
+
+func (r fakeReviewer) Review(context.Context, Repository, PullRequest, IntakeStatus) (ReviewResult, error) {
+	return r.result, r.err
+}
+
+type endToEndMergeExecutor struct {
+	mergeCalls int
+	closeCalls int
+	mergeErr   error
+	confirmErr error
+	closeErr   error
+}
+
+func (m *endToEndMergeExecutor) ConfirmMerged(context.Context, Repository, int) error {
+	return m.confirmErr
+}
+func (m *endToEndMergeExecutor) Merge(context.Context, Repository, int) error {
+	m.mergeCalls++
+	return m.mergeErr
+}
+func (m *endToEndMergeExecutor) CloseIssue(context.Context, Repository, int) error {
+	m.closeCalls++
+	return m.closeErr
+}
+
+func (f *fakeMergeabilityChecker) CheckMergeable(context.Context, Repository, int) (bool, string, error) {
+	f.calls++
+	return f.mergeable, f.reason, nil
+}
 
 func (f *fakeVerificationRunner) Run(context.Context, string, []CheckSpec) (VerificationResult, error) {
 	f.calls++
-	return VerificationResult{ReadyForPR: true}, nil
+	return VerificationResult{ReadyForPR: f.ready || !f.fail}, f.err
 }
 
 func (f *fakeExecutorRunner) Run(_ context.Context, _ string, onLine func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
@@ -155,6 +224,17 @@ func (h *hangExecutorRunner) Run(ctx context.Context, _ string, onLine func(stri
 	}
 	<-ctx.Done()
 	return ExecutorRunResult{ExitCode: -1, Duration: time.Since(start), Cancelled: true}, nil
+}
+
+type blockingExecutorRunner struct {
+	started chan context.Context
+	release chan struct{}
+}
+
+func (b *blockingExecutorRunner) Run(ctx context.Context, _ string, _ func(string) error, _ string, _ ...string) (ExecutorRunResult, error) {
+	b.started <- ctx
+	<-b.release
+	return ExecutorRunResult{}, nil
 }
 
 type fakePublisher struct {
@@ -942,11 +1022,444 @@ func TestNonHTMXConversationPostRedirectsToWorkspace(t *testing.T) {
 	}
 }
 
+func TestApproveMergeChecksFreshMergeability(t *testing.T) {
+	checker := &fakeMergeabilityChecker{mergeable: true}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeabilityChecker: checker})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := executorApp.db.Exec(`UPDATE intakes SET executor_state='merge_ready',pr_number=17,pr_url='https://github.com/acme/repo/pull/17' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/approve-merge", "", "michael")
+	if response.Code != http.StatusSeeOther || checker.calls != 1 {
+		t.Fatalf("response=%d calls=%d", response.Code, checker.calls)
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeApproved {
+		t.Fatalf("state=%q err=%v", status.ExecutorState, err)
+	}
+}
+
+func TestApproveMergeRejectsFreshConflict(t *testing.T) {
+	checker := &fakeMergeabilityChecker{reason: "GitHub merge state is dirty"}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeabilityChecker: checker})
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := executorApp.db.Exec(`UPDATE intakes SET executor_state='merge_ready',pr_number=17 WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/approve-merge", "", "michael")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "dirty") {
+		t.Fatalf("response=%d body=%q", response.Code, response.Body.String())
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeReady {
+		t.Fatalf("state=%q err=%v", status.ExecutorState, err)
+	}
+}
+
 func TestProtectedRoutesRejectUnapprovedOperator(t *testing.T) {
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
 	response := request(t, app, http.MethodGet, "/repositories", "", "stranger")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestExecutorCancelMarksReviewAndMergePhasesFailed(t *testing.T) {
+	for _, state := range []executorState{executorReviewing, executorMerging} {
+		t.Run(string(state), func(t *testing.T) {
+			app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+			a, ok := app.(*application)
+			if !ok {
+				t.Fatal("mustApp returned unexpected handler type")
+			}
+			_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+			_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+			_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+			if _, err := a.db.Exec(`UPDATE intakes SET executor_state=? WHERE repository_id='42'`, state); err != nil {
+				t.Fatal(err)
+			}
+			response := request(t, app, http.MethodPost, "/repositories/42/executor/cancel", "", "michael")
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("status=%d", response.Code)
+			}
+			status, err := a.intakeStatus(context.Background(), "42")
+			if err != nil || status.ExecutorState != executorFailed {
+				t.Fatalf("state=%q err=%v", status.ExecutorState, err)
+			}
+		})
+	}
+}
+
+func TestExecutorRetryEndpointsRequireTheirPhase(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	for _, endpoint := range []string{"retry-pr", "retry-review", "retry-merge", "retry-cleanup"} {
+		response := request(t, app, http.MethodPost, "/repositories/42/executor/"+endpoint, "", "michael")
+		if response.Code != http.StatusConflict && response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d", endpoint, response.Code)
+		}
+	}
+}
+
+func TestExecutorRetryEndpointsAreSafeToRepeatThroughHandler(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	for _, endpoint := range []string{"retry-pr", "retry-review", "retry-merge", "retry-cleanup"} {
+		if _, err := a.db.Exec(`UPDATE intakes SET executor_state='failed' WHERE repository_id='42'`); err != nil {
+			t.Fatal(err)
+		}
+		first := request(t, app, http.MethodPost, "/repositories/42/executor/"+endpoint, "", "michael")
+		second := request(t, app, http.MethodPost, "/repositories/42/executor/"+endpoint, "", "michael")
+		if first.Code == http.StatusOK || second.Code == http.StatusOK {
+			t.Fatalf("%s unexpectedly returned success without its dependency: %d, %d", endpoint, first.Code, second.Code)
+		}
+		if second.Code != http.StatusConflict && second.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s repeat status=%d", endpoint, second.Code)
+		}
+	}
+}
+
+func TestExecutorRetryReviewReacquiresLease(t *testing.T) {
+	lease := &fakeRunLease{}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:        fakeModel{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+		RunLease:     lease,
+		Reviewer:     fakeReviewer{result: ReviewResult{Approved: true}},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if result, err := a.db.Exec(`UPDATE intakes SET executor_state='failed',retry_state='reviewing',issue_number=7,executor_kind='codex',pr_number=11 WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	} else if changed, _ := result.RowsAffected(); changed != 1 {
+		t.Fatalf("updated %d intakes, want 1", changed)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/retry-review", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("retry status=%d body=%q", response.Code, response.Body.String())
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMergeReady || lease.acquires != 1 || status.RunID != "run-1" {
+		t.Fatalf("state=%q run=%q acquires=%d err=%v", status.ExecutorState, status.RunID, lease.acquires, err)
+	}
+}
+
+func TestCleanupLeaseFailureLeavesCleanupRetryable(t *testing.T) {
+	lease := &fakeRunLease{releaseErr: errors.New("lease store unavailable")}
+	merge := &endToEndMergeExecutor{}
+	clone := &fakeIssueWorkspace{}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		RunLease:       lease,
+		MergeExecutor:  merge,
+		IssueWorkspace: clone,
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if result, err := a.db.Exec(`UPDATE intakes SET executor_state='merged',issue_number=7,pr_number=11,run_id='run-1' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	} else if changed, _ := result.RowsAffected(); changed != 1 {
+		t.Fatalf("updated %d intakes, want 1", changed)
+	}
+	if err := a.cleanupMerged(context.Background(), "42"); err == nil {
+		t.Fatal("cleanup succeeded despite a lease-release failure")
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMerged || lease.released != 1 {
+		t.Fatalf("state=%q releases=%d err=%v", status.ExecutorState, lease.released, err)
+	}
+}
+
+func TestExecutorRetryRequiresMatchingFailedPhase(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='failed',retry_state='reviewing' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/retry-pr", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want conflict", response.Code)
+	}
+}
+
+func TestExecutorSelectionDoesNotResetActiveLifecycle(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='reviewing',executor_kind='codex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want conflict", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorReviewing || status.ExecutorKind != "codex" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestFixingStateRecoversAtStartupWithoutReplayingFix(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+	app := mustApp(t, deps)
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='fixing',pr_number=7,run_id='run-1' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	if err := restarted.ReconcileStartup(context.Background(), startupPRState{state: "OPEN"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := restarted.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		t.Fatalf("recovered state=%q err=%v, want review_blocked for safe fix retry", status.ExecutorState, err)
+	}
+}
+
+func TestReconcileStartupReturnsInterruptedPRPhasesToActionableStates(t *testing.T) {
+	for from, want := range map[executorState]executorState{
+		executorReviewing: executorPRCreated,
+		executorMerging:   executorMergeReady,
+	} {
+		t.Run(string(from), func(t *testing.T) {
+			database := t.TempDir() + "/pm.db"
+			deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: database, AllowedUsers: map[string]bool{"michael": true}}
+			app := mustApp(t, deps)
+			a, ok := app.(*application)
+			if !ok {
+				t.Fatal("mustApp returned unexpected handler type")
+			}
+			setupExecutorRun(t, app)
+			if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,pr_number=7 WHERE repository_id='42'`, from); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.ReconcileStartup(context.Background(), startupPRState{state: "OPEN"}); err != nil {
+				t.Fatal(err)
+			}
+			status, err := a.intakeStatus(context.Background(), "42")
+			if err != nil || status.ExecutorState != want {
+				t.Fatalf("state=%q err=%v, want %q", status.ExecutorState, err, want)
+			}
+		})
+	}
+}
+
+func TestExecutorFixRejectsUnsupportedKindWithoutClaimingState(t *testing.T) {
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='review_blocked',executor_kind='verification_only' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/fix", "", "michael")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want bad request", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		t.Fatalf("state=%q err=%v, want review_blocked", status.ExecutorState, err)
+	}
+}
+
+func TestExecutorFixOutlivesRequestCancellation(t *testing.T) {
+	runner := &blockingExecutorRunner{started: make(chan context.Context, 1), release: make(chan struct{})}
+	app := mustApp(t, Dependencies{
+		GitHub:         fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:          fakeModel{},
+		Store:          t.TempDir() + "/pm.db",
+		AllowedUsers:   map[string]bool{"michael": true},
+		ExecutorRunner: runner,
+		VerificationRunner: &fakeVerificationRunner{
+			ready: true,
+		},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	workspace := t.TempDir()
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,executor_kind=?,executor_workspace_path=?,review_findings=? WHERE repository_id=?`, executorReviewBlocked, Codex, workspace, "fix this", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/repositories/42/executor/fix", nil).WithContext(ctx)
+	request.Header.Set("X-PM-User", "michael")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		app.ServeHTTP(response, request)
+		close(done)
+	}()
+
+	runCtx := <-runner.started
+	cancel()
+	select {
+	case <-runCtx.Done():
+		t.Fatal("review fix run context was cancelled with the request")
+	default:
+	}
+	close(runner.release)
+	<-done
+
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status=%d, want redirect", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorPRCreated {
+		t.Fatalf("state=%q err=%v, want pr_created", status.ExecutorState, err)
+	}
+}
+
+func TestExecutorFixKeepsFailedPostFixVerificationOutOfReview(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:             fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:              fakeModel{},
+		Store:              t.TempDir() + "/pm.db",
+		AllowedUsers:       map[string]bool{"michael": true},
+		ExecutorRunner:     &fakeExecutorRunner{},
+		VerificationRunner: &fakeVerificationRunner{fail: true},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,executor_kind=?,executor_workspace_path=?,review_findings=? WHERE repository_id=?`, executorReviewBlocked, Codex, t.TempDir(), "fix this", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/fix", "", "michael")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want post-fix verification failure", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorFailed {
+		t.Fatalf("state=%q err=%v, want failed", status.ExecutorState, err)
+	}
+}
+
+func TestIssueCloseFailureLeavesMergedWorkRetryableThroughCleanup(t *testing.T) {
+	merge := &endToEndMergeExecutor{closeErr: errors.New("temporary GitHub error")}
+	clone := &fakeIssueWorkspace{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeExecutor: merge, IssueWorkspace: clone})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='merge_approved',pr_number=7,issue_number=3,executor_workspace_path=? WHERE repository_id='42'`, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/merge", "", "michael")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("merge status=%d, want bad gateway", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorMerged {
+		t.Fatalf("state=%q err=%v, want merged", status.ExecutorState, err)
+	}
+	merge.closeErr = nil
+	response = request(t, app, http.MethodPost, "/repositories/42/executor/cleanup", "", "michael")
+	if response.Code != http.StatusSeeOther || clone.cleanups != 1 {
+		t.Fatalf("cleanup status=%d cleanups=%d", response.Code, clone.cleanups)
+	}
+}
+
+func TestMergeRejectionLeavesWorkspaceAndDoesNotCleanup(t *testing.T) {
+	merge := &endToEndMergeExecutor{mergeErr: errors.New("GitHub rejected merge")}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeExecutor: merge, IssueWorkspace: &fakeIssueWorkspace{}})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='merge_approved',pr_number=7,issue_number=3,executor_workspace_path=? WHERE repository_id='42'`, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/merge", "", "michael")
+	if response.Code != http.StatusConflict || merge.mergeCalls != 1 {
+		t.Fatalf("merge response=%d calls=%d; expected GitHub rejection", response.Code, merge.mergeCalls)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/cleanup", "", "michael"); response.Code != http.StatusConflict {
+		t.Fatalf("cleanup after rejected/unstarted merge=%d, want conflict", response.Code)
+	}
+}
+
+func TestCleanupRejectsForcedLocalMergedStateUntilGitHubConfirms(t *testing.T) {
+	merge := &endToEndMergeExecutor{confirmErr: errors.New("pull request is still open")}
+	clone := &fakeIssueWorkspace{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, MergeExecutor: merge, IssueWorkspace: clone})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='merged',pr_number=7,executor_workspace_path=? WHERE repository_id='42'`, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/cleanup", "", "michael")
+	if response.Code != http.StatusConflict || clone.cleanups != 0 {
+		t.Fatalf("cleanup response=%d cleanups=%d, want confirmation rejection without cleanup", response.Code, clone.cleanups)
+	}
+	var state string
+	if err := a.db.QueryRow(`SELECT executor_state FROM intakes WHERE repository_id='42'`).Scan(&state); err != nil || state != "merged" {
+		t.Fatalf("state=%q err=%v, want merged", state, err)
 	}
 }
 
@@ -1418,6 +1931,152 @@ func TestVerificationOnlySkipsPlanningAndApproval(t *testing.T) {
 	if response.Code != http.StatusSeeOther || verification.calls != 1 {
 		t.Fatalf("verification response=%d body=%q calls=%d, want redirect and one call", response.Code, response.Body.String(), verification.calls)
 	}
+}
+
+func TestExecutorRunVerifiesBeforeBecomingVerified(t *testing.T) {
+	verification := &fakeVerificationRunner{ready: true}
+	runner := &fakeExecutorRunner{exitCode: 0}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: runner, VerificationRunner: verification})
+	setupExecutorRun(t, app)
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want redirect", response.Code)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ExecutorState != executorVerified || verification.calls != 1 {
+		t.Fatalf("state=%q verification calls=%d, want verified and one call", status.ExecutorState, verification.calls)
+	}
+}
+
+func TestExecutorVerificationFailureLandsFailed(t *testing.T) {
+	verification := &fakeVerificationRunner{fail: true}
+	runner := &fakeExecutorRunner{exitCode: 0}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: runner, VerificationRunner: verification})
+	setupExecutorRun(t, app)
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ExecutorState != executorFailed {
+		t.Fatalf("state=%q, want failed", status.ExecutorState)
+	}
+}
+
+func TestExecutorRunAcquiresLeaseOnceAndPersistsRunID(t *testing.T) {
+	lease := &fakeRunLease{}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}, VerificationRunner: &fakeVerificationRunner{ready: true}, RunLease: lease})
+	setupExecutorRun(t, app)
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("run status = %d, want redirect", response.Code)
+	}
+	if lease.acquires != 1 {
+		t.Fatalf("acquires = %d, want 1", lease.acquires)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.RunID != "run-1" {
+		t.Fatalf("run ID = %q, err=%v, want run-1", status.RunID, err)
+	}
+}
+
+func TestExecutorRunLeaseFailureReturnsConflict(t *testing.T) {
+	lease := &fakeRunLease{err: errors.New("repository already has an active implementation run")}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, ExecutorRunner: &fakeExecutorRunner{}, RunLease: lease})
+	setupExecutorRun(t, app)
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/run", "", "michael")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("run status = %d, want conflict", response.Code)
+	}
+}
+
+type startupPRState struct{ state string }
+
+func (p startupPRState) State(context.Context, Repository, int) (string, error) { return p.state, nil }
+
+type startupLease struct {
+	fakeRunLease
+	active   []ActiveRun
+	released []string
+}
+
+func (l *startupLease) ListActive(context.Context) ([]ActiveRun, error) { return l.active, nil }
+func (l *startupLease) Release(ctx context.Context, id, state, reason string) error {
+	l.released = append(l.released, id)
+	return nil
+}
+
+func TestReconcileStartupRepairsRemoteStateAndOrphanLeases(t *testing.T) {
+	lease := &startupLease{active: []ActiveRun{{RunID: "orphan"}}}
+	merge := &endToEndMergeExecutor{}
+	clone := &fakeIssueWorkspace{}
+	a, err := New(Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "repo", FullName: "owner/repo"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease, MergeExecutor: merge, IssueWorkspace: clone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	if _, err := a.db.Exec(`INSERT INTO repositories(id,full_name) VALUES('repo','owner/repo'); INSERT INTO intakes(repository_id,intake_id,state,updated_at,executor_state,pr_number,run_id) VALUES('repo','x','promoted', 'now','merging',7,'run-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReconcileStartup(context.Background(), startupPRState{state: "MERGED"}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := a.db.QueryRow(`SELECT executor_state FROM intakes WHERE repository_id='repo'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "cleanup_done" {
+		t.Fatalf("state = %q, want cleanup_done", state)
+	}
+	if merge.closeCalls != 1 {
+		t.Fatalf("issue close calls = %d, want 1", merge.closeCalls)
+	}
+	if len(lease.released) != 2 || lease.released[0] != "run-1" || lease.released[1] != "orphan" {
+		t.Fatalf("released %v, want recovered and orphan leases", lease.released)
+	}
+	if clone.cleanups != 1 {
+		t.Fatalf("workspace cleanups=%d, want 1", clone.cleanups)
+	}
+}
+
+func TestExecutorSelectionUsesPriorFailures(t *testing.T) {
+	lease := &fakeRunLease{failures: []FailureRecord{{Kind: Ralphex, Reason: "failed"}}}
+	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, RunLease: lease})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("select status = %d, want redirect", response.Code)
+	}
+	executorApp, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	status, err := executorApp.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Codex) {
+		t.Fatalf("executor kind = %q, err=%v, want codex", status.ExecutorKind, err)
+	}
+}
+
+func setupExecutorRun(t *testing.T, app http.Handler) {
+	t.Helper()
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/executor/approve", "", "michael")
 }
 
 func TestExecutorSelectionSurvivesRestart(t *testing.T) {
