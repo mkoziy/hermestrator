@@ -2822,6 +2822,27 @@ func AssessADR(decision string) (string, string) {
 	return assessment, proposal
 }
 
+// EstimateScope maps synthesis evidence to the vocabulary used by executor
+// selection: fewer than two decisions and at most one Markdown heading is
+// simple; more than five decisions or at least three headings is complex;
+// everything else is medium.
+func EstimateScope(resolved []string, tickets string) string {
+	headingCount := 0
+	for _, line := range strings.Split(tickets, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			headingCount++
+		}
+	}
+
+	if len(resolved) < 2 && headingCount <= 1 {
+		return "simple"
+	}
+	if len(resolved) > 5 || headingCount >= 3 {
+		return "complex"
+	}
+	return "medium"
+}
+
 func consequentialDecision(chosen, tradeoff, reversalCost string) bool {
 	evidence := strings.ToLower(chosen + " " + tradeoff + " " + reversalCost)
 	return containsAny(evidence, "migration", "durable", "database", "schema", "protocol", "security", "authentication")

@@ -133,19 +133,19 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `EstimateScope(resolved []string, tickets string) string` near
+- [x] add `EstimateScope(resolved []string, tickets string) string` near
       `AssessADR` (`app.go`), returning `"simple"`/`"medium"`/`"complex"` —
       matching `executorForScope`'s vocabulary exactly, since any other
       string falls through to `VerificationOnly` there — from the count of
       `resolved` decisions and the length/heading count of `tickets`
       (mirror `AssessADR`'s plain-function, no-LLM shape)
-- [ ] pick and document concrete thresholds in a short comment (e.g. fewer
+- [x] pick and document concrete thresholds in a short comment (e.g. fewer
       than 2 resolved decisions and a single ticket heading → `"simple"`;
       more than 5 resolved decisions or 3+ ticket headings → `"complex"`;
       otherwise `"medium"`) so the heuristic is auditable, not magic
-- [ ] write tests for `EstimateScope` covering the simple/medium/complex
+- [x] write tests for `EstimateScope` covering the simple/medium/complex
       boundaries and empty input
-- [ ] run tests — must pass before task 2
+- [x] run tests — must pass before task 2
 
 ### Task 2: Persist scope on the `intakes` row and thread it through `IntakeStatus`
 

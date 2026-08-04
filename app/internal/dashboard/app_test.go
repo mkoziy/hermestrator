@@ -787,6 +787,34 @@ func TestADREligibilityDoesNotTrustOperatorAttestation(t *testing.T) {
 	}
 }
 
+func TestEstimateScope(t *testing.T) {
+	decision := []string{"one"}
+	threeHeadings := "# One\n## Two\n### Three"
+	moreThanFive := []string{"one", "two", "three", "four", "five", "six"}
+
+	tests := []struct {
+		name     string
+		resolved []string
+		tickets  string
+		want     string
+	}{
+		{name: "empty input", want: "simple"},
+		{name: "simple boundary", resolved: decision, tickets: "# One", want: "simple"},
+		{name: "medium by decisions", resolved: []string{"one", "two"}, tickets: "# One", want: "medium"},
+		{name: "medium by headings", resolved: decision, tickets: "# One\n## Two", want: "medium"},
+		{name: "complex by headings", resolved: decision, tickets: threeHeadings, want: "complex"},
+		{name: "complex by decisions", resolved: moreThanFive, tickets: "# One", want: "complex"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := EstimateScope(test.resolved, test.tickets); got != test.want {
+				t.Fatalf("EstimateScope() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEligibleADRIsAssessedAutomaticallyAndRequiresItsOwnConfirmation(t *testing.T) {
 	publisher := &fakePublisher{issues: []PublishedIssue{{Number: 73, URL: "https://github.com/mkoziy/hermestrator/issues/73"}}}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Publisher: publisher, Intake: &fakeIntake{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
