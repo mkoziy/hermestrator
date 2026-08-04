@@ -116,12 +116,12 @@ review.
 
 This runs before `CloneIntake.Inspect` is deleted (Task 4) so every package compiles and tests pass at each task boundary — the dashboard package's `Inspector` type-assertion call site must stop referencing the interface before the interface's sole implementation is removed.
 
-- [ ] delete the `Inspector` interface and its call site in `startIntake`
-- [ ] delete `Conversation.RepositoryEvidence`, `artifactRepositoryEvidence`, and the `intake_artifacts` insert that created the `repository-evidence` artifact in `startIntake`
-- [ ] stop reading/writing the `inspection` column (leave the column itself in the schema — dropping it needs a migration path this project doesn't have; noted as a deliberate simplification)
-- [ ] add `Conversation.ClonePath string`, populated from `intakes.clone_path` the same place `RepositoryEvidence` used to be loaded
-- [ ] update/remove tests asserting on `RepositoryEvidence`/`repository-evidence` (e.g. `TestIntakePersistsInspectableRepositoryEvidence`); add a test that `startIntake` no longer creates a `repository-evidence` artifact
-- [ ] run tests — must pass before task 4
+- [x] delete the `Inspector` interface and its call site in `startIntake`
+- [x] delete `Conversation.RepositoryEvidence`, `artifactRepositoryEvidence`, and the `intake_artifacts` insert that created the `repository-evidence` artifact in `startIntake`
+- [x] stop reading/writing the `inspection` column (leave the column itself in the schema — dropping it needs a migration path this project doesn’t have; noted as a deliberate simplification)
+- [x] add `Conversation.ClonePath string`, populated from `intakes.clone_path` the same place `RepositoryEvidence` used to be loaded
+- [x] update/remove tests asserting on `RepositoryEvidence`/`repository-evidence` (e.g. `TestIntakePersistsInspectableRepositoryEvidence`); add a test that `startIntake` no longer creates a `repository-evidence` artifact
+- [x] run tests — `go test ./internal/dashboard` passes; `make check` unavailable (no target)
 
 ### Task 4: Implement `CloneIntake.Read` and remove `Inspect`
 
