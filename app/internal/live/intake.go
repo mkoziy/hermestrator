@@ -215,9 +215,10 @@ func (i CloneIntake) UpdateContext(_ context.Context, path, glossary string) err
 }
 
 const (
-	maxDiscoveryReadBytes   = 16 << 10
-	maxDiscoveryGlobMatches = 200
-	maxDiscoveryGrepBytes   = 16 << 10
+	maxDiscoveryReadBytes      = 16 << 10
+	maxDiscoveryGlobMatches    = 200
+	maxDiscoveryGrepBytes      = 16 << 10
+	maxDiscoveryGrepInputBytes = 16 << 20
 )
 
 // Read returns at most 16 KiB from one regular file below the intake root.
@@ -314,6 +315,7 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		return "", fmt.Errorf("resolve intake path: %w", err)
 	}
 	var output strings.Builder
+	remainingInput := int64(maxDiscoveryGrepInputBytes)
 	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -327,14 +329,22 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		if entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
+		if remainingInput == 0 {
+			return filepath.SkipAll
+		}
 		file, err := os.Open(current)
 		if err != nil {
 			return err
 		}
-		scanner := bufio.NewScanner(file)
+		limited := &io.LimitedReader{R: file, N: remainingInput}
+		scanner := bufio.NewScanner(limited)
 		scanner.Buffer(make([]byte, 4<<10), 1<<20)
 		lineNumber := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				_ = file.Close()
+				return err
+			}
 			lineNumber++
 			line := scanner.Text()
 			if compiled.MatchString(line) {
@@ -351,6 +361,7 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 			}
 		}
 		scanErr := scanner.Err()
+		remainingInput = limited.N
 		if closeErr := file.Close(); closeErr != nil && scanErr == nil {
 			return closeErr
 		}
@@ -359,6 +370,9 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		// discovery in the rest of the repository.
 		if errors.Is(scanErr, bufio.ErrTooLong) {
 			return nil
+		}
+		if remainingInput == 0 {
+			return filepath.SkipAll
 		}
 		return scanErr
 	})

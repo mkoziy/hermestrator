@@ -305,6 +305,28 @@ func TestCloneIntakeGrepSkipsFilesWithOversizedLines(t *testing.T) {
 	}
 }
 
+func TestCloneIntakeGrepCapsInputScannedPerCall(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("miss\n", maxDiscoveryGrepInputBytes/5+1)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("needle\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (CloneIntake{BaseDir: base}).Grep(context.Background(), root, `needle`)
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if got != "no matches" {
+		t.Fatalf("grep after input cap = %q", got)
+	}
+}
+
 func TestCloneIntakeReadReturnsFileContents(t *testing.T) {
 	base := t.TempDir()
 	path := filepath.Join(base, "intake-read")
