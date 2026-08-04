@@ -577,6 +577,42 @@ func TestAbandonedIntakeCannotConfirmOrPublishStaleArtifacts(t *testing.T) {
 	}
 }
 
+func TestRestartedAbandonedIntakeDoesNotReusePriorScope(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET scope='complex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("abandon intake = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("restart intake = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("select executor = %d", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Scope != "" || status.ExecutorKind != string(Codex) {
+		t.Fatalf("restarted intake scope=%q executor=%q, want empty scope and codex", status.Scope, status.ExecutorKind)
+	}
+}
+
 func TestIntakeRequiresACompletedDiscoveryExchangeBeforeSynthesis(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})

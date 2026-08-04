@@ -1348,7 +1348,7 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 	initialQuestion := "What outcome should this work deliver?"
 	intakeID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, messageStart, initialQuestion, nil, "", now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',scope='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, messageStart, initialQuestion, nil, "", now); err != nil {
 		http.Error(w, "could not persist intake", http.StatusInternalServerError)
 		return
 	}
