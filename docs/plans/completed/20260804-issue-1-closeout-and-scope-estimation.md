@@ -260,10 +260,10 @@ document's checkboxes against the merged code, and close issue #1.
 
 ### Task 7: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` if the scope-estimation capability introduces a
-      pattern worth documenting for future work (likely not — it follows an
-      existing pattern) — none needed
-- [ ] move this plan to `docs/plans/completed/` once Tasks 1–6 are done
+- [x] update `CLAUDE.md` if the scope-estimation capability introduces a
+      pattern worth documenting for future work (not needed — it follows an
+      existing deterministic-function and schema-migration pattern)
+- [x] move this plan to `docs/plans/completed/` once Tasks 1–6 are done
 
 ## Post-Completion
 
