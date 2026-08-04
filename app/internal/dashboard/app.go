@@ -234,6 +234,7 @@ type IntakeStatus struct {
 	ReviewRound           int
 	ReviewFindings        string
 	RetryState            executorState
+	Scope                 string
 	PR                    PullRequest
 	VerificationOutput    string
 }
@@ -462,6 +463,10 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "retry_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1343,7 +1348,7 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 	initialQuestion := "What outcome should this work deliver?"
 	intakeID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, messageStart, initialQuestion, nil, "", now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',scope='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, messageStart, initialQuestion, nil, "", now); err != nil {
 		http.Error(w, "could not persist intake", http.StatusInternalServerError)
 		return
 	}
@@ -1389,7 +1394,7 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "complete one focused discovery exchange before synthesizing artifacts", http.StatusConflict)
 		return
 	}
-	artifacts, err := a.synthesizeArtifacts(r.Context(), repo, conversation)
+	artifacts, scope, err := a.synthesizeArtifacts(r.Context(), repo, conversation)
 	if err != nil {
 		http.Error(w, "could not synthesize artifacts", http.StatusInternalServerError)
 		return
@@ -1407,7 +1412,7 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=?`, intakeDraft, now, repo.ID); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,scope=?,updated_at=? WHERE repository_id=?`, intakeDraft, scope, now, repo.ID); err != nil {
 		http.Error(w, "could not update intake", http.StatusInternalServerError)
 		return
 	}
@@ -1442,7 +1447,7 @@ func (a *application) revertSynthesis(ctx context.Context, id string) error {
 	if _, err = tx.ExecContext(ctx, `DELETE FROM intake_artifacts WHERE repository_id=?`, id); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE intakes SET state=?,scope='',updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1799,16 +1804,24 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
 	var priorFailures []FailureRecord
 	if a.deps.RunLease != nil {
-		var err error
 		priorFailures, err = a.deps.RunLease.RecentFailures(r.Context(), id, 10)
 		if err != nil {
 			http.Error(w, "could not load executor history", http.StatusInternalServerError)
 			return
 		}
 	}
-	selection := SelectExecutor("medium", "", priorFailures)
+	scope := status.Scope
+	if scope == "" {
+		scope = "medium"
+	}
+	selection := SelectExecutor(scope, "", priorFailures)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := a.db.ExecContext(r.Context(),
 		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,retry_state='',updated_at=excluded.updated_at WHERE intakes.executor_state IN ('','selected','failed','cleanup_done')`,
@@ -1870,7 +1883,10 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	scope := "medium" // TODO: Get from conversation state
+	scope := status.Scope
+	if scope == "" {
+		scope = "medium"
+	}
 	executorKind := ExecutorKind(status.ExecutorKind)
 	if executorKind == VerificationOnly {
 		a.runVerification(w, r, id, workspacePath)
@@ -2769,35 +2785,35 @@ func (a *application) releaseFailedLease(ctx context.Context, status IntakeStatu
 	a.releaseLease(ctx, status, "operator cancelled")
 }
 
-func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
+func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, string, error) {
 	resolved, err := a.deps.Synthesizer.GrillWithDocs(ctx, conversation)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts := []Artifact{
 		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
 	}
 	spec, err := a.deps.Synthesizer.ToSpec(ctx, repo, resolved)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts = append(artifacts, Artifact{Kind: artifactSpec, Body: spec})
 	tickets, err := a.deps.Synthesizer.ToTickets(ctx, repo, resolved)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts = append(artifacts, Artifact{Kind: artifactTickets, Body: tickets})
 	for index, decision := range resolved {
 		assessment, proposal, err := a.deps.Synthesizer.AssessADR(ctx, strings.TrimSpace(strings.TrimPrefix(decision, "-")))
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRAssessmentPrefix + strconv.Itoa(index+1)), Body: assessment})
 		if proposal != "" {
 			artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRProposalPrefix + strconv.Itoa(index+1)), Body: proposal})
 		}
 	}
-	return artifacts, nil
+	return artifacts, EstimateScope(resolved, tickets), nil
 }
 
 // AssessADR is a bounded policy capability: an ADR is eligible only when the
@@ -2820,6 +2836,27 @@ func AssessADR(decision string) (string, string) {
 	assessment := "# ADR eligibility assessment\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost + "\n\n## Result\n\nEligible: this is a consequential, hard-to-reverse decision with a real trade-off."
 	proposal := "# ADR proposal\n\n## Decision\n\n" + chosen + "\n\n## Alternative\n\n" + alternative + "\n\n## Trade-off\n\n" + tradeoff + "\n\n## Reversal cost\n\n" + reversalCost
 	return assessment, proposal
+}
+
+// EstimateScope maps synthesis evidence to the vocabulary used by executor
+// selection: fewer than two decisions and at most one ticket heading is
+// simple; more than five decisions or at least three ticket headings is
+// complex; everything else is medium.
+func EstimateScope(resolved []string, tickets string) string {
+	ticketCount := 0
+	for _, line := range strings.Split(tickets, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "## Ticket ") {
+			ticketCount++
+		}
+	}
+
+	if len(resolved) < 2 && ticketCount <= 1 {
+		return "simple"
+	}
+	if len(resolved) > 5 || ticketCount >= 3 {
+		return "complex"
+	}
+	return "medium"
 }
 
 func consequentialDecision(chosen, tradeoff, reversalCost string) bool {
@@ -3046,7 +3083,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var cancelledInt int
 	var prNumber int
 	var prURL string
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state,scope FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState, &status.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil
 	}

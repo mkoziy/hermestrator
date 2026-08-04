@@ -145,10 +145,19 @@ func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (stri
 
 func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { f.cleanups++; return nil }
 
-type fakePlanner struct{ workspace string }
+type fakePlanner struct {
+	workspace string
+	scope     string
+	done      chan struct{}
+	doneOnce  sync.Once
+}
 
-func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, _ string) (string, error) {
+func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, scope string) (string, error) {
 	f.workspace = workspace
+	f.scope = scope
+	if f.done != nil {
+		f.doneOnce.Do(func() { close(f.done) })
+	}
 	return "# Plan: test\n\n### Task 1: test", nil
 }
 
@@ -413,6 +422,24 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
 		t.Fatalf("synthesize status = %d", response.Code)
 	}
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	var scope string
+	if err := a.db.QueryRow(`SELECT scope FROM intakes WHERE repository_id='42'`).Scan(&scope); err != nil {
+		t.Fatalf("load persisted scope: %v", err)
+	}
+	if scope == "" {
+		t.Fatal("synthesis did not persist scope")
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load intake status: %v", err)
+	}
+	if status.Scope != scope {
+		t.Fatalf("status scope = %q, persisted scope = %q", status.Scope, scope)
+	}
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusConflict {
 		t.Fatalf("unconfirmed publish status = %d", response.Code)
 	}
@@ -422,7 +449,21 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 		}
 	}
 
-	restarted := mustApp(t, deps)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	restartedStatus, err := restarted.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load restarted intake status: %v", err)
+	}
+	if restartedStatus.Scope != scope {
+		t.Fatalf("restarted scope = %q, persisted scope = %q", restartedStatus.Scope, scope)
+	}
 	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
 	for _, want := range []string{"Tracked-work intake", "confirmed", "Glossary updates", "operators can create projects"} {
 		if !strings.Contains(workspace.Body.String(), want) {
@@ -536,6 +577,42 @@ func TestAbandonedIntakeCannotConfirmOrPublishStaleArtifacts(t *testing.T) {
 	}
 }
 
+func TestRestartedAbandonedIntakeDoesNotReusePriorScope(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+	if _, err := a.db.Exec(`UPDATE intakes SET scope='complex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/abandon", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("abandon intake = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("restart intake = %d", response.Code)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("select executor = %d", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Scope != "" || status.ExecutorKind != string(Codex) {
+		t.Fatalf("restarted intake scope=%q executor=%q, want empty scope and codex", status.Scope, status.ExecutorKind)
+	}
+}
+
 func TestIntakeRequiresACompletedDiscoveryExchangeBeforeSynthesis(t *testing.T) {
 	intake := &fakeIntake{}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}})
@@ -595,6 +672,17 @@ func TestFailedContextWriteRevertsSynthesisArtifacts(t *testing.T) {
 	page := request(t, app, http.MethodGet, "/repositories/42", "", "michael")
 	if strings.Contains(page.Body.String(), "Glossary updates") || !strings.Contains(page.Body.String(), "State: ready") {
 		t.Fatalf("partial synthesis persisted: %q", page.Body.String())
+	}
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load reverted intake: %v", err)
+	}
+	if status.Scope != "" {
+		t.Fatalf("reverted intake scope = %q, want empty", status.Scope)
 	}
 }
 
@@ -664,13 +752,16 @@ func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
 	if !ok {
 		t.Fatal("app is not *application")
 	}
-	artifacts, err := a.synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
+	artifacts, scope, err := a.synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
 		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators publish confirmed tickets\nBlocked by: Ticket 1"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators document their work"}, {Role: "pm", Text: "What should happen next?"},
 	}})
 	if err != nil {
 		t.Fatalf("synthesizeArtifacts: %v", err)
+	}
+	if scope == "" {
+		t.Fatal("synthesizeArtifacts returned an empty scope")
 	}
 	var tickets string
 	for _, artifact := range artifacts {
@@ -784,6 +875,35 @@ func TestADREligibilityDoesNotTrustOperatorAttestation(t *testing.T) {
 	assessment, proposal := AssessADR("Decision: use blue; Alternative: use green; Trade-off: blue is nicer; Reversal cost: change a color; Consequential: true; Hard to reverse: true")
 	if proposal != "" || !strings.Contains(assessment, "Ineligible") {
 		t.Fatalf("self-attested ADR was eligible: assessment=%q proposal=%q", assessment, proposal)
+	}
+}
+
+func TestEstimateScope(t *testing.T) {
+	decision := []string{"one"}
+	threeTickets := "## Ticket 1: One\n## Ticket 2: Two\n## Ticket 3: Three"
+	moreThanFive := []string{"one", "two", "three", "four", "five", "six"}
+
+	tests := []struct {
+		name     string
+		resolved []string
+		tickets  string
+		want     string
+	}{
+		{name: "empty input", want: "simple"},
+		{name: "simple boundary", resolved: decision, tickets: "## Ticket 1: One", want: "simple"},
+		{name: "medium by decisions", resolved: []string{"one", "two"}, tickets: "## Ticket 1: One", want: "medium"},
+		{name: "medium by tickets", resolved: decision, tickets: "## Ticket 1: One\n## Ticket 2: Two", want: "medium"},
+		{name: "complex by tickets", resolved: decision, tickets: threeTickets, want: "complex"},
+		{name: "complex by decisions", resolved: moreThanFive, tickets: "## Ticket 1: One", want: "complex"},
+		{name: "generated ticket set", resolved: decision, tickets: ToTickets(Repository{FullName: "owner/repo"}, decision), want: "simple"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := EstimateScope(test.resolved, test.tickets); got != test.want {
+				t.Fatalf("EstimateScope() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1826,6 +1946,55 @@ func TestExistingConversationDatabaseMigratesTelemetryColumns(t *testing.T) {
 	}
 }
 
+func TestExistingIntakeDatabaseMigratesScopeColumn(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	legacy, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE intakes (
+			repository_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+			clone_path TEXT NOT NULL DEFAULT '', inspection TEXT NOT NULL DEFAULT '',
+			message_start INTEGER NOT NULL DEFAULT 0, pending_question TEXT NOT NULL DEFAULT '',
+			issue_number INTEGER, issue_url TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+			executor_kind TEXT NOT NULL DEFAULT '', executor_rationale TEXT NOT NULL DEFAULT '',
+			executor_state TEXT NOT NULL DEFAULT '', executor_heartbeat TEXT NOT NULL DEFAULT '',
+			executor_duration_ns INTEGER NOT NULL DEFAULT 0, executor_exit_code INTEGER NOT NULL DEFAULT 0,
+			executor_cancelled INTEGER NOT NULL DEFAULT 0, executor_workspace_path TEXT NOT NULL DEFAULT '',
+			pr_number INTEGER NOT NULL DEFAULT 0, review_findings TEXT NOT NULL DEFAULT '',
+			review_round INTEGER NOT NULL DEFAULT 0, pr_url TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
+			retry_state TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO intakes(repository_id,state,updated_at) VALUES('42','draft','2026-08-04T00:00:00Z');`)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := New(Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        database,
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+
+	status, err := app.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load migrated intake: %v", err)
+	}
+	if status.Scope != "" {
+		t.Fatalf("migrated scope = %q, want empty default", status.Scope)
+	}
+}
+
 func mustApp(t *testing.T, deps Dependencies) http.Handler {
 	t.Helper()
 	app, err := New(deps)
@@ -1922,7 +2091,7 @@ func TestPlanningRejectedBeforeExecutorSelection(t *testing.T) {
 func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	clone := &fakeIssueWorkspace{path: workspace}
-	planner := &fakePlanner{}
+	planner := &fakePlanner{done: make(chan struct{})}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, IssueWorkspace: clone, Planner: planner})
 	executorApp, ok := app.(*application)
 	if !ok {
@@ -1945,6 +2114,60 @@ func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
 	status, err := executorApp.intakeStatus(context.Background(), "42")
 	if err != nil || status.ExecutorWorkspacePath != workspace {
 		t.Fatalf("persisted workspace=%q err=%v, want %q", status.ExecutorWorkspacePath, err, workspace)
+	}
+}
+
+func TestExecutorUsesPersistedScopeAndDefaultsForLegacyIntakes(t *testing.T) {
+	planner := &fakePlanner{done: make(chan struct{})}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Planner:      planner,
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("legacy select status = %d", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Codex) {
+		t.Fatalf("legacy executor kind = %q, err=%v, want codex", status.ExecutorKind, err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael"); response.Code != http.StatusAccepted {
+		t.Fatalf("legacy plan status = %d: %s", response.Code, response.Body.String())
+	}
+	if planner.scope != "medium" {
+		t.Fatalf("legacy planner scope = %q, want medium", planner.scope)
+	}
+
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='',executor_kind='',scope='complex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("scoped select status = %d", response.Code)
+	}
+	status, err = a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Ralphex) {
+		t.Fatalf("scoped executor kind = %q, err=%v, want ralphex", status.ExecutorKind, err)
+	}
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael"); response.Code != http.StatusAccepted {
+		t.Fatalf("scoped plan status = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-planner.done:
+	case <-time.After(time.Second):
+		t.Fatal("planner was not called")
+	}
+	if planner.scope != "complex" {
+		t.Fatalf("planner scope = %q, want complex", planner.scope)
 	}
 }
 

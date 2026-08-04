@@ -84,6 +84,15 @@ actually closing #1:
 - Every task that changes code ends with passing tests before the next task.
 - Update this plan file if scope changes during implementation.
 
+## Progress Tracking
+
+- 2026-08-04 audit: Ticket 1 acceptance criteria are implemented and covered
+  by OAuth, dashboard, persistence, streaming, telemetry, notification, and
+  tooling tests; no genuine gap found.
+- 2026-08-04 audit: Ticket 3/4 reviewed-PR and recovery lifecycle is present
+  end to end, with PR, review, fix-loop, merge-gate, lease, cleanup, and
+  startup-recovery tests; no genuine gap found.
+
 ## Solution Overview
 
 Add a deterministic `EstimateScope(resolved []string, tickets string)
@@ -133,19 +142,19 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `EstimateScope(resolved []string, tickets string) string` near
+- [x] add `EstimateScope(resolved []string, tickets string) string` near
       `AssessADR` (`app.go`), returning `"simple"`/`"medium"`/`"complex"` —
       matching `executorForScope`'s vocabulary exactly, since any other
       string falls through to `VerificationOnly` there — from the count of
       `resolved` decisions and the length/heading count of `tickets`
       (mirror `AssessADR`'s plain-function, no-LLM shape)
-- [ ] pick and document concrete thresholds in a short comment (e.g. fewer
+- [x] pick and document concrete thresholds in a short comment (e.g. fewer
       than 2 resolved decisions and a single ticket heading → `"simple"`;
       more than 5 resolved decisions or 3+ ticket headings → `"complex"`;
       otherwise `"medium"`) so the heuristic is auditable, not magic
-- [ ] write tests for `EstimateScope` covering the simple/medium/complex
+- [x] write tests for `EstimateScope` covering the simple/medium/complex
       boundaries and empty input
-- [ ] run tests — must pass before task 2
+- [x] run tests — must pass before task 2
 
 ### Task 2: Persist scope on the `intakes` row and thread it through `IntakeStatus`
 
@@ -153,21 +162,21 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT
+- [x] add `if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT
       NULL DEFAULT ''"); err != nil { ... }` alongside the other
       `addColumnIfMissing` calls
-- [ ] add `Scope string` to `IntakeStatus` and include `scope` in the
+- [x] add `Scope string` to `IntakeStatus` and include `scope` in the
       status-loading `SELECT`/`Scan` (~`app.go:3049`)
-- [ ] in `synthesizeArtifacts`, call `EstimateScope` directly with the
+- [x] in `synthesizeArtifacts`, call `EstimateScope` directly with the
       resolved decisions and the `artifactTickets` body, and return the
       result alongside the artifacts (change the function's return signature
       or add a sibling return value — caller's choice, keep it minimal)
-- [ ] in the `synthesizeArtifacts` caller (~`app.go:1392`), extend the
+- [x] in the `synthesizeArtifacts` caller (~`app.go:1392`), extend the
       existing `UPDATE intakes SET state=?,updated_at=?` in the same
       transaction to also set `scope=?`
-- [ ] write tests confirming a synthesize call persists a non-empty `scope`
+- [x] write tests confirming a synthesize call persists a non-empty `scope`
       on the intake row and that it round-trips through `IntakeStatus`
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Replace both hardcoded `"medium"` call sites
 
@@ -175,27 +184,27 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] in `executorSelect` (~line 1811), replace the literal `"medium"` with
+- [x] in `executorSelect` (~line 1811), replace the literal `"medium"` with
       `status.Scope` (this handler currently only loads `priorFailures`, not
       `status` — load it), falling back to `"medium"` only when
       `status.Scope == ""`
-- [ ] in `executorPlan` (~line 1873; **not** `executorRun`, a different
+- [x] in `executorPlan` (~line 1873; **not** `executorRun`, a different
       handler with no scope hardcode), replace `scope := "medium" // TODO:
       Get from conversation state` with the same `status.Scope`-with-fallback
       read — `status` is already loaded earlier in this handler — and remove
       the `TODO` comment
-- [ ] write tests confirming `executorSelect`/`executorPlan` use a
+- [x] write tests confirming `executorSelect`/`executorPlan` use a
       previously-synthesized scope value (e.g. `"complex"`) when present,
       and fall back to `"medium"` for an intake row with no scope set
       (legacy row / synthesis never ran)
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
 
 ### Task 4: Audit closed-ticket acceptance criteria against the running code
 
 **Files:**
 - none (verification task; no code changes expected)
 
-- [ ] for each of Ticket 1's acceptance criteria in
+- [x] for each of Ticket 1's acceptance criteria in
       `docs/tickets/20260726-genkit-pm-dashboard.md`, confirm the
       implementation exists and is exercised by a test (GitHub login via
       go-pkgz/auth, allowlist, repository picker, durable conversation,
@@ -203,7 +212,7 @@ document's checkboxes against the merged code, and close issue #1.
       role/elapsed/activity/tokens/cost display, Telegram test notification,
       Genkit Developer UI availability, `httptest` seam coverage, `make
       check` contents, pre-push hook, baked-in skills)
-- [ ] for Ticket 3/4 (issues #4, #5), confirm the reviewed-PR-and-recovery
+- [x] for Ticket 3/4 (issues #4, #5), confirm the reviewed-PR-and-recovery
       loop described in `docs/plans/20260803-reviewed-pr-and-recovery-lifecycle.md`
       is present end to end (PR creation/reuse, standards+spec review,
       review-finding fix loop, mergeability re-check, dashboard merge
@@ -211,9 +220,10 @@ document's checkboxes against the merged code, and close issue #1.
       reconciliation) by grepping for the types/functions the plan names
       (`GHPRCreator`, `Reviewer`, `executorMergeReady`, `RunLease`,
       orphan-lease recovery) and confirming each has passing tests
-- [ ] record any genuine gap found as a new `⚠️` entry in this plan's
+- [x] record any genuine gap found as a new `⚠️` entry in this plan's
       Progress Tracking section rather than silently fixing it out of scope
-- [ ] no test changes expected for this task unless a gap is found
+      (none found)
+- [x] no test changes expected for this task unless a gap is found (none found)
 
 > Discovery-time spot check (not a substitute for running this task): a
 > pre-planning grep found `RunLease.Acquire`/`Release` already called from
@@ -227,31 +237,33 @@ document's checkboxes against the merged code, and close issue #1.
 **Files:**
 - Modify: `docs/plans/20260803-reviewed-pr-and-recovery-lifecycle.md`
 
-- [ ] for each of the 16 tasks' checkboxes, mark `[x]` where Task 5's audit
-      confirmed the corresponding code and tests exist; leave any
-      unconfirmed item unchecked with a `⚠️` note instead of assuming
-- [ ] move the file to `docs/plans/completed/20260803-reviewed-pr-and-recovery-lifecycle.md`
-      once every checkbox is either checked or explicitly flagged
-- [ ] no tests apply to this documentation-only task
+- [x] for each of the 16 tasks' checkboxes, mark `[x]` where Task 5's audit
+      confirmed the corresponding code and tests exist; the archived copy has
+      all 85 implementation and verification checkboxes marked `[x]`, with
+      no unconfirmed items requiring a `⚠️` note
+- [x] move the file to `docs/plans/completed/20260803-reviewed-pr-and-recovery-lifecycle.md`
+      once every checkbox is either checked or explicitly flagged (already
+      archived; the stale source path is absent)
+- [x] no tests apply to this documentation-only task
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify `EstimateScope` is deterministic, tested at its boundaries, and
+- [x] verify `EstimateScope` is deterministic, tested at its boundaries, and
       the two hardcoded `"medium"` sites are gone (`grep -n '"medium"'
       app/internal/dashboard/app.go` shows only the documented fallback, not
       a bare assignment)
-- [ ] verify `intakes.scope` round-trips through a real synthesize →
+- [x] verify `intakes.scope` round-trips through a real synthesize →
       restart → read cycle
-- [ ] run full test suite: `make check` (from `app/`)
-- [ ] verify test coverage meets project standard (no new untested branches
+- [x] run full test suite: `make check` (from `app/`)
+- [x] verify test coverage meets project standard (no new untested branches
       in touched files)
 
 ### Task 7: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` if the scope-estimation capability introduces a
-      pattern worth documenting for future work (likely not — it follows an
-      existing pattern) — none needed
-- [ ] move this plan to `docs/plans/completed/` once Tasks 1–6 are done
+- [x] update `CLAUDE.md` if the scope-estimation capability introduces a
+      pattern worth documenting for future work (not needed — it follows an
+      existing deterministic-function and schema-migration pattern)
+- [x] move this plan to `docs/plans/completed/` once Tasks 1–6 are done
 
 ## Post-Completion
 
