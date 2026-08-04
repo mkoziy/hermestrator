@@ -1447,7 +1447,7 @@ func (a *application) revertSynthesis(ctx context.Context, id string) error {
 	if _, err = tx.ExecContext(ctx, `DELETE FROM intake_artifacts WHERE repository_id=?`, id); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE intakes SET state=?,scope='',updated_at=? WHERE repository_id=? AND state=?`, intakeReady, time.Now().UTC().Format(time.RFC3339Nano), id, intakeDraft); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -673,6 +673,17 @@ func TestFailedContextWriteRevertsSynthesisArtifacts(t *testing.T) {
 	if strings.Contains(page.Body.String(), "Glossary updates") || !strings.Contains(page.Body.String(), "State: ready") {
 		t.Fatalf("partial synthesis persisted: %q", page.Body.String())
 	}
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load reverted intake: %v", err)
+	}
+	if status.Scope != "" {
+		t.Fatalf("reverted intake scope = %q, want empty", status.Scope)
+	}
 }
 
 func TestReadyIntakeCanBeAbandoned(t *testing.T) {
