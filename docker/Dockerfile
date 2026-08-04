@@ -71,6 +71,9 @@ RUN mkdir -p /data /home/app/.local/bin /home/app/.npm-global /home/app/go \
 USER app
 WORKDIR /home/app
 
+COPY --chown=app:app docker/global-gitignore /home/app/.gitignore_global
+RUN git config --global core.excludesFile /home/app/.gitignore_global
+
 RUN npm install -g @openai/codex @earendil-works/pi-coding-agent
 
 # Keep project skills available to direct Codex and Pi invocations.
