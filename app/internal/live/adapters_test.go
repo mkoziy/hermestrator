@@ -3,8 +3,11 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +137,7 @@ func TestGitHubNextPage(t *testing.T) {
 }
 
 func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
-	model, err := NewOpenRouterModel(context.Background(), "test-key", "openai/gpt-4.1-mini", t.TempDir()+"/pm.db")
+	model, err := NewOpenRouterModel(context.Background(), "test-key", "openai/gpt-4.1-mini", t.TempDir()+"/pm.db", CloneIntake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +151,109 @@ func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
 	if status != want {
 		t.Fatalf("status = %#v, want %#v", status, want)
 	}
+}
+
+func TestDiscoveryToolCallCapsTurn(t *testing.T) {
+	state := &discoveryTurnState{clonePath: t.TempDir()}
+	ctx := context.WithValue(context.Background(), discoveryTurnStateKey{}, state)
+	for call := 1; call <= MaxDiscoveryToolCalls; call++ {
+		_, message := discoveryToolCall(ctx)
+		if message != "" {
+			t.Fatalf("call %d: message=%q", call, message)
+		}
+	}
+	_, message := discoveryToolCall(ctx)
+	if message != "tool budget exhausted" {
+		t.Fatalf("over-budget call: message=%q", message)
+	}
+}
+
+func TestDiscoveryToolResultRedactsSecrets(t *testing.T) {
+	if got := redactSecrets("token ghp_abcdefghijklmnopqrstuvwxyz1234567890"); strings.Contains(got, "ghp_") {
+		t.Fatalf("secret was not redacted: %q", got)
+	}
+}
+
+func TestDiscoveryToolsCapCallsAndRedactModelFacingResults(t *testing.T) {
+	base := t.TempDir()
+	clone := filepath.Join(base, "intake")
+	if err := os.Mkdir(clone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	secret := "ASIAIOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(clone, secret+".txt"), []byte(secret+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "secrets.txt"), []byte(secret+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewSQLiteSessionStore[PMState](t.TempDir() + "/pm.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	g := genkit.Init(context.Background(), genkit.WithExperimental())
+	genkit.DefineModel(g, "openrouter/test-discovery", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true, Tools: true}}, func(_ context.Context, request *ai.ModelRequest, _ ai.ModelStreamCallback) (*ai.ModelResponse, error) {
+		responses := toolResponses(request)
+		for _, response := range responses {
+			if output := fmt.Sprint(response.Output); strings.Contains(output, secret) {
+				return nil, fmt.Errorf("tool result exposed a secret: %q", output)
+			}
+		}
+		if len(responses) == MaxDiscoveryToolCalls+1 {
+			budgetExhausted := 0
+			for _, response := range responses {
+				if fmt.Sprint(response.Output) == "tool budget exhausted" {
+					budgetExhausted++
+				}
+			}
+			if budgetExhausted != 1 {
+				return nil, fmt.Errorf("budget exhausted responses = %d, want 1", budgetExhausted)
+			}
+			return &ai.ModelResponse{Request: request, Message: ai.NewModelTextMessage("completed"), FinishReason: ai.FinishReasonStop}, nil
+		}
+		if len(responses) != 0 {
+			return nil, fmt.Errorf("tool responses = %d, want %d", len(responses), MaxDiscoveryToolCalls+1)
+		}
+		requests := make([]*ai.Part, 0, MaxDiscoveryToolCalls+1)
+		for call := 0; call <= MaxDiscoveryToolCalls; call++ {
+			name, input := "pm_discovery_read", map[string]any{"RelativePath": "secrets.txt"}
+			switch call {
+			case 0:
+				name, input = "pm_discovery_glob", map[string]any{"Pattern": "*.txt"}
+			case 1:
+				name, input = "pm_discovery_grep", map[string]any{"Pattern": "ASIA"}
+			}
+			requests = append(requests, ai.NewToolRequestPart(&ai.ToolRequest{Name: name, Input: input, Ref: fmt.Sprintf("call-%d", call+1)}))
+		}
+		return &ai.ModelResponse{Request: request, Message: ai.NewModelMessage(requests...), FinishReason: ai.FinishReasonStop}, nil
+	})
+	globTool, grepTool, readTool := defineDiscoveryTools(g, CloneIntake{BaseDir: base})
+	agent := genkitx.DefineCustomAgent(g, "discovery-tools-test", discoveryAgent(g, "test-discovery", globTool, grepTool, readTool), aix.WithSessionStore(store))
+	model := OpenRouterModel{agent: agent, store: store, genkit: g}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	reply, err := model.Stream(ctx, dashboard.Conversation{RepositoryID: "42", ClonePath: clone}, "inspect repository", func(string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Text != "completed" {
+		t.Fatalf("reply = %#v", reply)
+	}
+}
+
+func toolResponses(request *ai.ModelRequest) []*ai.ToolResponse {
+	var responses []*ai.ToolResponse
+	for _, message := range request.Messages {
+		for _, part := range message.Content {
+			if part.IsToolResponse() {
+				responses = append(responses, part.ToolResponse)
+			}
+		}
+	}
+	return responses
 }
 
 func TestOpenRouterStreamFinishesAfterFirstAgentTurn(t *testing.T) {

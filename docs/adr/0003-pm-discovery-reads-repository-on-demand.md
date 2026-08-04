@@ -76,9 +76,15 @@ source can surface secrets a curated 4-file push never risked.
 - The PM's read boundary during discovery grows from four named files to
   the entire repository (read-only). This is the acceptance criterion this
   ADR exists to record: it is a deliberate, not incidental, widening.
+- Tool use is bounded per operator turn: at most 10 calls, glob returns at
+  most 200 matching paths, and read and grep each return at most 16 KiB.
+  Glob patterns match file base names, so `*.md` searches nested
+  directories; grep patterns use Go's regular-expression syntax and scan at
+  most 32 MiB of regular-file data per call.
 - `Inspector`, `CloneIntake.Inspect`, the `repository-evidence` artifact,
   and the prompt-prefix plumbing of `RepositoryEvidence` are removed, not
-  kept as a fallback — see `docs/plans/20260803-agentic-discovery-tools.md`
+  kept as a fallback — see the completed implementation plan in
+  `docs/plans/completed/20260804-agentic-discovery-tools.md`
   for the removal task.
 - `redactSecrets` must run on every tool result, not just the final model
   response — a gap that did not exist under the old fixed-whitelist design

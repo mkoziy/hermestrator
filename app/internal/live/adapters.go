@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 
@@ -120,8 +121,26 @@ type PMState struct {
 }
 
 const discoveryMaxOutputTokens = 1024
+const MaxDiscoveryToolCalls = 10
 
-func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*OpenRouterModel, error) {
+type discoveryTurnState struct {
+	clonePath string
+	calls     atomic.Int32
+}
+type discoveryTurnStateKey struct{}
+
+func discoveryToolCall(ctx context.Context) (*discoveryTurnState, string) {
+	state, ok := ctx.Value(discoveryTurnStateKey{}).(*discoveryTurnState)
+	if !ok {
+		return nil, "no discovery turn available"
+	}
+	if state.calls.Add(1) > MaxDiscoveryToolCalls {
+		return nil, "tool budget exhausted"
+	}
+	return state, ""
+}
+
+func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string, intake CloneIntake) (*OpenRouterModel, error) {
 	if apiKey == "" || model == "" {
 		return nil, fmt.Errorf("OpenRouter API key and discovery model are required")
 	}
@@ -134,14 +153,49 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string) (*
 	if err != nil {
 		return nil, err
 	}
-	discoveryContext := genkitx.DefineTool(g, "pm_discovery_context", "Returns the constraints for the current PM discovery phase.", func(context.Context, struct{}) (string, error) {
-		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
-	})
-	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryContext), aix.WithSessionStore(store))
+	discoveryGlob, discoveryGrep, discoveryRead := defineDiscoveryTools(g, intake)
+	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryGlob, discoveryGrep, discoveryRead), aix.WithSessionStore(store))
 	return &OpenRouterModel{agent: agent, store: store, genkit: g}, nil
 }
 
-func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[struct{}, string]) aix.AgentFunc[PMState] {
+func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ RelativePath string }, string]) {
+	discoveryGlob := genkitx.DefineTool(g, "pm_discovery_glob", "Find repository files by base name pattern (for example, *.md; patterns do not match full paths). Use only for requirements, architecture, and conventions questions.", func(ctx context.Context, input struct{ Pattern string }) (string, error) {
+		state, message := discoveryToolCall(ctx)
+		if message != "" {
+			return message, nil
+		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
+		}
+		result, err := intake.Glob(ctx, state.clonePath, input.Pattern)
+		return redactSecrets(result), err
+	})
+	discoveryGrep := genkitx.DefineTool(g, "pm_discovery_grep", "Search repository text with a regular expression for requirements, architecture, and conventions.", func(ctx context.Context, input struct{ Pattern string }) (string, error) {
+		state, message := discoveryToolCall(ctx)
+		if message != "" {
+			return message, nil
+		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
+		}
+		result, err := intake.Grep(ctx, state.clonePath, input.Pattern)
+		return redactSecrets(result), err
+	})
+	discoveryRead := genkitx.DefineTool(g, "pm_discovery_read", "Read one repository file for requirements, architecture, and conventions.", func(ctx context.Context, input struct{ RelativePath string }) (string, error) {
+		state, message := discoveryToolCall(ctx)
+		if message != "" {
+			return message, nil
+		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
+		}
+		result, err := intake.Read(ctx, state.clonePath, input.RelativePath)
+		return redactSecrets(result), err
+	})
+	return discoveryGlob, discoveryGrep, discoveryRead
+}
+
+func discoveryAgent(g *genkit.Genkit, model string, discoveryGlob *aix.Tool[struct{ Pattern string }, string], discoveryGrep *aix.Tool[struct{ Pattern string }, string], discoveryRead *aix.Tool[struct{ RelativePath string }, string]) aix.AgentFunc[PMState] {
 	return func(ctx context.Context, responder aix.Responder, session *aix.SessionRunner[PMState]) (*aix.AgentResult, error) {
 		var message *ai.Message
 		err := session.Run(ctx, func(ctx context.Context, input *aix.AgentInput) (*aix.TurnResult, error) {
@@ -154,13 +208,13 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 				state.LastActivity = "discovery turn in progress"
 				return state
 			})
-			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager conducting discovery. Ask one focused question at a time. Treat repository evidence as already-resolved facts: do not ask the operator questions that evidence answers. Do not write code, publish issues, or choose a workflow phase.")}, session.Messages()...)
+			messages := append([]*ai.Message{ai.NewSystemTextMessage("You are a product manager conducting discovery. Ask one focused question at a time. Use repository tools only for requirements, architecture, and conventions questions, not code-quality or correctness review. Do not write code, publish issues, or choose a workflow phase.")}, session.Messages()...)
 			messages = append(messages, input.Message)
 			var reason aix.AgentFinishReason
 			for result, err := range genkit.GenerateStream(ctx, g,
 				ai.WithModelName("openrouter/"+model),
 				ai.WithMessages(messages...),
-				ai.WithTools(discoveryContext),
+				ai.WithTools(discoveryGlob, discoveryGrep, discoveryRead),
 				ai.WithConfig(&openai.ChatCompletionNewParams{MaxCompletionTokens: openai.Int(discoveryMaxOutputTokens)}),
 			) {
 				if err != nil {
@@ -227,14 +281,12 @@ func (m *OpenRouterModel) Reply(ctx context.Context, conversation dashboard.Conv
 }
 
 func (m *OpenRouterModel) Stream(ctx context.Context, conversation dashboard.Conversation, prompt string, emit func(string) error) (dashboard.Reply, error) {
+	ctx = context.WithValue(ctx, discoveryTurnStateKey{}, &discoveryTurnState{clonePath: conversation.ClonePath})
 	conn, err := m.agent.Connect(ctx, aix.WithSessionID[PMState]("pm-"+conversation.RepositoryID))
 	if err != nil {
 		return dashboard.Reply{}, fmt.Errorf("connect Genkit PM agent: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if conversation.RepositoryEvidence != "" {
-		prompt = "Repository evidence from a read-only isolated clone:\n" + conversation.RepositoryEvidence + "\n\nOperator message:\n" + prompt
-	}
 	if err := conn.SendText(prompt); err != nil {
 		return dashboard.Reply{}, fmt.Errorf("send Genkit PM turn: %w", err)
 	}

@@ -147,10 +147,7 @@ func (fakeModel) Status(context.Context, string) (dashboard.Status, error) {
 	return dashboard.Status{Phase: "discovery", ModelRole: "discovery"}, nil
 }
 
-type fakeIntake struct {
-	started    []string
-	inspection string
-}
+type fakeIntake struct{ started []string }
 
 func (f *fakeIntake) Start(_ context.Context, _ dashboard.Repository) (string, error) {
 	f.started = append(f.started, "/tmp/intake-42")
@@ -162,8 +159,6 @@ func (f *fakeIntake) Promote(_ context.Context, _ string, _ dashboard.PublishedI
 }
 
 func (f *fakeIntake) Cleanup(_ context.Context, _ string) error { return nil }
-
-func (f *fakeIntake) Inspect(context.Context, string) (string, error) { return f.inspection, nil }
 
 func TestGenkitSynthesizerEndToEndViaHTTPSynthesize(t *testing.T) {
 	g := genkit.Init(context.Background(), genkit.WithExperimental())

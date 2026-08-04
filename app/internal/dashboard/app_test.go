@@ -30,6 +30,16 @@ func (fakeModel) Status(context.Context, string) (Status, error) {
 	return Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "12s", RecentActivity: "awaiting operator"}, nil
 }
 
+type clonePathCapturingModel struct {
+	fakeModel
+	conversation Conversation
+}
+
+func (m *clonePathCapturingModel) Reply(_ context.Context, conversation Conversation, _ string) (Reply, error) {
+	m.conversation = conversation
+	return Reply{Text: "What should discovery inspect next?"}, nil
+}
+
 type multipleQuestionModel struct{ fakeModel }
 
 func (multipleQuestionModel) Reply(context.Context, Conversation, string) (Reply, error) {
@@ -251,7 +261,6 @@ type fakeIntake struct {
 	started, promoted, cleaned []string
 	promoteErr                 error
 	updateErr                  error
-	inspection                 string
 }
 
 func (f *fakeIntake) Start(_ context.Context, _ Repository) (string, error) {
@@ -274,7 +283,7 @@ func (f *fakeIntake) Cleanup(_ context.Context, path string) error {
 
 func (f *fakeIntake) UpdateContext(context.Context, string, string) error { return f.updateErr }
 
-func (f *fakeIntake) Inspect(context.Context, string) (string, error) { return f.inspection, nil }
+// fakeIntake intentionally exposes no eager repository inspection capability.
 
 func TestDashboardRootRedirectsAuthorizedOperatorToRepositoryPicker(t *testing.T) {
 	app := mustApp(t, Dependencies{
@@ -820,9 +829,9 @@ func TestIntakeDoesNotCreateAnotherCloneWhileOneIsActive(t *testing.T) {
 	}
 }
 
-func TestIntakePersistsInspectableRepositoryEvidence(t *testing.T) {
+func TestIntakeDoesNotCreateRepositoryEvidenceArtifact(t *testing.T) {
 	database := t.TempDir() + "/pm.db"
-	intake := &fakeIntake{inspection: "# README.md\n\nThe project already uses SQLite."}
+	intake := &fakeIntake{}
 	deps := Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Intake: intake, Store: database, AllowedUsers: map[string]bool{"michael": true}}
 	app, err := New(deps)
 	if err != nil {
@@ -841,10 +850,36 @@ func TestIntakePersistsInspectableRepositoryEvidence(t *testing.T) {
 	}
 	defer func() { _ = restarted.Close() }()
 	page := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
-	for _, want := range []string{"Repository evidence", "project already uses SQLite"} {
-		if !strings.Contains(page.Body.String(), want) {
-			t.Fatalf("workspace missing %q: %q", want, page.Body.String())
-		}
+	if strings.Contains(page.Body.String(), "Repository evidence") {
+		t.Fatal("workspace contains repository evidence")
+	}
+	conversation, err := restarted.conversation(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.ClonePath != "/tmp/intake-42" {
+		t.Fatalf("clone path = %q, want /tmp/intake-42", conversation.ClonePath)
+	}
+}
+
+func TestStartedIntakePassesItsClonePathToTheConversationModel(t *testing.T) {
+	model := &clonePathCapturingModel{}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        model,
+		Intake:       &fakeIntake{},
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42/intake/start", "", "michael")
+
+	response := requestHTMX(t, app, http.MethodPost, "/repositories/42/conversation", url.Values{"message": {"inspect this repository"}}.Encode(), "michael")
+	if response.Code != http.StatusOK {
+		t.Fatalf("conversation status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if model.conversation.ClonePath != "/tmp/intake-42" {
+		t.Fatalf("model clone path = %q, want %q", model.conversation.ClonePath, "/tmp/intake-42")
 	}
 }
 
