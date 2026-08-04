@@ -42,7 +42,8 @@ During discovery, the PM can search and read the isolated clone on demand to
 answer requirements, architecture, and convention questions. These read-only
 tools cannot modify the clone: each operator turn is limited to 10 tool calls,
 glob returns at most 200 paths, and read and grep return at most 16 KiB. Glob
-patterns match file base names; grep uses Go regular expressions.
+patterns match file base names; grep uses Go regular expressions and scans at
+most 32 MiB of regular-file data per call.
 
 ## Executor orchestration
 

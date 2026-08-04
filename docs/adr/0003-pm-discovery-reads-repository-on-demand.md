@@ -79,7 +79,8 @@ source can surface secrets a curated 4-file push never risked.
 - Tool use is bounded per operator turn: at most 10 calls, glob returns at
   most 200 matching paths, and read and grep each return at most 16 KiB.
   Glob patterns match file base names, so `*.md` searches nested
-  directories; grep patterns use Go's regular-expression syntax.
+  directories; grep patterns use Go's regular-expression syntax and scan at
+  most 32 MiB of regular-file data per call.
 - `Inspector`, `CloneIntake.Inspect`, the `repository-evidence` artifact,
   and the prompt-prefix plumbing of `RepositoryEvidence` are removed, not
   kept as a fallback — see the completed implementation plan in

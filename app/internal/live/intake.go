@@ -215,9 +215,11 @@ func (i CloneIntake) UpdateContext(_ context.Context, path, glossary string) err
 }
 
 const (
-	maxDiscoveryReadBytes   = 16 << 10
-	maxDiscoveryGlobMatches = 200
-	maxDiscoveryGrepBytes   = 16 << 10
+	maxDiscoveryReadBytes     = 16 << 10
+	maxDiscoveryGlobMatches   = 200
+	maxDiscoveryGrepBytes     = 16 << 10
+	maxDiscoveryGrepScanBytes = 32 << 20
+	discoveryGrepTruncated    = "search truncated\n"
 )
 
 // Read returns at most 16 KiB from one regular file below the intake root.
@@ -314,6 +316,8 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		return "", fmt.Errorf("resolve intake path: %w", err)
 	}
 	var output strings.Builder
+	scanned := int64(0)
+	truncated := false
 	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -327,6 +331,15 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		if entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if scanned+info.Size() > maxDiscoveryGrepScanBytes {
+			truncated = true
+			return filepath.SkipAll
+		}
+		scanned += info.Size()
 		file, err := os.Open(current)
 		if err != nil {
 			return err
@@ -347,7 +360,8 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 					return err
 				}
 				record := fmt.Sprintf("%s:%d: %s\n", filepath.ToSlash(relative), lineNumber, line)
-				if output.Len()+len(record) > maxDiscoveryGrepBytes {
+				if output.Len()+len(record) > maxDiscoveryGrepBytes-len(discoveryGrepTruncated) {
+					truncated = true
 					_ = file.Close()
 					return filepath.SkipAll
 				}
@@ -368,6 +382,9 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 	})
 	if err != nil && err != filepath.SkipAll {
 		return "", fmt.Errorf("grep intake: %w", err)
+	}
+	if truncated {
+		return output.String() + discoveryGrepTruncated, nil
 	}
 	if output.Len() == 0 {
 		return "no matches", nil
