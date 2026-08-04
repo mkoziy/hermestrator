@@ -421,14 +421,18 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
 		t.Fatalf("synthesize status = %d", response.Code)
 	}
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
 	var scope string
-	if err := app.(*application).db.QueryRow(`SELECT scope FROM intakes WHERE repository_id='42'`).Scan(&scope); err != nil {
+	if err := a.db.QueryRow(`SELECT scope FROM intakes WHERE repository_id='42'`).Scan(&scope); err != nil {
 		t.Fatalf("load persisted scope: %v", err)
 	}
 	if scope == "" {
 		t.Fatal("synthesis did not persist scope")
 	}
-	status, err := app.(*application).intakeStatus(context.Background(), "42")
+	status, err := a.intakeStatus(context.Background(), "42")
 	if err != nil {
 		t.Fatalf("load intake status: %v", err)
 	}
@@ -2010,7 +2014,10 @@ func TestExecutorUsesPersistedScopeAndDefaultsForLegacyIntakes(t *testing.T) {
 		Store:        t.TempDir() + "/pm.db",
 		AllowedUsers: map[string]bool{"michael": true},
 	})
-	a := app.(*application)
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("app is not an application")
+	}
 	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
 	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
 

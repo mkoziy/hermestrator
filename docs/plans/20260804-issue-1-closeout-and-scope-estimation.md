@@ -248,14 +248,14 @@ document's checkboxes against the merged code, and close issue #1.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify `EstimateScope` is deterministic, tested at its boundaries, and
+- [x] verify `EstimateScope` is deterministic, tested at its boundaries, and
       the two hardcoded `"medium"` sites are gone (`grep -n '"medium"'
       app/internal/dashboard/app.go` shows only the documented fallback, not
       a bare assignment)
-- [ ] verify `intakes.scope` round-trips through a real synthesize →
+- [x] verify `intakes.scope` round-trips through a real synthesize →
       restart → read cycle
-- [ ] run full test suite: `make check` (from `app/`)
-- [ ] verify test coverage meets project standard (no new untested branches
+- [x] run full test suite: `make check` (from `app/`)
+- [x] verify test coverage meets project standard (no new untested branches
       in touched files)
 
 ### Task 7: [Final] Update documentation
