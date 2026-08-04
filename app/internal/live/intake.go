@@ -1,9 +1,12 @@
 package live
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -211,55 +214,209 @@ func (i CloneIntake) UpdateContext(_ context.Context, path, glossary string) err
 	return nil
 }
 
-// Inspect reads a deliberately small, conventional set of repository files.
-// It returns evidence, not instructions, and never runs project code.
-func (i CloneIntake) Inspect(_ context.Context, path string) (string, error) {
+const (
+	maxDiscoveryReadBytes     = 16 << 10
+	maxDiscoveryGlobMatches   = 200
+	maxDiscoveryGrepBytes     = 16 << 10
+	maxDiscoveryGrepScanBytes = 32 << 20
+	discoveryGrepTruncated    = "search truncated\n"
+)
+
+// Read returns at most 16 KiB from one regular file below the intake root.
+func (i CloneIntake) Read(ctx context.Context, path, relativePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := i.validateChild(path); err != nil {
 		return "", err
 	}
-	const maxFileBytes = 16 << 10
-	var evidence strings.Builder
-	for _, name := range []string{"CONTEXT.md", "README.md", "go.mod", "package.json"} {
-		file, err := i.regularChild(path, name)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		body, err := os.ReadFile(file)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", fmt.Errorf("inspect %s: %w", name, err)
-		}
-		if len(body) > maxFileBytes {
-			body = body[:maxFileBytes]
-		}
-		fmt.Fprintf(&evidence, "\n## %s\n%s\n", name, body)
+	file, err := i.regularChild(path, relativePath)
+	if err != nil {
+		return "", err
 	}
-	return evidence.String(), nil
+	handle, err := os.Open(file)
+	if err != nil {
+		return "", fmt.Errorf("read intake file %q: %w", relativePath, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(handle, maxDiscoveryReadBytes))
+	closeErr := handle.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read intake file %q: %w", relativePath, readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close intake file %q: %w", relativePath, closeErr)
+	}
+	return string(body), nil
+}
+
+// Glob returns paths for regular files whose base name matches pattern. The
+// pattern is deliberately matched against the base name, so *.md also finds
+// files nested below the intake root.
+func (i CloneIntake) Glob(ctx context.Context, path, pattern string) (string, error) {
+	if err := i.validateChild(path); err != nil {
+		return "", err
+	}
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return "", fmt.Errorf("invalid glob pattern: %w", err)
+	}
+	matches := make([]string, 0, maxDiscoveryGlobMatches)
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake path: %w", err)
+	}
+	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		matched, err := filepath.Match(pattern, filepath.Base(relative))
+		if err != nil {
+			return fmt.Errorf("invalid glob pattern: %w", err)
+		}
+		if matched {
+			matches = append(matches, filepath.ToSlash(relative))
+			if len(matches) == maxDiscoveryGlobMatches {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if err != nil && err != filepath.SkipAll {
+		return "", fmt.Errorf("glob intake: %w", err)
+	}
+	if len(matches) == 0 {
+		return "no matches", nil
+	}
+	return strings.Join(matches, "\n"), nil
+}
+
+// Grep returns matching lines as relative-path:line:text records.
+func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, error) {
+	if err := i.validateChild(path); err != nil {
+		return "", err
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", fmt.Errorf("compile grep pattern: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake path: %w", err)
+	}
+	var output strings.Builder
+	scanned := int64(0)
+	truncated := false
+	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if scanned+info.Size() > maxDiscoveryGrepScanBytes {
+			truncated = true
+			return filepath.SkipAll
+		}
+		scanned += info.Size()
+		file, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 4<<10), 1<<20)
+		lineNumber := 0
+		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				_ = file.Close()
+				return err
+			}
+			lineNumber++
+			line := scanner.Text()
+			if compiled.MatchString(line) {
+				relative, err := filepath.Rel(root, current)
+				if err != nil {
+					return err
+				}
+				record := fmt.Sprintf("%s:%d: %s\n", filepath.ToSlash(relative), lineNumber, line)
+				if output.Len()+len(record) > maxDiscoveryGrepBytes-len(discoveryGrepTruncated) {
+					truncated = true
+					_ = file.Close()
+					return filepath.SkipAll
+				}
+				output.WriteString(record)
+			}
+		}
+		scanErr := scanner.Err()
+		if closeErr := file.Close(); closeErr != nil && scanErr == nil {
+			return closeErr
+		}
+		// A generated or minified file may contain a line larger than the
+		// scanner's bounded token size. Skip that file so it cannot prevent
+		// discovery in the rest of the repository.
+		if errors.Is(scanErr, bufio.ErrTooLong) {
+			return nil
+		}
+		return scanErr
+	})
+	if err != nil && err != filepath.SkipAll {
+		return "", fmt.Errorf("grep intake: %w", err)
+	}
+	if truncated {
+		return output.String() + discoveryGrepTruncated, nil
+	}
+	if output.Len() == 0 {
+		return "no matches", nil
+	}
+	return output.String(), nil
 }
 
 func (i CloneIntake) validateChild(path string) error {
-	base, err := filepath.EvalSymlinks(i.BaseDir)
+	base, err := filepath.Abs(i.BaseDir)
 	if err != nil {
 		return fmt.Errorf("resolve intake base directory: %w", err)
 	}
-	candidate, err := filepath.EvalSymlinks(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve intake workspace: %w", err)
 	}
-	relative, err := filepath.Rel(base, candidate)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("refuse operation outside isolated intake directory")
+	relative, err := filepath.Rel(base, absolute)
+	if err != nil {
+		return fmt.Errorf("resolve intake workspace: %w", err)
+	}
+	_, err = i.regularDescendant(i.BaseDir, relative)
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 func (i CloneIntake) regularChild(path, name string) (string, error) {
-	file := filepath.Join(path, name)
+	file, err := i.regularDescendant(path, name)
+	if err != nil {
+		return "", err
+	}
 	info, err := os.Lstat(file)
 	if err != nil {
 		return file, err
@@ -268,4 +425,49 @@ func (i CloneIntake) regularChild(path, name string) (string, error) {
 		return "", fmt.Errorf("refuse non-regular intake file %q", name)
 	}
 	return file, nil
+}
+
+// regularDescendant resolves a path below root while refusing traversal and
+// symlinked path components. The final component may be absent so callers
+// that create files can validate its parent before writing it.
+func (i CloneIntake) regularDescendant(root, relativePath string) (string, error) {
+	base, err := filepath.EvalSymlinks(i.BaseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake base directory: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake root: %w", err)
+	}
+	rootRelative, err := filepath.Rel(base, resolvedRoot)
+	if err != nil || rootRelative == ".." || strings.HasPrefix(rootRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("refuse operation outside isolated intake directory")
+	}
+	if filepath.IsAbs(relativePath) || relativePath == "" {
+		return "", fmt.Errorf("refuse invalid intake relative path %q", relativePath)
+	}
+	clean := filepath.Clean(relativePath)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("refuse operation outside isolated intake directory")
+	}
+	candidate := filepath.Join(resolvedRoot, clean)
+	parts := strings.Split(clean, string(filepath.Separator))
+	current := resolvedRoot
+	for index, part := range parts {
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) && index == len(parts)-1 {
+			break
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("inspect intake path: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refuse symlinked intake path %q", part)
+		}
+		if index < len(parts)-1 && !info.IsDir() {
+			return "", fmt.Errorf("refuse non-directory intake path %q", part)
+		}
+	}
+	return candidate, nil
 }

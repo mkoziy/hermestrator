@@ -38,13 +38,13 @@ type Message struct {
 	CreatedAt  time.Time
 }
 type Conversation struct {
-	RepositoryID       string
-	RepositoryEvidence string
-	Messages           []Message
-	PendingTurns       []PendingTurn
-	HasPending         bool
-	LastReply          Reply
-	Status             Status
+	RepositoryID string
+	ClonePath    string
+	Messages     []Message
+	PendingTurns []PendingTurn
+	HasPending   bool
+	LastReply    Reply
+	Status       Status
 }
 type Workspace struct {
 	Conversation
@@ -126,12 +126,6 @@ type ContextUpdater interface {
 	UpdateContext(context.Context, string, string) error
 }
 
-// Inspector supplies read-only repository facts for discovery. It is kept
-// distinct from ContextUpdater so inspection never implies write authority.
-type Inspector interface {
-	Inspect(context.Context, string) (string, error)
-}
-
 // Synthesizer turns settled discovery output into drafts. Implementations
 // must not call GitHub or grant write authority; see Intake and Publisher.
 type Synthesizer interface {
@@ -162,7 +156,6 @@ type artifactKind string
 
 const (
 	artifactGlossary            artifactKind = "glossary"
-	artifactRepositoryEvidence  artifactKind = "repository-evidence"
 	artifactSpec                artifactKind = "spec"
 	artifactTickets             artifactKind = "tickets"
 	artifactADRAssessmentPrefix              = "adr-assessment-"
@@ -1336,16 +1329,6 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	inspection := ""
-	if inspector, ok := a.deps.Intake.(Inspector); ok && path != "" {
-		inspection, err = inspector.Inspect(r.Context(), path)
-		if err != nil {
-			log.Printf("inspect isolated intake for repository %q: %s", repo.ID, redactSecrets(err.Error()))
-			http.Error(w, "could not inspect isolated intake", http.StatusBadGateway)
-			return
-		}
-	}
-	inspection = redactSecrets(inspection)
 	var messageStart int64
 	if err = a.db.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE repository_id=?`, repo.ID).Scan(&messageStart); err != nil {
 		http.Error(w, "could not prepare intake", http.StatusInternalServerError)
@@ -1360,7 +1343,7 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 	initialQuestion := "What outcome should this work deliver?"
 	intakeID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,inspection,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,inspection=excluded.inspection,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, inspection, messageStart, initialQuestion, nil, "", now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO intakes(repository_id,intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET intake_id=excluded.intake_id,state=excluded.state,clone_path=excluded.clone_path,message_start=excluded.message_start,pending_question=excluded.pending_question,issue_number=NULL,issue_url='',updated_at=excluded.updated_at`, repo.ID, intakeID, intakeDraft, path, messageStart, initialQuestion, nil, "", now); err != nil {
 		http.Error(w, "could not persist intake", http.StatusInternalServerError)
 		return
 	}
@@ -1371,13 +1354,6 @@ func (a *application) startIntake(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.ExecContext(r.Context(), `DELETE FROM intake_artifacts WHERE repository_id=?`, repo.ID); err != nil {
 		http.Error(w, "could not discard previous intake drafts", http.StatusInternalServerError)
 		return
-	}
-	if inspection != "" {
-		body := "# Repository evidence\n\nThe PM resolved repository-answerable discovery facts from this isolated, read-only inspection instead of asking the operator to repeat them.\n\n" + inspection
-		if _, err = tx.ExecContext(r.Context(), `INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?)`, repo.ID, artifactRepositoryEvidence, body, now); err != nil {
-			http.Error(w, "could not persist repository evidence", http.StatusInternalServerError)
-			return
-		}
 	}
 	if _, err = tx.ExecContext(r.Context(), `DELETE FROM intake_issues WHERE repository_id=?`, repo.ID); err != nil {
 		http.Error(w, "could not discard previous intake publications", http.StatusInternalServerError)
@@ -3013,8 +2989,8 @@ func (a *application) conversationAfter(ctx context.Context, id string, messageS
 	}
 	defer func() { _ = rows.Close() }()
 	c := Conversation{RepositoryID: id, PendingTurns: []PendingTurn{}, Messages: []Message{}}
-	if err := a.db.QueryRowContext(ctx, `SELECT inspection FROM intakes WHERE repository_id=?`, id).Scan(&c.RepositoryEvidence); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Conversation{}, fmt.Errorf("load repository inspection: %w", err)
+	if err := a.db.QueryRowContext(ctx, `SELECT clone_path FROM intakes WHERE repository_id=?`, id).Scan(&c.ClonePath); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, fmt.Errorf("load intake clone path: %w", err)
 	}
 	for rows.Next() {
 		var m Message
