@@ -157,12 +157,12 @@ Includes the `main.go` caller update in the same task as the `NewOpenRouterModel
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify `Inspect`/`Inspector`/`repository-evidence` are fully removed (grep confirms no references outside the ADR doc)
-- [ ] verify discovery can answer questions using `glob`/`grep`/`read` over the full clone, not just the 4 legacy files (manual or integration-style test against a fixture repo with non-standard docs)
-- [ ] verify a turn cannot exceed `MaxDiscoveryToolCalls` calls and degrades gracefully instead of erroring
-- [ ] verify tool results are redacted before reaching the model
-- [ ] verify the system prompt keeps tool usage scoped to discovery, not code review
-- [ ] run full test suite: `make check` (from `app/`)
+- [x] verify `Inspect`/`Inspector`/`repository-evidence` are fully removed (source grep confirms no live references outside the ADR; historical plan text and an unrelated fake test adapter method still mention `Inspect`)
+- [x] verify discovery can answer questions using `glob`/`grep`/`read` over the full clone, not just the 4 legacy files (existing intake and tool tests cover nested/non-standard files and the three operations)
+- [x] verify a turn cannot exceed `MaxDiscoveryToolCalls` calls and degrades gracefully instead of erroring (covered by `TestDiscoveryToolCallCapsTurn`)
+- [x] verify tool results are redacted before reaching the model (covered by `TestDiscoveryToolResultRedactsSecrets` and tool wrappers)
+- [x] verify the system prompt keeps tool usage scoped to discovery, not code review (prompt inspection and existing discovery agent wiring confirm this)
+- [x] run full test suite: `make check` (from `app/`) — passes
 
 ### Task 7: Update documentation
 
