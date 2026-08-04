@@ -84,6 +84,15 @@ actually closing #1:
 - Every task that changes code ends with passing tests before the next task.
 - Update this plan file if scope changes during implementation.
 
+## Progress Tracking
+
+- 2026-08-04 audit: Ticket 1 acceptance criteria are implemented and covered
+  by OAuth, dashboard, persistence, streaming, telemetry, notification, and
+  tooling tests; no genuine gap found.
+- 2026-08-04 audit: Ticket 3/4 reviewed-PR and recovery lifecycle is present
+  end to end, with PR, review, fix-loop, merge-gate, lease, cleanup, and
+  startup-recovery tests; no genuine gap found.
+
 ## Solution Overview
 
 Add a deterministic `EstimateScope(resolved []string, tickets string)
@@ -195,7 +204,7 @@ document's checkboxes against the merged code, and close issue #1.
 **Files:**
 - none (verification task; no code changes expected)
 
-- [ ] for each of Ticket 1's acceptance criteria in
+- [x] for each of Ticket 1's acceptance criteria in
       `docs/tickets/20260726-genkit-pm-dashboard.md`, confirm the
       implementation exists and is exercised by a test (GitHub login via
       go-pkgz/auth, allowlist, repository picker, durable conversation,
@@ -203,7 +212,7 @@ document's checkboxes against the merged code, and close issue #1.
       role/elapsed/activity/tokens/cost display, Telegram test notification,
       Genkit Developer UI availability, `httptest` seam coverage, `make
       check` contents, pre-push hook, baked-in skills)
-- [ ] for Ticket 3/4 (issues #4, #5), confirm the reviewed-PR-and-recovery
+- [x] for Ticket 3/4 (issues #4, #5), confirm the reviewed-PR-and-recovery
       loop described in `docs/plans/20260803-reviewed-pr-and-recovery-lifecycle.md`
       is present end to end (PR creation/reuse, standards+spec review,
       review-finding fix loop, mergeability re-check, dashboard merge
@@ -211,9 +220,10 @@ document's checkboxes against the merged code, and close issue #1.
       reconciliation) by grepping for the types/functions the plan names
       (`GHPRCreator`, `Reviewer`, `executorMergeReady`, `RunLease`,
       orphan-lease recovery) and confirming each has passing tests
-- [ ] record any genuine gap found as a new `⚠️` entry in this plan's
+- [x] record any genuine gap found as a new `⚠️` entry in this plan's
       Progress Tracking section rather than silently fixing it out of scope
-- [ ] no test changes expected for this task unless a gap is found
+      (none found)
+- [x] no test changes expected for this task unless a gap is found (none found)
 
 > Discovery-time spot check (not a substitute for running this task): a
 > pre-planning grep found `RunLease.Acquire`/`Release` already called from
