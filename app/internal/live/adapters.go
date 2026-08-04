@@ -153,18 +153,12 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string, in
 	if err != nil {
 		return nil, err
 	}
-	discoveryContext, discoveryGlob, discoveryGrep, discoveryRead := defineDiscoveryTools(g, intake)
-	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryContext, discoveryGlob, discoveryGrep, discoveryRead), aix.WithSessionStore(store))
+	discoveryGlob, discoveryGrep, discoveryRead := defineDiscoveryTools(g, intake)
+	agent := genkitx.DefineCustomAgent(g, "pm-discovery", discoveryAgent(g, model, discoveryGlob, discoveryGrep, discoveryRead), aix.WithSessionStore(store))
 	return &OpenRouterModel{agent: agent, store: store, genkit: g}, nil
 }
 
-func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struct{}, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ RelativePath string }, string]) {
-	discoveryContext := genkitx.DefineTool(g, "pm_discovery_context", "Returns the constraints for the current PM discovery phase.", func(ctx context.Context, _ struct{}) (string, error) {
-		if _, message := discoveryToolCall(ctx); message != "" {
-			return message, nil
-		}
-		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
-	})
+func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ RelativePath string }, string]) {
 	discoveryGlob := genkitx.DefineTool(g, "pm_discovery_glob", "Find repository files by base name pattern (for example, *.md; patterns do not match full paths). Use only for requirements, architecture, and conventions questions.", func(ctx context.Context, input struct{ Pattern string }) (string, error) {
 		state, message := discoveryToolCall(ctx)
 		if message != "" {
@@ -198,10 +192,10 @@ func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struc
 		result, err := intake.Read(ctx, state.clonePath, input.RelativePath)
 		return redactSecrets(result), err
 	})
-	return discoveryContext, discoveryGlob, discoveryGrep, discoveryRead
+	return discoveryGlob, discoveryGrep, discoveryRead
 }
 
-func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[struct{}, string], discoveryGlob *aix.Tool[struct{ Pattern string }, string], discoveryGrep *aix.Tool[struct{ Pattern string }, string], discoveryRead *aix.Tool[struct{ RelativePath string }, string]) aix.AgentFunc[PMState] {
+func discoveryAgent(g *genkit.Genkit, model string, discoveryGlob *aix.Tool[struct{ Pattern string }, string], discoveryGrep *aix.Tool[struct{ Pattern string }, string], discoveryRead *aix.Tool[struct{ RelativePath string }, string]) aix.AgentFunc[PMState] {
 	return func(ctx context.Context, responder aix.Responder, session *aix.SessionRunner[PMState]) (*aix.AgentResult, error) {
 		var message *ai.Message
 		err := session.Run(ctx, func(ctx context.Context, input *aix.AgentInput) (*aix.TurnResult, error) {
@@ -220,7 +214,7 @@ func discoveryAgent(g *genkit.Genkit, model string, discoveryContext *aix.Tool[s
 			for result, err := range genkit.GenerateStream(ctx, g,
 				ai.WithModelName("openrouter/"+model),
 				ai.WithMessages(messages...),
-				ai.WithTools(discoveryContext, discoveryGlob, discoveryGrep, discoveryRead),
+				ai.WithTools(discoveryGlob, discoveryGrep, discoveryRead),
 				ai.WithConfig(&openai.ChatCompletionNewParams{MaxCompletionTokens: openai.Int(discoveryMaxOutputTokens)}),
 			) {
 				if err != nil {

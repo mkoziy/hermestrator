@@ -221,18 +221,16 @@ func TestDiscoveryToolsCapCallsAndRedactModelFacingResults(t *testing.T) {
 			name, input := "pm_discovery_read", map[string]any{"RelativePath": "secrets.txt"}
 			switch call {
 			case 0:
-				name, input = "pm_discovery_context", map[string]any{}
-			case 1:
 				name, input = "pm_discovery_glob", map[string]any{"Pattern": "*.txt"}
-			case 2:
+			case 1:
 				name, input = "pm_discovery_grep", map[string]any{"Pattern": "ASIA"}
 			}
 			requests = append(requests, ai.NewToolRequestPart(&ai.ToolRequest{Name: name, Input: input, Ref: fmt.Sprintf("call-%d", call+1)}))
 		}
 		return &ai.ModelResponse{Request: request, Message: ai.NewModelMessage(requests...), FinishReason: ai.FinishReasonStop}, nil
 	})
-	contextTool, globTool, grepTool, readTool := defineDiscoveryTools(g, CloneIntake{BaseDir: base})
-	agent := genkitx.DefineCustomAgent(g, "discovery-tools-test", discoveryAgent(g, "test-discovery", contextTool, globTool, grepTool, readTool), aix.WithSessionStore(store))
+	globTool, grepTool, readTool := defineDiscoveryTools(g, CloneIntake{BaseDir: base})
+	agent := genkitx.DefineCustomAgent(g, "discovery-tools-test", discoveryAgent(g, "test-discovery", globTool, grepTool, readTool), aix.WithSessionStore(store))
 	model := OpenRouterModel{agent: agent, store: store, genkit: g}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
