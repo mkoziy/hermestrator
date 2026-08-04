@@ -61,3 +61,20 @@ Executor binaries (`ralphex`, `codex`, `pi`, `gh`) are invoked directly
 through a streaming subprocess runner that captures heartbeat, duration,
 and exit status. All executor stdout/stderr is sanitised through
 `redaction.Secrets` before it reaches dashboard storage or rendering.
+
+The executor lifecycle is persisted in the intake row and advances only
+through the dashboard's guarded transitions:
+
+```
+selected → planning → planned → approved → running → completed → verifying
+  → verified → pr_created → reviewing → merge_ready → merge_approved
+  → merging → merged → cleanup_done
+                          ↘ review_blocked → fixing ────────↗
+```
+
+`failed` is the terminal error state reachable from any active phase. The
+review loop may enter `review_blocked` when findings remain, then delegate a
+bounded fix run before verification and review resume. `merge_approved` is
+operator-only; cleanup runs only after GitHub confirms that the pull request
+is merged. The implementation-run lease covers the lifecycle from `running`
+through either `cleanup_done` or `failed` and is reconciled during startup.

@@ -79,6 +79,33 @@ type PublishedIssue struct {
 	URL    string
 }
 
+type PullRequest struct {
+	Number     int
+	URL, State string
+}
+type PRCreator interface {
+	CreateOrReuse(context.Context, Repository, IntakeStatus) (PullRequest, error)
+}
+type ReviewResult struct {
+	Approved bool
+	Findings string
+	Blocked  bool
+}
+type Reviewer interface {
+	Review(context.Context, Repository, PullRequest, IntakeStatus) (ReviewResult, error)
+}
+type ReviewCommenter interface {
+	PostFindings(context.Context, Repository, PullRequest, string, int) error
+}
+type MergeabilityChecker interface {
+	CheckMergeable(context.Context, Repository, int) (bool, string, error)
+}
+type MergeExecutor interface {
+	ConfirmMerged(context.Context, Repository, int) error
+	Merge(context.Context, Repository, int) error
+	CloseIssue(context.Context, Repository, int) error
+}
+
 // Publisher owns the only tracker mutation available in the intake slice.
 // Implementations must not publish an unconfirmed draft.
 type Publisher interface {
@@ -141,6 +168,7 @@ const (
 	artifactADRAssessmentPrefix              = "adr-assessment-"
 	artifactADRProposalPrefix                = "adr-proposal-"
 	artifactExecutorOutput      artifactKind = "executor-output"
+	artifactVerificationOutput  artifactKind = "verification-output"
 )
 
 type Artifact struct {
@@ -166,14 +194,30 @@ const (
 
 type executorState string
 
+const MaxReviewRounds = 3
+
+const startupReconciliationBackoff = 100 * time.Millisecond
+
 const (
-	executorSelected  executorState = "selected"
-	executorPlanning  executorState = "planning"
-	executorPlanned   executorState = "planned"
-	executorApproved  executorState = "approved"
-	executorRunning   executorState = "running"
-	executorCompleted executorState = "completed"
-	executorFailed    executorState = "failed"
+	executorSelected      executorState = "selected"
+	executorPlanning      executorState = "planning"
+	executorPlanned       executorState = "planned"
+	executorApproved      executorState = "approved"
+	executorRunning       executorState = "running"
+	executorCompleted     executorState = "completed"
+	executorVerifying     executorState = "verifying"
+	executorVerified      executorState = "verified"
+	executorCreatingPR    executorState = "creating_pr"
+	executorPRCreated     executorState = "pr_created"
+	executorReviewing     executorState = "reviewing"
+	executorReviewBlocked executorState = "review_blocked"
+	executorFixing        executorState = "fixing"
+	executorMergeReady    executorState = "merge_ready"
+	executorMergeApproved executorState = "merge_approved"
+	executorMerging       executorState = "merging"
+	executorMerged        executorState = "merged"
+	executorCleanupDone   executorState = "cleanup_done"
+	executorFailed        executorState = "failed"
 )
 
 type IntakeStatus struct {
@@ -193,6 +237,12 @@ type IntakeStatus struct {
 	ExecutorCancelled     bool
 	ExecutorCompleted     bool
 	ExecutorWorkspacePath string
+	RunID                 string
+	ReviewRound           int
+	ReviewFindings        string
+	RetryState            executorState
+	PR                    PullRequest
+	VerificationOutput    string
 }
 
 // GitHub is deliberately the small automation boundary used by the handler.
@@ -205,6 +255,22 @@ type GitHub interface {
 // raw executor output before redaction.
 type ExecutorRunner interface {
 	Run(ctx context.Context, workspacePath string, onLine func(line string) error, name string, args ...string) (ExecutorRunResult, error)
+}
+
+type RunLease interface {
+	Acquire(context.Context, string, int, ExecutorKind) (string, error)
+	Release(context.Context, string, string, string) error
+	RecentFailures(context.Context, string, int) ([]FailureRecord, error)
+}
+
+type PRStateReader interface {
+	State(ctx context.Context, repo Repository, number int) (string, error)
+}
+
+type ActiveRun struct{ RunID string }
+
+type ActiveRunLister interface {
+	ListActive(context.Context) ([]ActiveRun, error)
 }
 
 // ExecutorRunResult captures the final state of an executor run.
@@ -248,6 +314,12 @@ type Dependencies struct {
 	IssueWorkspace            IssueClone
 	Preflight                 Preflight
 	VerificationRunner        VerificationRunner
+	RunLease                  RunLease
+	PRCreator                 PRCreator
+	MergeabilityChecker       MergeabilityChecker
+	MergeExecutor             MergeExecutor
+	Reviewer                  Reviewer
+	ReviewCommenter           ReviewCommenter
 	RalphexExecutionConfigDir string
 }
 
@@ -380,6 +452,26 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err = addColumnIfMissing(db, "intakes", "pr_number", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "review_findings", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("add review findings column: %w", err)
+	}
+	if err = addColumnIfMissing(db, "intakes", "review_round", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("add review round column: %w", err)
+	}
+	if err = addColumnIfMissing(db, "intakes", "pr_url", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "retry_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err = recoverDuplicatePendingTurns(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -388,7 +480,8 @@ func New(deps Dependencies) (*application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	t, err := template.New("page").Parse(pageTemplate)
+	executorControls := `{{else if eq .Intake.ExecutorState "verified"}}<p>State: verified</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/create-pr"><button class="btn btn-primary">Create pull request</button></form>{{else if eq .Intake.ExecutorState "creating_pr"}}<p>State: creating pull request</p>{{else if eq .Intake.ExecutorState "pr_created"}}<p>State: pull request created</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/review"><button class="btn btn-primary">Review pull request</button></form>{{else if eq .Intake.ExecutorState "reviewing"}}<p>State: reviewing pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel review</button></form>{{else if eq .Intake.ExecutorState "review_blocked"}}<p>State: review blocked</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/fix"><button class="btn btn-primary">Fix review findings</button></form>{{else if eq .Intake.ExecutorState "merge_ready"}}<p>State: merge ready</p>{{if .Intake.PR.URL}}<a href="{{.Intake.PR.URL}}">View pull request</a>{{end}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/approve-merge"><button class="btn btn-success">Approve merge</button></form>{{else if eq .Intake.ExecutorState "merge_approved"}}<p>State: merge approved</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/merge"><button class="btn btn-success">Merge pull request</button></form>{{else if eq .Intake.ExecutorState "merging"}}<p>State: merging pull request</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cancel"><button class="btn btn-outline-danger">Cancel merge</button></form>{{else if eq .Intake.ExecutorState "merged"}}<p>State: merged</p><form method="post" action="/repositories/{{.RepositoryID}}/executor/cleanup"><button class="btn btn-primary">Clean up workspace</button></form>{{else if eq .Intake.ExecutorState "failed"}}<p>State: failed</p><p>Duration: {{.Intake.ExecutorDuration}}</p><p>Exit code: {{.Intake.ExecutorExitCode}}</p>{{if .Intake.ExecutorCancelled}}<p class="text-warning">Run was cancelled</p>{{end}}{{if eq .Intake.RetryState "creating_pr"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-pr"><button class="btn btn-outline-primary">Retry pull request creation</button></form>{{else if eq .Intake.RetryState "reviewing"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-review"><button class="btn btn-outline-primary">Retry pull request review</button></form>{{else if eq .Intake.RetryState "merging"}}<form method="post" action="/repositories/{{.RepositoryID}}/executor/retry-merge"><button class="btn btn-outline-primary">Request merge approval again</button></form>{{end}}{{else if .Intake.ExecutorCompleted}}`
+	t, err := template.New("page").Parse(strings.Replace(pageTemplate, `{{else if .Intake.ExecutorCompleted}}`, executorControls, 1))
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -418,7 +511,17 @@ func New(deps Dependencies) (*application, error) {
 	mux.HandleFunc("POST /repositories/{id}/executor/plan", a.executorPlan)
 	mux.HandleFunc("POST /repositories/{id}/executor/approve", a.executorApprove)
 	mux.HandleFunc("POST /repositories/{id}/executor/run", a.executorRun)
+	mux.HandleFunc("POST /repositories/{id}/executor/create-pr", a.executorCreatePR)
+	mux.HandleFunc("POST /repositories/{id}/executor/review", a.executorReview)
+	mux.HandleFunc("POST /repositories/{id}/executor/approve-merge", a.executorApproveMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/merge", a.executorMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/cleanup", a.executorCleanup)
+	mux.HandleFunc("POST /repositories/{id}/executor/fix", a.executorFix)
 	mux.HandleFunc("POST /repositories/{id}/executor/cancel", a.executorCancel)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-pr", a.executorRetryPR)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-review", a.executorRetryReview)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-merge", a.executorRetryMerge)
+	mux.HandleFunc("POST /repositories/{id}/executor/retry-cleanup", a.executorRetryCleanup)
 	mux.HandleFunc("POST /notifications/test", a.testNotification)
 	a.handler = a.authorized(mux)
 	if err := a.resumePendingTurns(); err != nil {
@@ -427,6 +530,146 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// ReconcileStartup repairs intake state after a process crash. GitHub is the
+// authority for PR state; the lease scan is intentionally independent so a
+// crash before run_id was persisted is recoverable too.
+func (a *application) ReconcileStartup(ctx context.Context, prs PRStateReader) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT i.repository_id,r.full_name,COALESCE(i.pr_number,0),i.executor_state,i.run_id FROM intakes i JOIN repositories r ON r.id=i.repository_id WHERE i.executor_state IN ('planning','running','verifying','creating_pr','pr_created','reviewing','review_blocked','fixing','merge_ready','merge_approved','merging','merged','failed','cleanup_done')`)
+	if err != nil {
+		return fmt.Errorf("startup reconciliation: query intakes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, fullName, runID, state string
+		var number int
+		if err := rows.Scan(&id, &fullName, &number, &state, &runID); err != nil {
+			return err
+		}
+		if (state == string(executorFailed) || state == string(executorCleanupDone)) && runID != "" && a.deps.RunLease != nil {
+			leaseState := "failed"
+			if state == string(executorCleanupDone) {
+				leaseState = "completed"
+			}
+			if err := a.deps.RunLease.Release(ctx, runID, leaseState, "startup terminal reconciliation"); err != nil {
+				return fmt.Errorf("startup reconciliation: release terminal lease %q: %w", runID, err)
+			}
+			continue
+		}
+		if state == string(executorPlanning) || state == string(executorRunning) || state == string(executorVerifying) || state == string(executorCreatingPR) {
+			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, state, time.Now().UTC().Format(time.RFC3339Nano), id, state); err != nil {
+				return err
+			}
+			if runID != "" && a.deps.RunLease != nil {
+				if err := a.deps.RunLease.Release(ctx, runID, string(executorFailed), "startup recovery during interrupted executor phase"); err != nil {
+					return fmt.Errorf("startup reconciliation: release interrupted lease %q: %w", runID, err)
+				}
+			}
+			continue
+		}
+		if prs == nil || number == 0 {
+			continue
+		}
+		remote, err := prs.State(ctx, Repository{ID: id, FullName: fullName}, number)
+		if err != nil {
+			// This pass is deliberately serial (one bounded worker) and backs
+			// off after GitHub errors so a large interrupted deployment cannot
+			// consume the API allowance in a burst.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(startupReconciliationBackoff):
+			}
+			continue
+		}
+		next := executorState(state)
+		switch remote {
+		case "MERGED":
+			next = executorMerged
+		case "CLOSED":
+			next = executorFailed
+		case "OPEN":
+			switch next {
+			case executorReviewing:
+				next = executorPRCreated
+			case executorFixing:
+				next = executorReviewBlocked
+			case executorMerging:
+				next = executorMergeReady
+			}
+		}
+		if next != executorState(state) {
+			if _, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, next, time.Now().UTC().Format(time.RFC3339Nano), id, state); err != nil {
+				return err
+			}
+		}
+		if next == executorFailed && runID != "" && a.deps.RunLease != nil {
+			if err := a.deps.RunLease.Release(ctx, runID, string(next), "startup reconciliation"); err != nil {
+				return fmt.Errorf("startup reconciliation: release failed lease %q: %w", runID, err)
+			}
+		}
+		if next == executorMerged {
+			if err := a.cleanupMerged(ctx, id); err != nil {
+				return fmt.Errorf("startup reconciliation: cleanup merged pull request: %w", err)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if lister, ok := a.deps.RunLease.(ActiveRunLister); ok {
+		active, err := lister.ListActive(ctx)
+		if err != nil {
+			return err
+		}
+		for _, run := range active {
+			var found int
+			if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM intakes WHERE run_id=?`, run.RunID).Scan(&found); err != nil {
+				return err
+			}
+			if found == 0 {
+				if err := a.deps.RunLease.Release(ctx, run.RunID, string(executorFailed), "orphaned lease recovered"); err != nil {
+					return fmt.Errorf("startup reconciliation: release orphaned lease %q: %w", run.RunID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// CleanupExpiredFailedWorkspaces removes only failed or cancelled implementation
+// clones whose age exceeds retention. It leaves all database history intact.
+func (a *application) CleanupExpiredFailedWorkspaces(ctx context.Context, retention time.Duration) error {
+	if a.deps.IssueWorkspace == nil {
+		return nil
+	}
+	cleaner, ok := a.deps.IssueWorkspace.(interface {
+		CleanupExpired(context.Context, []string, time.Duration, time.Time) error
+	})
+	if !ok {
+		return fmt.Errorf("issue workspace does not support retention cleanup")
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT executor_workspace_path FROM intakes WHERE executor_workspace_path != '' AND (executor_state=? OR executor_cancelled=1)`, executorFailed)
+	if err != nil {
+		return fmt.Errorf("query expired failed workspaces: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return err
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := cleaner.CleanupExpired(ctx, paths, retention, time.Now()); err != nil {
+		return fmt.Errorf("cleanup expired failed workspaces: %w", err)
+	}
+	return nil
 }
 
 // recoverIntakes completes only local, already-authorized work after a
@@ -1580,15 +1823,27 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Derive scope from conversation state. For now, default to "medium".
-	// repoPolicy and priorFailures are empty: policy support (operator
-	// config) and failure history (Task 14) are later additions.
-	selection := SelectExecutor("medium", "", nil)
+	var priorFailures []FailureRecord
+	if a.deps.RunLease != nil {
+		var err error
+		priorFailures, err = a.deps.RunLease.RecentFailures(r.Context(), id, 10)
+		if err != nil {
+			http.Error(w, "could not load executor history", http.StatusInternalServerError)
+			return
+		}
+	}
+	selection := SelectExecutor("medium", "", priorFailures)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,updated_at=excluded.updated_at`,
-		id, "", string(selection.Kind), selection.Rationale, string(executorSelected), now); err != nil {
+	result, err := a.db.ExecContext(r.Context(),
+		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,retry_state='',updated_at=excluded.updated_at WHERE intakes.executor_state IN ('','selected','failed','cleanup_done')`,
+		id, "", string(selection.Kind), selection.Rationale, string(executorSelected), now)
+	if err != nil {
 		http.Error(w, "could not store executor selection", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor selection requires a terminal lifecycle state", http.StatusConflict)
 		return
 	}
 	a.redirectWorkspace(w, r, id)
@@ -1744,6 +1999,65 @@ func (a *application) executorApprove(w http.ResponseWriter, r *http.Request) {
 	a.redirectWorkspace(w, r, id)
 }
 
+// verifyExecutorRun runs the canonical checks after a coding executor has
+// completed successfully. The state transition is compare-and-swap guarded
+// so a run cannot be verified twice by competing requests.
+func (a *application) verifyExecutorRun(id, workspacePath string) (bool, error) {
+	if a.deps.VerificationRunner == nil {
+		// Deployments without the optional verifier retain the historical
+		// completed state; configured deployments always pass through checks.
+		return true, nil
+	}
+	result, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorCompleted, executorVerifying)
+	if err != nil {
+		return false, fmt.Errorf("start verification")
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return false, fmt.Errorf("claim verification")
+	}
+	verification, err := a.deps.VerificationRunner.Run(a.ctx, workspacePath, nil)
+	if err := a.storeVerificationOutput(id, verification); err != nil {
+		if _, updateErr := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying); updateErr != nil {
+			return false, fmt.Errorf("store verification output: %w; record failure: %v", err, updateErr)
+		}
+		return false, fmt.Errorf("store verification output: %w", err)
+	}
+	state := executorVerified
+	if err != nil || !verification.ReadyForPR {
+		state = executorFailed
+	}
+	result, updateErr := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying)
+	if updateErr != nil {
+		return false, fmt.Errorf("record verification result: %w", updateErr)
+	}
+	changed, rowsErr := result.RowsAffected()
+	if rowsErr != nil || changed != 1 {
+		return false, fmt.Errorf("record verification result: state changed")
+	}
+	if state == executorFailed {
+		if status, statusErr := a.intakeStatus(a.ctx, id); statusErr == nil {
+			a.releaseLease(a.ctx, status, "verification failed")
+		}
+	}
+	return state == executorVerified, nil
+}
+
+func (a *application) storeVerificationOutput(id string, verification VerificationResult) error {
+	var body strings.Builder
+	body.WriteString("# Verification output\n\n")
+	for _, check := range verification.Checks {
+		fmt.Fprintf(&body, "## %s\n\nPassed: %t\nExit code: %d\n\n%s\n\n", check.Name, check.Passed, check.ExitCode, redactSecrets(check.Output))
+	}
+	if len(verification.Checks) == 0 {
+		fmt.Fprintf(&body, "Ready for PR: %t\n", verification.ReadyForPR)
+	}
+	if _, err := a.db.ExecContext(a.ctx, `INSERT INTO intake_artifacts(repository_id,kind,body,created_at) VALUES(?,?,?,?) ON CONFLICT(repository_id,kind) DO UPDATE SET body=excluded.body,created_at=excluded.created_at`, id, artifactVerificationOutput, body.String(), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("persist verification output: %w", err)
+	}
+	return nil
+}
+
 func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	status, err := a.intakeStatus(r.Context(), id)
@@ -1767,6 +2081,10 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		a.runVerification(w, r, id, status.ExecutorWorkspacePath)
 		return
 	}
+	if kind := ExecutorKind(status.ExecutorKind); kind != Ralphex && kind != Codex && kind != Pi {
+		http.Error(w, fmt.Sprintf("unsupported executor kind: %s", status.ExecutorKind), http.StatusBadRequest)
+		return
+	}
 	if a.deps.ExecutorRunner == nil {
 		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
 		return
@@ -1788,6 +2106,21 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil || claimed != 1 {
 		http.Error(w, "executor state changed before run could be started", http.StatusConflict)
 		return
+	}
+	runID := ""
+	if a.deps.RunLease != nil {
+		runID, err = a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, ExecutorKind(status.ExecutorKind))
+		if err != nil {
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorRunning)
+			http.Error(w, fmt.Sprintf("could not acquire executor lease: %v", err), http.StatusConflict)
+			return
+		}
+		if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorRunning); err != nil {
+			_ = a.deps.RunLease.Release(a.ctx, runID, "failed", "could not persist executor lease")
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorRunning)
+			http.Error(w, "could not persist executor lease", http.StatusInternalServerError)
+			return
+		}
 	}
 	// Register cancellation only after this request has atomically claimed the
 	// approved run. A competing request must never replace its cancel handler.
@@ -1890,7 +2223,343 @@ func (a *application) executorRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not persist executor result", http.StatusInternalServerError)
 		return
 	}
+	if terminalState == executorCompleted {
+		if _, err := a.verifyExecutorRun(id, workspacePath); err != nil {
+			http.Error(w, "could not verify executor result", http.StatusInternalServerError)
+			return
+		}
+	} else if runID != "" {
+		_ = a.deps.RunLease.Release(a.ctx, runID, "failed", "executor failed")
+	}
 	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorCreatePR(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.PRCreator == nil {
+		http.Error(w, "pull request creator is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorVerified {
+		http.Error(w, "pull request creation requires verified work", http.StatusConflict)
+		return
+	}
+	claim, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCreatingPR, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerified)
+	if err != nil {
+		http.Error(w, "could not claim pull request creation", http.StatusInternalServerError)
+		return
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "executor state changed before pull request creation could start", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerified, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR)
+		http.Error(w, "could not load repository", http.StatusInternalServerError)
+		return
+	}
+	pr, err := a.deps.PRCreator.CreateOrReuse(r.Context(), repo, status)
+	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerified, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR)
+		http.Error(w, fmt.Sprintf("could not create pull request: %v", err), http.StatusBadGateway)
+		return
+	}
+	if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,pr_number=?,pr_url=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPRCreated, pr.Number, pr.URL, time.Now().UTC().Format(time.RFC3339Nano), id, executorCreatingPR); err != nil {
+		http.Error(w, "could not persist pull request", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorReview(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.Reviewer == nil {
+		http.Error(w, "reviewer is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", 500)
+		return
+	}
+	if status.ExecutorState != executorPRCreated {
+		http.Error(w, "review requires a created pull request", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", 500)
+		return
+	}
+	claim, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated)
+	if err != nil {
+		http.Error(w, "could not start review", 500)
+		return
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil || claimed != 1 {
+		http.Error(w, "review state changed before it could start", http.StatusConflict)
+		return
+	}
+	result, err := a.deps.Reviewer.Review(r.Context(), repo, status.PR, status)
+	if err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
+		a.releaseLease(r.Context(), status, "review failed")
+		http.Error(w, "review failed", http.StatusBadGateway)
+		return
+	}
+	findings := redactSecrets(result.Findings)
+	state := executorMergeReady
+	if !result.Approved || result.Blocked {
+		state = executorReviewBlocked
+		if a.deps.ReviewCommenter != nil {
+			if err := a.deps.ReviewCommenter.PostFindings(r.Context(), repo, status.PR, findings, status.ReviewRound); err != nil {
+				_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, executorReviewing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing)
+				a.releaseLease(r.Context(), status, "publish review findings failed")
+				http.Error(w, "could not publish review findings", http.StatusBadGateway)
+				return
+			}
+		}
+	}
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, findings, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing); err != nil {
+		http.Error(w, "could not persist review", 500)
+		return
+	}
+	if state == executorMergeReady && a.deps.Telegram != nil {
+		_ = a.deps.Telegram.Notify(r.Context(), Notification{Text: "Pull request is ready for merge approval", URL: strings.TrimRight(a.deps.DashboardURL, "/") + "/repositories/" + id})
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorApproveMerge(w http.ResponseWriter, r *http.Request) {
+	if a.deps.MergeabilityChecker == nil {
+		http.Error(w, "mergeability checker is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState != executorMergeReady {
+		http.Error(w, "merge approval requires a review-ready pull request", http.StatusConflict)
+		return
+	}
+	mergeable, reason, err := a.deps.MergeabilityChecker.CheckMergeable(r.Context(), repo, status.PR.Number)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not check pull request mergeability: %v", err), http.StatusBadGateway)
+		return
+	}
+	if !mergeable {
+		http.Error(w, reason, http.StatusConflict)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeApproved, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeReady)
+	if err != nil {
+		http.Error(w, "could not record merge approval", http.StatusInternalServerError)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before merge approval could be recorded", http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorFix(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.ExecutorRunner == nil {
+		http.Error(w, "executor runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil || status.ExecutorState != executorReviewBlocked {
+		http.Error(w, "review fix requires blocked review", http.StatusConflict)
+		return
+	}
+	if status.ReviewRound >= MaxReviewRounds {
+		_, _ = a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, "maximum review fix rounds exhausted", time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewBlocked)
+		a.releaseLease(r.Context(), status, "maximum review fix rounds exhausted")
+		http.Error(w, "maximum review fix rounds exhausted", http.StatusConflict)
+		return
+	}
+	var name string
+	var args []string
+	prompt := fmt.Sprintf("Fix the following independent review findings in the workspace, then run the relevant checks:\n\n%s", status.ReviewFindings)
+	switch ExecutorKind(status.ExecutorKind) {
+	case Ralphex:
+		if a.deps.RalphexExecutionConfigDir == "" {
+			http.Error(w, "ralphex execution configuration is not configured", http.StatusServiceUnavailable)
+			return
+		}
+		name, args = "ralphex", []string{"--config-dir", a.deps.RalphexExecutionConfigDir, "-p", prompt}
+	case Codex:
+		name, args = "codex", []string{"exec", prompt}
+	case Pi:
+		name, args = "pi", []string{"-p", prompt}
+	default:
+		http.Error(w, "unsupported executor kind for review fix", http.StatusBadRequest)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFixing, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewBlocked)
+	if err != nil {
+		http.Error(w, "could not claim review fix", http.StatusInternalServerError)
+		return
+	}
+	changed, rowsErr := result.RowsAffected()
+	if rowsErr != nil || changed != 1 {
+		http.Error(w, "review state changed before fix could start", http.StatusConflict)
+		return
+	}
+	// A review fix may outlive the POST request. Bind it to the application
+	// lifecycle instead, so a client disconnect does not cancel valid work.
+	runCtx, runCancel := context.WithCancel(a.ctx)
+	defer runCancel()
+	runResult, runErr := a.deps.ExecutorRunner.Run(runCtx, status.ExecutorWorkspacePath, nil, name, args...)
+	if runErr != nil || runResult.ExitCode != 0 || runResult.Cancelled {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorFixing)
+		a.releaseLease(a.ctx, status, "review fix executor failed")
+		http.Error(w, "review fix executor failed", http.StatusBadGateway)
+		return
+	}
+	_, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_round=review_round+1,updated_at=? WHERE repository_id=? AND executor_state=?`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorFixing)
+	if err != nil {
+		http.Error(w, "could not start post-fix verification", http.StatusInternalServerError)
+		return
+	}
+	verified, verifyErr := a.verifyExecutorRun(id, status.ExecutorWorkspacePath)
+	if verifyErr != nil {
+		http.Error(w, "could not persist post-fix verification", http.StatusInternalServerError)
+		return
+	}
+	if !verified {
+		http.Error(w, "post-fix verification failed", http.StatusBadGateway)
+		return
+	}
+	if _, err := a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorPRCreated, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerified); err != nil {
+		http.Error(w, "could not resume review after verification", http.StatusInternalServerError)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+func (a *application) executorMerge(w http.ResponseWriter, r *http.Request) {
+	if a.deps.MergeExecutor == nil {
+		http.Error(w, "merge executor is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", 500)
+		return
+	}
+	if status.ExecutorState != executorMergeApproved {
+		http.Error(w, "merge requires approved pull request", http.StatusConflict)
+		return
+	}
+	repo, err := a.repository(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load repository", 500)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerging, time.Now().UTC().Format(time.RFC3339Nano), id, executorMergeApproved)
+	if err != nil {
+		http.Error(w, "could not start merge", 500)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "merge approval was already consumed", http.StatusConflict)
+		return
+	}
+	if err = a.deps.MergeExecutor.Merge(r.Context(), repo, status.PR.Number); err != nil {
+		_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,review_findings=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMergeReady, err.Error(), time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging)
+		http.Error(w, fmt.Sprintf("pull request merge rejected: %v", err), http.StatusConflict)
+		return
+	}
+	if _, err = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerging); err != nil {
+		http.Error(w, "could not record merged state", 500)
+		return
+	}
+	if err = a.deps.MergeExecutor.CloseIssue(r.Context(), repo, status.PublishedIssue.Number); err != nil {
+		http.Error(w, fmt.Sprintf("issue closure failed; retry cleanup: %v", err), http.StatusBadGateway)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+// executorCleanup removes the implementation workspace only after GitHub
+// confirms that the pull request is merged. Local state is deliberately not
+// sufficient: a crash can leave it ahead of GitHub.
+func (a *application) executorCleanup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.deps.MergeExecutor == nil || a.deps.IssueWorkspace == nil {
+		http.Error(w, "cleanup is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.cleanupMerged(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	a.redirectWorkspace(w, r, id)
+}
+
+// cleanupMerged completes the post-merge work only after GitHub confirms the
+// merge. It is shared by the operator action and startup recovery.
+func (a *application) cleanupMerged(ctx context.Context, id string) error {
+	if a.deps.MergeExecutor == nil || a.deps.IssueWorkspace == nil {
+		return errors.New("cleanup is not configured")
+	}
+	status, err := a.intakeStatus(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load intake: %w", err)
+	}
+	if status.ExecutorState != executorMerged {
+		return errors.New("cleanup requires a merged pull request")
+	}
+	repo, err := a.repository(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load repository: %w", err)
+	}
+	if err := a.deps.MergeExecutor.ConfirmMerged(ctx, repo, status.PR.Number); err != nil {
+		return fmt.Errorf("pull request is not confirmed merged: %w", err)
+	}
+	if err := a.deps.MergeExecutor.CloseIssue(ctx, repo, status.PublishedIssue.Number); err != nil {
+		return fmt.Errorf("close issue: %w", err)
+	}
+	if err := a.deps.IssueWorkspace.Cleanup(ctx, status.ExecutorWorkspacePath); err != nil {
+		return fmt.Errorf("cleanup workspace: %w", err)
+	}
+	result, err := a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorCleanupDone, time.Now().UTC().Format(time.RFC3339Nano), id, executorMerged)
+	if err != nil {
+		return fmt.Errorf("record cleanup: %w", err)
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 1 && a.deps.RunLease != nil && status.RunID != "" {
+		if err := a.deps.RunLease.Release(ctx, status.RunID, "completed", ""); err != nil {
+			// Keep cleanup actionable when the independent lease store is
+			// unavailable. Workspace cleanup and issue closure are idempotent,
+			// so the normal cleanup action can safely retry the release.
+			_, _ = a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorMerged, time.Now().UTC().Format(time.RFC3339Nano), id, executorCleanupDone)
+			return fmt.Errorf("release implementation lease: %w", err)
+		}
+	}
+	return nil
 }
 
 // executorWorkspace returns the durable clone for an implementation issue,
@@ -1940,18 +2609,52 @@ func (a *application) runVerification(w http.ResponseWriter, r *http.Request, id
 		http.Error(w, "verification runner is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	result, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state IN (?,?,?)`, executorVerifying, time.Now().UTC().Format(time.RFC3339Nano), id, executorSelected, executorApproved, executorPlanning)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("verification failed: %v", err), http.StatusInternalServerError)
+		http.Error(w, "could not start verification", http.StatusInternalServerError)
 		return
 	}
-	state := executorCompleted
-	if !result.ReadyForPR {
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		http.Error(w, "executor state changed before verification could start", http.StatusConflict)
+		return
+	}
+	if a.deps.RunLease != nil {
+		status, statusErr := a.intakeStatus(r.Context(), id)
+		if statusErr != nil {
+			http.Error(w, "could not load verification intake", http.StatusInternalServerError)
+			return
+		}
+		runID, acquireErr := a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, VerificationOnly)
+		if acquireErr != nil {
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorSelected, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying)
+			http.Error(w, fmt.Sprintf("could not acquire executor lease: %v", acquireErr), http.StatusConflict)
+			return
+		}
+		if _, persistErr := a.db.ExecContext(a.ctx, `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying); persistErr != nil {
+			_ = a.deps.RunLease.Release(a.ctx, runID, "failed", "could not persist verification lease")
+			_, _ = a.db.ExecContext(a.ctx, `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorSelected, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying)
+			http.Error(w, "could not persist executor lease", http.StatusInternalServerError)
+			return
+		}
+	}
+	verification, err := a.deps.VerificationRunner.Run(r.Context(), workspacePath, nil)
+	if err := a.storeVerificationOutput(id, verification); err != nil {
+		http.Error(w, "could not store verification output", http.StatusInternalServerError)
+		return
+	}
+	state := executorVerified
+	if err != nil || !verification.ReadyForPR {
 		state = executorFailed
 	}
-	if _, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, state, time.Now().UTC().Format(time.RFC3339Nano), id, executorVerifying); err != nil {
 		http.Error(w, "could not record verification result", http.StatusInternalServerError)
 		return
+	}
+	if state == executorFailed {
+		if status, statusErr := a.intakeStatus(r.Context(), id); statusErr == nil {
+			a.releaseLease(r.Context(), status, "verification failed")
+		}
 	}
 	a.redirectWorkspace(w, r, id)
 }
@@ -1961,6 +2664,21 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 	status, err := a.intakeStatus(r.Context(), id)
 	if err != nil {
 		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	if status.ExecutorState == executorReviewing || status.ExecutorState == executorMerging {
+		result, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state=executor_state,updated_at=? WHERE repository_id=? AND executor_state IN (?,?)`, executorFailed, time.Now().UTC().Format(time.RFC3339Nano), id, executorReviewing, executorMerging)
+		if updateErr != nil {
+			http.Error(w, "could not cancel executor phase", http.StatusInternalServerError)
+			return
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			http.Error(w, "executor phase already changed", http.StatusConflict)
+			return
+		}
+		a.releaseFailedLease(r.Context(), status)
+		a.redirectWorkspace(w, r, id)
 		return
 	}
 	if status.ExecutorState != executorRunning {
@@ -1981,6 +2699,98 @@ func (a *application) executorCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.redirectWorkspace(w, r, id)
+}
+
+// Retry endpoints only rewind the failed phase's own state. The phase handler
+// then performs its normal idempotent GitHub query before mutating anything.
+func (a *application) executorRetryPR(w http.ResponseWriter, r *http.Request) {
+	a.retryPhase(w, r, executorCreatingPR, executorVerified, executorPRCreated)
+}
+
+func (a *application) executorRetryReview(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state='',updated_at=? WHERE repository_id=? AND executor_state=? AND retry_state=?`, executorPRCreated, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed, executorReviewing)
+	if err != nil {
+		http.Error(w, "could not retry executor phase", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "retry requires this failed phase", http.StatusConflict)
+		return
+	}
+	if a.deps.RunLease != nil {
+		runID, acquireErr := a.deps.RunLease.Acquire(r.Context(), id, status.PublishedIssue.Number, ExecutorKind(status.ExecutorKind))
+		if acquireErr != nil {
+			a.restoreFailedRetry(r.Context(), id, executorPRCreated, executorReviewing)
+			http.Error(w, "could not acquire implementation lease: "+acquireErr.Error(), http.StatusConflict)
+			return
+		}
+		updated, updateErr := a.db.ExecContext(r.Context(), `UPDATE intakes SET run_id=?,updated_at=? WHERE repository_id=? AND executor_state=?`, runID, time.Now().UTC().Format(time.RFC3339Nano), id, executorPRCreated)
+		if updateErr != nil {
+			_ = a.deps.RunLease.Release(r.Context(), runID, "failed", "could not persist retry lease")
+			a.restoreFailedRetry(r.Context(), id, executorPRCreated, executorReviewing)
+			http.Error(w, "could not persist implementation lease", http.StatusInternalServerError)
+			return
+		}
+		persisted, _ := updated.RowsAffected()
+		if persisted != 1 {
+			_ = a.deps.RunLease.Release(r.Context(), runID, "failed", "review retry state changed")
+			http.Error(w, "review retry state changed", http.StatusConflict)
+			return
+		}
+	}
+	a.executorReview(w, r)
+}
+
+func (a *application) restoreFailedRetry(ctx context.Context, id string, from, failedPhase executorState) {
+	_, _ = a.db.ExecContext(ctx, `UPDATE intakes SET executor_state=?,retry_state=?,updated_at=? WHERE repository_id=? AND executor_state=?`, executorFailed, failedPhase, time.Now().UTC().Format(time.RFC3339Nano), id, from)
+}
+
+func (a *application) executorRetryMerge(w http.ResponseWriter, r *http.Request) {
+	a.retryPhase(w, r, executorMerging, executorMergeReady, executorMergeReady)
+}
+
+func (a *application) executorRetryCleanup(w http.ResponseWriter, r *http.Request) {
+	a.executorCleanup(w, r)
+}
+
+func (a *application) retryPhase(w http.ResponseWriter, r *http.Request, failedPhase, from, to executorState) {
+	id := r.PathValue("id")
+	result, err := a.db.ExecContext(r.Context(), `UPDATE intakes SET executor_state=?,retry_state='',updated_at=? WHERE repository_id=? AND executor_state=? AND retry_state=?`, from, time.Now().UTC().Format(time.RFC3339Nano), id, executorFailed, failedPhase)
+	if err != nil {
+		http.Error(w, "could not retry executor phase", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "retry requires this failed phase", http.StatusConflict)
+		return
+	}
+	if to == executorPRCreated {
+		a.executorCreatePR(w, r)
+		return
+	}
+	if to == executorMergeReady {
+		a.redirectWorkspace(w, r, id)
+		return
+	}
+	a.executorReview(w, r)
+}
+
+func (a *application) releaseLease(ctx context.Context, status IntakeStatus, reason string) {
+	if a.deps.RunLease != nil && status.RunID != "" {
+		_ = a.deps.RunLease.Release(ctx, status.RunID, "failed", reason)
+	}
+}
+
+func (a *application) releaseFailedLease(ctx context.Context, status IntakeStatus) {
+	a.releaseLease(ctx, status, "operator cancelled")
 }
 
 func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
@@ -2258,18 +3068,24 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var executorStateStr string
 	var durationNs int64
 	var cancelledInt int
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath)
-	status.ExecutorState = executorState(executorStateStr)
-	status.ExecutorDuration = time.Duration(durationNs)
-	status.ExecutorCancelled = cancelledInt != 0
-	status.ExecutorCompleted = status.ExecutorState == executorCompleted || status.ExecutorState == executorFailed
-	status.PublishedIssue.Number = int(number.Int64)
+	var prNumber int
+	var prURL string
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil
 	}
 	if err != nil {
-		return IntakeStatus{}, err
+		return IntakeStatus{}, fmt.Errorf("load intake status: %w", err)
 	}
+	status.ExecutorState = executorState(executorStateStr)
+	status.PR = PullRequest{Number: prNumber, URL: prURL, State: "open"}
+	if err := a.db.QueryRowContext(ctx, `SELECT body FROM intake_artifacts WHERE repository_id=? AND kind=?`, id, artifactVerificationOutput).Scan(&status.VerificationOutput); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return IntakeStatus{}, fmt.Errorf("load verification output: %w", err)
+	}
+	status.ExecutorDuration = time.Duration(durationNs)
+	status.ExecutorCancelled = cancelledInt != 0
+	status.ExecutorCompleted = status.ExecutorState == executorCompleted || status.ExecutorState == executorFailed
+	status.PublishedIssue.Number = int(number.Int64)
 	rows, err := a.db.QueryContext(ctx, `SELECT issue_number,issue_url FROM intake_issues WHERE repository_id=? ORDER BY ticket_index`, id)
 	if err != nil {
 		return IntakeStatus{}, err

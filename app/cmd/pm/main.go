@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 	"github.com/mkoziy/hermestrator/internal/live"
@@ -26,7 +27,16 @@ func main() {
 	issueWorkspaceBase := envOr("PM_EXECUTOR_WORKSPACE_DIR", filepath.Join(os.TempDir(), "hermestrator-executor-workspaces"))
 	planningProfile := envOr("PM_PLANNING_PROFILE", filepath.Join(os.TempDir(), "hermestrator-planning-profile.json"))
 	processRunner := &live.ProcessRunner{}
+	runStore, err := live.NewImplementationRunStore(store)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = runStore.Close() }()
 	planner := &live.Planner{Runner: processRunner, ProfilePath: planningProfile, RalphexPlanningConfigDir: envOr("PM_RALPHEX_PLANNING_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-planning"))}
+	reviewer := live.GHReviewer{
+		StandardsModel: live.NewReviewModelFunc(model.Genkit(), envOr("PM_MODEL_REVIEW_STANDARDS", envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini"))),
+		SpecModel:      live.NewReviewModelFunc(model.Genkit(), envOr("PM_MODEL_REVIEW_SPEC", envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini"))),
+	}
 	app, err := dashboard.New(dashboard.Dependencies{
 		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
 		Model:       model,
@@ -49,10 +59,25 @@ func main() {
 		IssueWorkspace:            live.IssueWorkspace{BaseDir: issueWorkspaceBase},
 		Preflight:                 live.DashboardPreflight{Preflight: &live.Preflight{}},
 		VerificationRunner:        live.DashboardVerificationRunner{Runner: &live.VerificationRunner{Runner: processRunner}},
+		RunLease:                  live.DashboardRunLease{Store: runStore},
+		PRCreator:                 live.GHPRCreator{},
+		Reviewer:                  reviewer,
+		ReviewCommenter:           reviewer,
+		MergeabilityChecker:       live.GHPRCreator{},
+		MergeExecutor:             live.GHMergeExecutor{},
 		RalphexExecutionConfigDir: envOr("PM_RALPHEX_EXECUTION_CONFIG_DIR", filepath.Join(os.TempDir(), "hermestrator-ralphex-execution")),
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+	// Reconcile from the intake lifecycle before considering leases. A lease
+	// remains held while an open PR awaits review, approval, merge, or cleanup;
+	// ReconcileStartup releases only interrupted and orphaned leases.
+	if err := app.ReconcileStartup(ctx, live.GHPRCreator{}); err != nil {
+		log.Printf("startup PR reconciliation: %v", err)
+	}
+	if err := app.CleanupExpiredFailedWorkspaces(ctx, live.RetentionWindowFromEnv(7*24*time.Hour)); err != nil {
+		log.Printf("failed workspace retention: %v", err)
 	}
 	defer func() { _ = app.Close() }()
 	handler, err := (live.GitHubOAuth{BaseURL: dashboardURL, ClientID: os.Getenv("GITHUB_OAUTH_CLIENT_ID"), ClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"), JWTSecret: os.Getenv("PM_JWT_SECRET"), SecureCookie: !strings.HasPrefix(dashboardURL, "http://localhost")}).Wrap(app)

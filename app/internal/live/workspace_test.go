@@ -8,9 +8,39 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
 )
+
+func TestIssueWorkspaceCleanupExpiredRespectsRetention(t *testing.T) {
+	base := t.TempDir()
+	old := filepath.Join(base, "old")
+	fresh := filepath.Join(base, "fresh")
+	if err := os.Mkdir(old, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(fresh, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(old, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(fresh, now.Add(-5*time.Minute), now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	ws := IssueWorkspace{BaseDir: base}
+	if err := ws.CleanupExpired(context.Background(), []string{old, fresh}, time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old workspace remains: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh workspace removed: %v", err)
+	}
+}
 
 func TestIssueWorkspaceSuccessfulCloneAndCleanup(t *testing.T) {
 	base := t.TempDir()
