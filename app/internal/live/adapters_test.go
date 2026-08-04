@@ -221,8 +221,10 @@ func TestDiscoveryToolsCapCallsAndRedactModelFacingResults(t *testing.T) {
 			name, input := "pm_discovery_read", map[string]any{"RelativePath": "secrets.txt"}
 			switch call {
 			case 0:
-				name, input = "pm_discovery_glob", map[string]any{"Pattern": "*.txt"}
+				name, input = "pm_discovery_context", map[string]any{}
 			case 1:
+				name, input = "pm_discovery_glob", map[string]any{"Pattern": "*.txt"}
+			case 2:
 				name, input = "pm_discovery_grep", map[string]any{"Pattern": "ghp_"}
 			}
 			requests = append(requests, ai.NewToolRequestPart(&ai.ToolRequest{Name: name, Input: input, Ref: fmt.Sprintf("call-%d", call+1)}))

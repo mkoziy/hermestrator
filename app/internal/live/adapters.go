@@ -131,8 +131,8 @@ type discoveryTurnStateKey struct{}
 
 func discoveryToolCall(ctx context.Context) (*discoveryTurnState, string) {
 	state, ok := ctx.Value(discoveryTurnStateKey{}).(*discoveryTurnState)
-	if !ok || state.clonePath == "" {
-		return nil, "no repository clone available"
+	if !ok {
+		return nil, "no discovery turn available"
 	}
 	if state.calls.Add(1) > MaxDiscoveryToolCalls {
 		return nil, "tool budget exhausted"
@@ -159,13 +159,19 @@ func NewOpenRouterModel(ctx context.Context, apiKey, model, storePath string, in
 }
 
 func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struct{}, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ Pattern string }, string], *aix.Tool[struct{ RelativePath string }, string]) {
-	discoveryContext := genkitx.DefineTool(g, "pm_discovery_context", "Returns the constraints for the current PM discovery phase.", func(context.Context, struct{}) (string, error) {
+	discoveryContext := genkitx.DefineTool(g, "pm_discovery_context", "Returns the constraints for the current PM discovery phase.", func(ctx context.Context, _ struct{}) (string, error) {
+		if _, message := discoveryToolCall(ctx); message != "" {
+			return message, nil
+		}
 		return "The active phase is discovery. Ask one focused question, then wait for the operator's answer.", nil
 	})
 	discoveryGlob := genkitx.DefineTool(g, "pm_discovery_glob", "Find repository files by base name pattern (for example, *.md; patterns do not match full paths). Use only for requirements, architecture, and conventions questions.", func(ctx context.Context, input struct{ Pattern string }) (string, error) {
 		state, message := discoveryToolCall(ctx)
 		if message != "" {
 			return message, nil
+		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
 		}
 		result, err := intake.Glob(ctx, state.clonePath, input.Pattern)
 		return redactSecrets(result), err
@@ -175,6 +181,9 @@ func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struc
 		if message != "" {
 			return message, nil
 		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
+		}
 		result, err := intake.Grep(ctx, state.clonePath, input.Pattern)
 		return redactSecrets(result), err
 	})
@@ -182,6 +191,9 @@ func defineDiscoveryTools(g *genkit.Genkit, intake CloneIntake) (*aix.Tool[struc
 		state, message := discoveryToolCall(ctx)
 		if message != "" {
 			return message, nil
+		}
+		if state.clonePath == "" {
+			return "no repository clone available", nil
 		}
 		result, err := intake.Read(ctx, state.clonePath, input.RelativePath)
 		return redactSecrets(result), err
