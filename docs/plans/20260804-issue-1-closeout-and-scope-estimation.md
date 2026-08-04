@@ -237,12 +237,14 @@ document's checkboxes against the merged code, and close issue #1.
 **Files:**
 - Modify: `docs/plans/20260803-reviewed-pr-and-recovery-lifecycle.md`
 
-- [ ] for each of the 16 tasks' checkboxes, mark `[x]` where Task 5's audit
-      confirmed the corresponding code and tests exist; leave any
-      unconfirmed item unchecked with a `⚠️` note instead of assuming
-- [ ] move the file to `docs/plans/completed/20260803-reviewed-pr-and-recovery-lifecycle.md`
-      once every checkbox is either checked or explicitly flagged
-- [ ] no tests apply to this documentation-only task
+- [x] for each of the 16 tasks' checkboxes, mark `[x]` where Task 5's audit
+      confirmed the corresponding code and tests exist; the archived copy has
+      all 85 implementation and verification checkboxes marked `[x]`, with
+      no unconfirmed items requiring a `⚠️` note
+- [x] move the file to `docs/plans/completed/20260803-reviewed-pr-and-recovery-lifecycle.md`
+      once every checkbox is either checked or explicitly flagged (already
+      archived; the stale source path is absent)
+- [x] no tests apply to this documentation-only task
 
 ### Task 6: Verify acceptance criteria
 
