@@ -243,23 +243,30 @@ func (i CloneIntake) Inspect(_ context.Context, path string) (string, error) {
 }
 
 func (i CloneIntake) validateChild(path string) error {
-	base, err := filepath.EvalSymlinks(i.BaseDir)
+	base, err := filepath.Abs(i.BaseDir)
 	if err != nil {
 		return fmt.Errorf("resolve intake base directory: %w", err)
 	}
-	candidate, err := filepath.EvalSymlinks(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve intake workspace: %w", err)
 	}
-	relative, err := filepath.Rel(base, candidate)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("refuse operation outside isolated intake directory")
+	relative, err := filepath.Rel(base, absolute)
+	if err != nil {
+		return fmt.Errorf("resolve intake workspace: %w", err)
+	}
+	_, err = i.regularDescendant(i.BaseDir, relative)
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 func (i CloneIntake) regularChild(path, name string) (string, error) {
-	file := filepath.Join(path, name)
+	file, err := i.regularDescendant(path, name)
+	if err != nil {
+		return "", err
+	}
 	info, err := os.Lstat(file)
 	if err != nil {
 		return file, err
@@ -268,4 +275,49 @@ func (i CloneIntake) regularChild(path, name string) (string, error) {
 		return "", fmt.Errorf("refuse non-regular intake file %q", name)
 	}
 	return file, nil
+}
+
+// regularDescendant resolves a path below root while refusing traversal and
+// symlinked path components. The final component may be absent so callers
+// that create files can validate its parent before writing it.
+func (i CloneIntake) regularDescendant(root, relativePath string) (string, error) {
+	base, err := filepath.EvalSymlinks(i.BaseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake base directory: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake root: %w", err)
+	}
+	rootRelative, err := filepath.Rel(base, resolvedRoot)
+	if err != nil || rootRelative == ".." || strings.HasPrefix(rootRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("refuse operation outside isolated intake directory")
+	}
+	if filepath.IsAbs(relativePath) || relativePath == "" {
+		return "", fmt.Errorf("refuse invalid intake relative path %q", relativePath)
+	}
+	clean := filepath.Clean(relativePath)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("refuse operation outside isolated intake directory")
+	}
+	candidate := filepath.Join(resolvedRoot, clean)
+	parts := strings.Split(clean, string(filepath.Separator))
+	current := resolvedRoot
+	for index, part := range parts {
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) && index == len(parts)-1 {
+			break
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("inspect intake path: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refuse symlinked intake path %q", part)
+		}
+		if index < len(parts)-1 && !info.IsDir() {
+			return "", fmt.Errorf("refuse non-directory intake path %q", part)
+		}
+	}
+	return candidate, nil
 }

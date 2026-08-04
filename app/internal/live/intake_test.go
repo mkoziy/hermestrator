@@ -133,6 +133,61 @@ func TestCloneIntakeRefusesSymlinkedContextDocument(t *testing.T) {
 	}
 }
 
+func TestCloneIntakeRegularDescendantAcceptsNestedRegularFile(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "intake")
+	nested := filepath.Join(root, "docs", "architecture.md")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("architecture"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := (CloneIntake{BaseDir: base}).regularDescendant(root, filepath.Join("docs", "architecture.md"))
+	if err != nil {
+		t.Fatalf("regular descendant: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("resolved path = %q, want %q", resolved, want)
+	}
+}
+
+func TestCloneIntakeRegularDescendantRefusesTraversalAndSymlinks(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "intake")
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("secret"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), filepath.Join(root, "leaf.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	intake := CloneIntake{BaseDir: base}
+	for name, relative := range map[string]string{
+		"traversal":            filepath.Join("..", "secret.md"),
+		"intermediate symlink": filepath.Join("linked", "secret.md"),
+		"leaf symlink":         "leaf.md",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := intake.regularDescendant(root, relative); err == nil {
+				t.Fatalf("regular descendant %q unexpectedly succeeded", relative)
+			}
+		})
+	}
+}
+
 func TestCloneIntakeInspectionRefusesSymlinkedEvidence(t *testing.T) {
 	base := t.TempDir()
 	path := filepath.Join(base, "intake-inspect")
