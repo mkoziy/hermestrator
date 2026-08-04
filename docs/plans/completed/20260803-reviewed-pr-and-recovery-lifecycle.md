@@ -195,6 +195,7 @@ Key design decisions:
 ```go
 executorVerifying      executorState = "verifying"
 executorVerified       executorState = "verified"
+executorCreatingPR     executorState = "creating_pr"     // added during implementation, not planned above
 executorPRCreated      executorState = "pr_created"
 executorReviewing      executorState = "reviewing"
 executorReviewBlocked  executorState = "review_blocked"
