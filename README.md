@@ -49,6 +49,8 @@ Create an ignored `app/.env` with the required configuration:
 ```dotenv
 OPENROUTER_API_KEY=
 GH_TOKEN=
+GIT_USER_NAME=
+GIT_USER_EMAIL=
 GITHUB_OAUTH_CLIENT_ID=
 GITHUB_OAUTH_CLIENT_SECRET=
 PM_JWT_SECRET=
@@ -130,6 +132,9 @@ docker run --rm \
 
 The PM dashboard is the image's default command. Provide PM-owned executor
 configuration and workspace mounts before enabling implementation workflows.
+Set `GIT_USER_NAME` and `GIT_USER_EMAIL` for the executor commit identity.
+When `GH_TOKEN` is set, the container configures Git's GitHub credential
+helper at startup without writing the token to disk.
 
 ## Security
 

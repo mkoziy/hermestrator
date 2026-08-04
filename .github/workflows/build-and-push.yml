@@ -55,8 +55,9 @@ jobs:
 
       - name: Validate image
         run: |
+          set -euo pipefail
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
-          docker run --rm --entrypoint sh "$image" -c 'test -x "$(command -v pm)"; go version; node --version; python3 --version; ralphex --version; codex --version; pi --version; gh --version; git --version; rg --version; jq --version; genkit --version'
+          docker run --rm --entrypoint sh "$image" -eu -c 'test -x "$(command -v pm)"; go version; node --version; python3 --version; ralphex --version; codex --version; pi --version; gh --version; git --version; rg --version; jq --version; genkit --version'
 
       - name: Push image
         run: |

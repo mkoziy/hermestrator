@@ -82,5 +82,8 @@ RUN mkdir -p /home/app/.codex/skills /home/app/.pi/agent/skills \
 COPY --chown=app:app app/ /opt/pm-app/
 RUN cd /opt/pm-app && go build -o /home/app/.local/bin/pm ./cmd/pm
 
+COPY --chmod=755 docker/pm-entrypoint.sh /usr/local/bin/pm-entrypoint.sh
+
 EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/pm-entrypoint.sh"]
 CMD ["pm"]
