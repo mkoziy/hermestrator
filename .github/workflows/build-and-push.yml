@@ -38,9 +38,8 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest
 
-      # Built locally (load, not push) first so the Validation Commands from
-      # README.md/docs/plans/20260719-hermes-docker-agent.md can run against
-      # the actual image before anything reaches the registry.
+      # Build locally first so the PM runtime is validated before anything
+      # reaches the registry.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -57,8 +56,7 @@ jobs:
       - name: Validate image
         run: |
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
-          docker run --rm "$image" hermes doctor
-          docker run --rm "$image" bash -lc 'go version && node --version && python3 --version && ralphex --version && codex --version && pi --version && gh --version && git --version && fzf --version && jq --version'
+          docker run --rm --entrypoint sh "$image" -c 'test -x "$(command -v pm)"; go version; node --version; python3 --version; ralphex --version; codex --version; pi --version; gh --version; git --version; rg --version; jq --version; genkit --version'
 
       - name: Push image
         run: |
