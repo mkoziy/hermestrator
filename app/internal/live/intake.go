@@ -212,41 +212,30 @@ func (i CloneIntake) UpdateContext(_ context.Context, path, glossary string) err
 	return nil
 }
 
-// Inspect reads a deliberately small, conventional set of repository files.
-// It returns evidence, not instructions, and never runs project code.
-func (i CloneIntake) Inspect(_ context.Context, path string) (string, error) {
-	if err := i.validateChild(path); err != nil {
-		return "", err
-	}
-	const maxFileBytes = 16 << 10
-	var evidence strings.Builder
-	for _, name := range []string{"CONTEXT.md", "README.md", "go.mod", "package.json"} {
-		file, err := i.regularChild(path, name)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		body, err := os.ReadFile(file)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", fmt.Errorf("inspect %s: %w", name, err)
-		}
-		if len(body) > maxFileBytes {
-			body = body[:maxFileBytes]
-		}
-		fmt.Fprintf(&evidence, "\n## %s\n%s\n", name, body)
-	}
-	return evidence.String(), nil
-}
-
 const (
+	maxDiscoveryReadBytes   = 16 << 10
 	maxDiscoveryGlobMatches = 200
 	maxDiscoveryGrepBytes   = 16 << 10
 )
+
+// Read returns at most 16 KiB from one regular file below the intake root.
+func (i CloneIntake) Read(_ context.Context, path, relativePath string) (string, error) {
+	if err := i.validateChild(path); err != nil {
+		return "", err
+	}
+	file, err := i.regularChild(path, relativePath)
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("read intake file %q: %w", relativePath, err)
+	}
+	if len(body) > maxDiscoveryReadBytes {
+		body = body[:maxDiscoveryReadBytes]
+	}
+	return string(body), nil
+}
 
 // Glob returns paths for regular files whose base name matches pattern. The
 // pattern is deliberately matched against the base name, so *.md also finds

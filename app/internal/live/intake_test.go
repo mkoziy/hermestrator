@@ -255,19 +255,58 @@ func TestCloneIntakeGrepMatchesAndCapsOutput(t *testing.T) {
 	}
 }
 
-func TestCloneIntakeInspectionRefusesSymlinkedEvidence(t *testing.T) {
+func TestCloneIntakeReadReturnsFileContents(t *testing.T) {
 	base := t.TempDir()
-	path := filepath.Join(base, "intake-inspect")
-	if err := os.Mkdir(path, 0o750); err != nil {
+	path := filepath.Join(base, "intake-read")
+	if err := os.MkdirAll(filepath.Join(path, "docs"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "sensitive"), filepath.Join(path, "README.md")); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "docs", "README.md"), []byte("repository guide\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 
 	intake := CloneIntake{BaseDir: base}
-	if _, err := intake.Inspect(context.Background(), path); err == nil {
-		t.Fatal("inspection through a symlink unexpectedly succeeded")
+	got, err := intake.Read(context.Background(), path, filepath.Join("docs", "README.md"))
+	if err != nil || got != "repository guide\n" {
+		t.Fatalf("read = %q, %v", got, err)
+	}
+}
+
+func TestCloneIntakeReadCapsSizeAndRefusesUnsafeFiles(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "intake-read")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "large.txt"), []byte(strings.Repeat("x", maxDiscoveryReadBytes+100)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(path, "directory"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(path, "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	intake := CloneIntake{BaseDir: base}
+	got, err := intake.Read(context.Background(), path, "large.txt")
+	if err != nil || len(got) != maxDiscoveryReadBytes {
+		t.Fatalf("capped read length=%d err=%v", len(got), err)
+	}
+	for name, relative := range map[string]string{
+		"directory": "directory",
+		"symlink":   "linked.txt",
+		"traversal": filepath.Join("..", "secret.txt"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := intake.Read(context.Background(), path, relative); err == nil {
+				t.Fatalf("read %q unexpectedly succeeded", relative)
+			}
+		})
 	}
 }
 

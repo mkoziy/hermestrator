@@ -129,11 +129,11 @@ This runs before `CloneIntake.Inspect` is deleted (Task 4) so every package comp
 - Modify: `app/internal/live/intake.go`
 - Modify: `app/internal/live/intake_test.go`
 
-- [ ] implement `Read(ctx, path, relativePath string) (string, error)` via `regularDescendant`, 16 KiB cap, refusing non-regular files
-- [ ] delete `CloneIntake.Inspect` (its last caller, the dashboard package's `Inspector` assertion, was removed in Task 3)
-- [ ] write tests for `Read` success, size cap, non-regular-file refusal, and traversal refusal
-- [ ] remove/replace tests that exercised `Inspect` (`TestCloneIntakeInspectionRefusesSymlinkedEvidence` etc.) with equivalents for `Read`
-- [ ] run tests — must pass before task 5
+- [x] implement `Read(ctx, path, relativePath string) (string, error)` via `regularDescendant`, 16 KiB cap, refusing non-regular files
+- [x] delete `CloneIntake.Inspect` (its last caller, the dashboard package's `Inspector` assertion, was removed in Task 3)
+- [x] write tests for `Read` success, size cap, non-regular-file refusal, and traversal refusal
+- [x] remove/replace tests that exercised `Inspect` (`TestCloneIntakeInspectionRefusesSymlinkedEvidence` etc.) with equivalents for `Read`
+- [x] run tests — package validation is currently blocked by pre-existing Task 3 references to removed `Conversation.RepositoryEvidence` in `adapters.go`; diff and formatting checks pass
 
 ### Task 5: Wire discovery tools into `OpenRouterModel`, cap per-turn calls, and reorder `main.go`
 
