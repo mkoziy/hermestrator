@@ -413,6 +413,20 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/synthesize", "", "michael"); response.Code != http.StatusSeeOther {
 		t.Fatalf("synthesize status = %d", response.Code)
 	}
+	var scope string
+	if err := app.(*application).db.QueryRow(`SELECT scope FROM intakes WHERE repository_id='42'`).Scan(&scope); err != nil {
+		t.Fatalf("load persisted scope: %v", err)
+	}
+	if scope == "" {
+		t.Fatal("synthesis did not persist scope")
+	}
+	status, err := app.(*application).intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load intake status: %v", err)
+	}
+	if status.Scope != scope {
+		t.Fatalf("status scope = %q, persisted scope = %q", status.Scope, scope)
+	}
 	if response := request(t, app, http.MethodPost, "/repositories/42/intake/publish", "", "michael"); response.Code != http.StatusConflict {
 		t.Fatalf("unconfirmed publish status = %d", response.Code)
 	}
@@ -664,13 +678,16 @@ func TestTicketSynthesisKeepsOnlyExplicitBlockingEdges(t *testing.T) {
 	if !ok {
 		t.Fatal("app is not *application")
 	}
-	artifacts, err := a.synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
+	artifacts, scope, err := a.synthesizeArtifacts(context.Background(), Repository{FullName: "mkoziy/hermestrator"}, Conversation{Messages: []Message{
 		{Role: "operator", Text: "operators register repositories"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators publish confirmed tickets\nBlocked by: Ticket 1"}, {Role: "pm", Text: "What should happen next?"},
 		{Role: "operator", Text: "operators document their work"}, {Role: "pm", Text: "What should happen next?"},
 	}})
 	if err != nil {
 		t.Fatalf("synthesizeArtifacts: %v", err)
+	}
+	if scope == "" {
+		t.Fatal("synthesizeArtifacts returned an empty scope")
 	}
 	var tickets string
 	for _, artifact := range artifacts {

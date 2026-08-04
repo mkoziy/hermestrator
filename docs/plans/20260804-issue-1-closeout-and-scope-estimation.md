@@ -153,21 +153,21 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] add `if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT
+- [x] add `if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT
       NULL DEFAULT ''"); err != nil { ... }` alongside the other
       `addColumnIfMissing` calls
-- [ ] add `Scope string` to `IntakeStatus` and include `scope` in the
+- [x] add `Scope string` to `IntakeStatus` and include `scope` in the
       status-loading `SELECT`/`Scan` (~`app.go:3049`)
-- [ ] in `synthesizeArtifacts`, call `EstimateScope` directly with the
+- [x] in `synthesizeArtifacts`, call `EstimateScope` directly with the
       resolved decisions and the `artifactTickets` body, and return the
       result alongside the artifacts (change the function's return signature
       or add a sibling return value — caller's choice, keep it minimal)
-- [ ] in the `synthesizeArtifacts` caller (~`app.go:1392`), extend the
+- [x] in the `synthesizeArtifacts` caller (~`app.go:1392`), extend the
       existing `UPDATE intakes SET state=?,updated_at=?` in the same
       transaction to also set `scope=?`
-- [ ] write tests confirming a synthesize call persists a non-empty `scope`
+- [x] write tests confirming a synthesize call persists a non-empty `scope`
       on the intake row and that it round-trips through `IntakeStatus`
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Replace both hardcoded `"medium"` call sites
 

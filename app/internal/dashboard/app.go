@@ -234,6 +234,7 @@ type IntakeStatus struct {
 	ReviewRound           int
 	ReviewFindings        string
 	RetryState            executorState
+	Scope                 string
 	PR                    PullRequest
 	VerificationOutput    string
 }
@@ -462,6 +463,10 @@ func New(deps Dependencies) (*application, error) {
 		return nil, err
 	}
 	if err = addColumnIfMissing(db, "intakes", "retry_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = addColumnIfMissing(db, "intakes", "scope", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1389,7 +1394,7 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "complete one focused discovery exchange before synthesizing artifacts", http.StatusConflict)
 		return
 	}
-	artifacts, err := a.synthesizeArtifacts(r.Context(), repo, conversation)
+	artifacts, scope, err := a.synthesizeArtifacts(r.Context(), repo, conversation)
 	if err != nil {
 		http.Error(w, "could not synthesize artifacts", http.StatusInternalServerError)
 		return
@@ -1407,7 +1412,7 @@ func (a *application) synthesizeIntake(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,updated_at=? WHERE repository_id=?`, intakeDraft, now, repo.ID); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `UPDATE intakes SET state=?,scope=?,updated_at=? WHERE repository_id=?`, intakeDraft, scope, now, repo.ID); err != nil {
 		http.Error(w, "could not update intake", http.StatusInternalServerError)
 		return
 	}
@@ -2769,35 +2774,35 @@ func (a *application) releaseFailedLease(ctx context.Context, status IntakeStatu
 	a.releaseLease(ctx, status, "operator cancelled")
 }
 
-func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, error) {
+func (a *application) synthesizeArtifacts(ctx context.Context, repo Repository, conversation Conversation) ([]Artifact, string, error) {
 	resolved, err := a.deps.Synthesizer.GrillWithDocs(ctx, conversation)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts := []Artifact{
 		{Kind: artifactGlossary, Body: glossaryArtifact(resolved)},
 	}
 	spec, err := a.deps.Synthesizer.ToSpec(ctx, repo, resolved)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts = append(artifacts, Artifact{Kind: artifactSpec, Body: spec})
 	tickets, err := a.deps.Synthesizer.ToTickets(ctx, repo, resolved)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	artifacts = append(artifacts, Artifact{Kind: artifactTickets, Body: tickets})
 	for index, decision := range resolved {
 		assessment, proposal, err := a.deps.Synthesizer.AssessADR(ctx, strings.TrimSpace(strings.TrimPrefix(decision, "-")))
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRAssessmentPrefix + strconv.Itoa(index+1)), Body: assessment})
 		if proposal != "" {
 			artifacts = append(artifacts, Artifact{Kind: artifactKind(artifactADRProposalPrefix + strconv.Itoa(index+1)), Body: proposal})
 		}
 	}
-	return artifacts, nil
+	return artifacts, EstimateScope(resolved, tickets), nil
 }
 
 // AssessADR is a bounded policy capability: an ADR is eligible only when the
@@ -3067,7 +3072,7 @@ func (a *application) intakeStatus(ctx context.Context, id string) (IntakeStatus
 	var cancelledInt int
 	var prNumber int
 	var prURL string
-	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState)
+	err := a.db.QueryRowContext(ctx, `SELECT intake_id,state,clone_path,message_start,pending_question,issue_number,issue_url,executor_kind,executor_rationale,executor_state,executor_heartbeat,executor_duration_ns,executor_exit_code,executor_cancelled,executor_workspace_path,run_id,pr_number,pr_url,review_round,review_findings,retry_state,scope FROM intakes WHERE repository_id=?`, id).Scan(&status.ID, &status.State, &status.Path, &status.MessageStart, &status.PendingQuestion, &number, &status.PublishedIssue.URL, &status.ExecutorKind, &status.ExecutorRationale, &executorStateStr, &status.ExecutorHeartbeat, &durationNs, &status.ExecutorExitCode, &cancelledInt, &status.ExecutorWorkspacePath, &status.RunID, &prNumber, &prURL, &status.ReviewRound, &status.ReviewFindings, &status.RetryState, &status.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IntakeStatus{}, nil
 	}
