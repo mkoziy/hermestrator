@@ -166,9 +166,9 @@ Includes the `main.go` caller update in the same task as the `NewOpenRouterModel
 
 ### Task 7: Update documentation
 
-- [ ] update `docs/adr/0003-pm-discovery-reads-repository-on-demand.md`'s "Consequences" section if any detail changed during implementation (e.g. exact match/output caps)
-- [ ] update `docs/specs/20260726-genkit-pm-dashboard.md` / `docs/tickets/20260726-genkit-pm-dashboard.md` only if they still describe the old fixed-file `Inspect` behavior (current check found none — confirm still true)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `docs/adr/0003-pm-discovery-reads-repository-on-demand.md`'s "Consequences" section with the implemented call, match, and output caps
+- [x] confirm `docs/specs/20260726-genkit-pm-dashboard.md` / `docs/tickets/20260726-genkit-pm-dashboard.md` do not describe the old fixed-file `Inspect` behavior
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
