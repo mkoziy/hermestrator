@@ -62,6 +62,9 @@ func (l DashboardRunLease) RecentFailures(ctx context.Context, repositoryID stri
 }
 
 func (l DashboardRunLease) ListActive(ctx context.Context) ([]dashboard.ActiveRun, error) {
+	if l.Store == nil {
+		return nil, fmt.Errorf("implementation run store is not configured")
+	}
 	runs, err := l.Store.ListActive(ctx)
 	if err != nil {
 		return nil, err

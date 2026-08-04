@@ -1366,6 +1366,34 @@ func TestExecutorFixOutlivesRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutorFixKeepsFailedPostFixVerificationOutOfReview(t *testing.T) {
+	app := mustApp(t, Dependencies{
+		GitHub:             fakeGitHub{repos: []Repository{{ID: "42", FullName: "acme/repo"}}},
+		Model:              fakeModel{},
+		Store:              t.TempDir() + "/pm.db",
+		AllowedUsers:       map[string]bool{"michael": true},
+		ExecutorRunner:     &fakeExecutorRunner{},
+		VerificationRunner: &fakeVerificationRunner{fail: true},
+	})
+	a, ok := app.(*application)
+	if !ok {
+		t.Fatal("mustApp returned unexpected handler type")
+	}
+	setupExecutorRun(t, app)
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state=?,executor_kind=?,executor_workspace_path=?,review_findings=? WHERE repository_id=?`, executorReviewBlocked, Codex, t.TempDir(), "fix this", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := request(t, app, http.MethodPost, "/repositories/42/executor/fix", "", "michael")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want post-fix verification failure", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorState != executorFailed {
+		t.Fatalf("state=%q err=%v, want failed", status.ExecutorState, err)
+	}
+}
+
 func TestIssueCloseFailureLeavesMergedWorkRetryableThroughCleanup(t *testing.T) {
 	merge := &endToEndMergeExecutor{closeErr: errors.New("temporary GitHub error")}
 	clone := &fakeIssueWorkspace{}

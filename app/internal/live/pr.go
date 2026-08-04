@@ -115,7 +115,7 @@ func (p GHPRCreator) CreateOrReuse(ctx context.Context, repo dashboard.Repositor
 	if output, err := command(ctx, "git", "-C", status.ExecutorWorkspacePath, "push", "-u", "origin", branch).CombinedOutput(); err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("push workspace branch: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	body := fmt.Sprintf("Implement GitHub issue #%d.\n\n%s", status.PublishedIssue.Number, marker)
+	body := fmt.Sprintf("Closes #%d.\n\n%s", status.PublishedIssue.Number, marker)
 	created, err := command(ctx, "gh", "pr", "create", "--repo", repo.FullName, "--head", branch, "--title", fmt.Sprintf("Implement issue #%d", status.PublishedIssue.Number), "--body", body).Output()
 	if err != nil {
 		return dashboard.PullRequest{}, fmt.Errorf("create pull request: %w", err)

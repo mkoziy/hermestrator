@@ -60,6 +60,37 @@ func TestGHPRCreatorRetriesAfterTimedOutMutation(t *testing.T) {
 	}
 }
 
+func TestGHPRCreatorClosesLinkedIssue(t *testing.T) {
+	var body string
+	creator := GHPRCreator{Command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "git" && strings.Contains(joined, "branch --show-current"):
+			return exec.CommandContext(ctx, "printf", "%s", "feature/issue-9")
+		case name == "gh" && strings.Contains(joined, "pr list"):
+			return exec.CommandContext(ctx, "printf", "%s", "[]")
+		case name == "git" && strings.Contains(joined, "push"):
+			return exec.CommandContext(ctx, "true")
+		case name == "gh" && strings.Contains(joined, "pr create"):
+			for i, arg := range args {
+				if arg == "--body" && i+1 < len(args) {
+					body = args[i+1]
+				}
+			}
+			return exec.CommandContext(ctx, "printf", "%s", "https://github.com/acme/repo/pull/42")
+		default:
+			return exec.CommandContext(ctx, "false")
+		}
+	}}
+	_, err := creator.CreateOrReuse(context.Background(), dashboard.Repository{FullName: "acme/repo"}, dashboard.IntakeStatus{ExecutorWorkspacePath: t.TempDir(), PublishedIssue: dashboard.PublishedIssue{Number: 9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "Closes #9") {
+		t.Fatalf("PR body = %q, want closing issue reference", body)
+	}
+}
+
 func TestGHPRCreatorCheckMergeable(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string

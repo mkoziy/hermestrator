@@ -35,7 +35,13 @@ func (w IssueWorkspace) CleanupExpired(ctx context.Context, paths []string, rete
 	cutoff := now.Add(-retention)
 	for _, path := range paths {
 		info, err := os.Stat(path)
-		if os.IsNotExist(err) || err != nil || info.ModTime().After(cutoff) {
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect workspace %q for retention: %w", path, err)
+		}
+		if info.ModTime().After(cutoff) {
 			continue
 		}
 		if err := w.Cleanup(ctx, path); err != nil {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
@@ -117,15 +119,19 @@ func (r GHReviewer) Review(ctx context.Context, repo dashboard.Repository, pr da
 	if err := json.Unmarshal(issue, &issueData); err != nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("decode issue: %w", err)
 	}
-	input := fmt.Sprintf("Repository: %s\nIssue: %s\n%s\nVerification output:\n%s\nFull diff:\n%s", repo.FullName, redaction.Secrets(issueData.Title), redaction.Secrets(issueData.Body), redaction.Secrets(status.VerificationOutput), redaction.Secrets(string(diff)))
+	context, err := reviewContext(status.ExecutorWorkspacePath)
+	if err != nil {
+		return dashboard.ReviewResult{}, err
+	}
+	input := fmt.Sprintf("Repository: %s\nIssue: %s\n%s\nRepository standards and context:\n%s\nVerification evidence (including configured formatting, vet, lint, test, and race checks):\n%s\nFull diff:\n%s", repo.FullName, redaction.Secrets(issueData.Title), redaction.Secrets(issueData.Body), redaction.Secrets(context), redaction.Secrets(status.VerificationOutput), redaction.Secrets(string(diff)))
 	if r.StandardsModel == nil || r.SpecModel == nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("review models are not configured")
 	}
-	standards, err := r.StandardsModel(ctx, "Review this full PR diff for standards compliance. Report only material findings, or respond APPROVED.\n\n"+input)
+	standards, err := r.StandardsModel(ctx, "Review this full PR diff for standards compliance. Report only material findings in English, with concise evidence, or respond APPROVED.\n\n"+input)
 	if err != nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("standards review: %w", err)
 	}
-	spec, err := r.SpecModel(ctx, "Review this full PR diff against the issue acceptance criteria. Report only material findings, or respond APPROVED.\n\n"+input)
+	spec, err := r.SpecModel(ctx, "Review this full PR diff against the issue acceptance criteria. Report only material findings in English, with concise evidence, or respond APPROVED.\n\n"+input)
 	if err != nil {
 		return dashboard.ReviewResult{}, fmt.Errorf("spec review: %w", err)
 	}
@@ -137,6 +143,37 @@ func (r GHReviewer) Review(ctx context.Context, repo dashboard.Repository, pr da
 		findings = append(findings, "Spec findings:\n"+redaction.Secrets(strings.TrimSpace(spec)))
 	}
 	return dashboard.ReviewResult{Approved: len(findings) == 0, Findings: strings.Join(findings, "\n\n")}, nil
+}
+
+const maxReviewContextBytes = 64 * 1024
+
+func reviewContext(workspacePath string) (string, error) {
+	if workspacePath == "" {
+		return "No repository standards files were available in the implementation workspace.", nil
+	}
+	var context strings.Builder
+	remaining := maxReviewContextBytes
+	for _, name := range []string{"AGENTS.md", "CONTRIBUTING.md", "CODING_STANDARDS.md", "README.md"} {
+		contents, err := os.ReadFile(filepath.Join(workspacePath, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("read review context %s: %w", name, err)
+		}
+		if len(contents) > remaining {
+			contents = contents[:remaining]
+		}
+		fmt.Fprintf(&context, "## %s\n%s\n\n", name, contents)
+		remaining -= len(contents)
+		if remaining == 0 {
+			break
+		}
+	}
+	if context.Len() == 0 {
+		return "No repository standards files were available in the implementation workspace.", nil
+	}
+	return context.String(), nil
 }
 
 func approved(s string) bool {
