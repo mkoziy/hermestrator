@@ -102,11 +102,11 @@ review.
 - Modify: `app/internal/live/intake.go`
 - Modify: `app/internal/live/intake_test.go`
 
-- [ ] implement `Glob(ctx, path, pattern string) (string, error)` using `filepath.WalkDir` + `filepath.Match` against `filepath.Base(rel)`, skipping `.git`, capping the number of matches returned
-- [ ] implement `Grep(ctx, path, pattern string) (string, error)` using `regexp.Compile` + line-scanning over regular files, skipping `.git`, capping total output bytes
-- [ ] write tests for `Glob` matching a base-name pattern across subdirectories (e.g. `*.md` matching `docs/adr/0001.md`), no-matches, and the documented base-name-only limitation
-- [ ] write tests for `Grep` matching, no-matches, invalid regex error, and output cap
-- [ ] run tests — must pass before task 3
+- [x] implement `Glob(ctx, path, pattern string) (string, error)` using `filepath.WalkDir` + `filepath.Match` against `filepath.Base(rel)`, skipping `.git`, capping the number of matches returned
+- [x] implement `Grep(ctx, path, pattern string) (string, error)` using `regexp.Compile` + line-scanning over regular files, skipping `.git`, capping total output bytes
+- [x] write tests for `Glob` matching a base-name pattern across subdirectories (e.g. `*.md` matching `docs/adr/0001.md`), no-matches, and the documented base-name-only limitation
+- [x] write tests for `Grep` matching, no-matches, invalid regex error, and output cap
+- [x] run tests — must pass before task 3
 
 ### Task 3: Remove `Inspector`, `RepositoryEvidence`, and the `repository-evidence` artifact from the dashboard package
 

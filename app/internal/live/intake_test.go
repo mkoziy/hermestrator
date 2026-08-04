@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mkoziy/hermestrator/internal/dashboard"
@@ -185,6 +186,72 @@ func TestCloneIntakeRegularDescendantRefusesTraversalAndSymlinks(t *testing.T) {
 				t.Fatalf("regular descendant %q unexpectedly succeeded", relative)
 			}
 		})
+	}
+}
+
+func TestCloneIntakeGlobMatchesNestedBaseNames(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "docs", "adr"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"README.md", filepath.Join("docs", "adr", "0001.md"), filepath.Join("docs", "adr", "notes.txt")} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "hidden.md"), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	intake := CloneIntake{BaseDir: base}
+	got, err := intake.Glob(context.Background(), root, "*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "README.md\ndocs/adr/0001.md" {
+		t.Fatalf("glob = %q", got)
+	}
+	if got, err := intake.Glob(context.Background(), root, "docs/*.md"); err != nil || got != "no matches" {
+		t.Fatalf("base-name limitation = %q, %v", got, err)
+	}
+}
+
+func TestCloneIntakeGrepMatchesAndCapsOutput(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "notes.md"), []byte("keep this\nignore\nkeep that\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "secret"), []byte("keep hidden\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	intake := CloneIntake{BaseDir: base}
+	got, err := intake.Grep(context.Background(), root, `keep`)
+	if err != nil || got != "docs/notes.md:1: keep this\ndocs/notes.md:3: keep that\n" {
+		t.Fatalf("grep = %q, %v", got, err)
+	}
+	if got, err := intake.Grep(context.Background(), root, `missing`); err != nil || got != "no matches" {
+		t.Fatalf("no matches = %q, %v", got, err)
+	}
+	if _, err := intake.Grep(context.Background(), root, "["); err == nil {
+		t.Fatal("invalid regex accepted")
+	}
+	large := strings.Repeat("needle\n", 5000)
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(large), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	got, err = intake.Grep(context.Background(), root, `needle`)
+	if err != nil || len(got) > maxDiscoveryGrepBytes {
+		t.Fatalf("capped grep length=%d err=%v", len(got), err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -240,6 +241,129 @@ func (i CloneIntake) Inspect(_ context.Context, path string) (string, error) {
 		fmt.Fprintf(&evidence, "\n## %s\n%s\n", name, body)
 	}
 	return evidence.String(), nil
+}
+
+const (
+	maxDiscoveryGlobMatches = 200
+	maxDiscoveryGrepBytes   = 16 << 10
+)
+
+// Glob returns paths for regular files whose base name matches pattern. The
+// pattern is deliberately matched against the base name, so *.md also finds
+// files nested below the intake root.
+func (i CloneIntake) Glob(ctx context.Context, path, pattern string) (string, error) {
+	if err := i.validateChild(path); err != nil {
+		return "", err
+	}
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return "", fmt.Errorf("invalid glob pattern: %w", err)
+	}
+	matches := make([]string, 0, maxDiscoveryGlobMatches)
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake path: %w", err)
+	}
+	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		matched, err := filepath.Match(pattern, filepath.Base(relative))
+		if err != nil {
+			return fmt.Errorf("invalid glob pattern: %w", err)
+		}
+		if matched {
+			matches = append(matches, filepath.ToSlash(relative))
+			if len(matches) == maxDiscoveryGlobMatches {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if err != nil && err != filepath.SkipAll {
+		return "", fmt.Errorf("glob intake: %w", err)
+	}
+	if len(matches) == 0 {
+		return "no matches", nil
+	}
+	return strings.Join(matches, "\n"), nil
+}
+
+// Grep returns matching lines as relative-path:line:text records.
+func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, error) {
+	if err := i.validateChild(path); err != nil {
+		return "", err
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", fmt.Errorf("compile grep pattern: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve intake path: %w", err)
+	}
+	var output strings.Builder
+	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		file, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 4<<10), 1<<20)
+		lineNumber := 0
+		for scanner.Scan() {
+			lineNumber++
+			line := scanner.Text()
+			if compiled.MatchString(line) {
+				relative, err := filepath.Rel(root, current)
+				if err != nil {
+					return err
+				}
+				record := fmt.Sprintf("%s:%d: %s\n", filepath.ToSlash(relative), lineNumber, line)
+				if output.Len()+len(record) > maxDiscoveryGrepBytes {
+					_ = file.Close()
+					return filepath.SkipAll
+				}
+				output.WriteString(record)
+			}
+		}
+		scanErr := scanner.Err()
+		if closeErr := file.Close(); closeErr != nil && scanErr == nil {
+			return closeErr
+		}
+		return scanErr
+	})
+	if err != nil && err != filepath.SkipAll {
+		return "", fmt.Errorf("grep intake: %w", err)
+	}
+	if output.Len() == 0 {
+		return "no matches", nil
+	}
+	return output.String(), nil
 }
 
 func (i CloneIntake) validateChild(path string) error {
