@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -352,6 +353,12 @@ func (i CloneIntake) Grep(ctx context.Context, path, pattern string) (string, er
 		scanErr := scanner.Err()
 		if closeErr := file.Close(); closeErr != nil && scanErr == nil {
 			return closeErr
+		}
+		// A generated or minified file may contain a line larger than the
+		// scanner's bounded token size. Skip that file so it cannot prevent
+		// discovery in the rest of the repository.
+		if errors.Is(scanErr, bufio.ErrTooLong) {
+			return nil
 		}
 		return scanErr
 	})
