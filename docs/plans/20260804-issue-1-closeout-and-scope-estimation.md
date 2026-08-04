@@ -175,20 +175,20 @@ document's checkboxes against the merged code, and close issue #1.
 - Modify: `app/internal/dashboard/app.go`
 - Modify: `app/internal/dashboard/app_test.go`
 
-- [ ] in `executorSelect` (~line 1811), replace the literal `"medium"` with
+- [x] in `executorSelect` (~line 1811), replace the literal `"medium"` with
       `status.Scope` (this handler currently only loads `priorFailures`, not
       `status` — load it), falling back to `"medium"` only when
       `status.Scope == ""`
-- [ ] in `executorPlan` (~line 1873; **not** `executorRun`, a different
+- [x] in `executorPlan` (~line 1873; **not** `executorRun`, a different
       handler with no scope hardcode), replace `scope := "medium" // TODO:
       Get from conversation state` with the same `status.Scope`-with-fallback
       read — `status` is already loaded earlier in this handler — and remove
       the `TODO` comment
-- [ ] write tests confirming `executorSelect`/`executorPlan` use a
+- [x] write tests confirming `executorSelect`/`executorPlan` use a
       previously-synthesized scope value (e.g. `"complex"`) when present,
       and fall back to `"medium"` for an intake row with no scope set
       (legacy row / synthesis never ran)
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
 
 ### Task 4: Audit closed-ticket acceptance criteria against the running code
 

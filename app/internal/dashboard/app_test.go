@@ -145,10 +145,18 @@ func (f *fakeIssueWorkspace) Start(_ context.Context, _ Repository, _ int) (stri
 
 func (f *fakeIssueWorkspace) Cleanup(context.Context, string) error { f.cleanups++; return nil }
 
-type fakePlanner struct{ workspace string }
+type fakePlanner struct {
+	workspace string
+	scope     string
+	done      chan struct{}
+}
 
-func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, _ string) (string, error) {
+func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, scope string) (string, error) {
 	f.workspace = workspace
+	f.scope = scope
+	if f.done != nil {
+		close(f.done)
+	}
 	return "# Plan: test\n\n### Task 1: test", nil
 }
 
@@ -1967,7 +1975,7 @@ func TestPlanningRejectedBeforeExecutorSelection(t *testing.T) {
 func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	clone := &fakeIssueWorkspace{path: workspace}
-	planner := &fakePlanner{}
+	planner := &fakePlanner{done: make(chan struct{})}
 	app := mustApp(t, Dependencies{GitHub: fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}}, Model: fakeModel{}, Store: t.TempDir() + "/pm.db", AllowedUsers: map[string]bool{"michael": true}, IssueWorkspace: clone, Planner: planner})
 	executorApp, ok := app.(*application)
 	if !ok {
@@ -1990,6 +1998,51 @@ func TestPlanningUsesPersistedIssueWorkspace(t *testing.T) {
 	status, err := executorApp.intakeStatus(context.Background(), "42")
 	if err != nil || status.ExecutorWorkspacePath != workspace {
 		t.Fatalf("persisted workspace=%q err=%v, want %q", status.ExecutorWorkspacePath, err, workspace)
+	}
+}
+
+func TestExecutorUsesPersistedScopeAndDefaultsForLegacyIntakes(t *testing.T) {
+	planner := &fakePlanner{done: make(chan struct{})}
+	app := mustApp(t, Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Planner:      planner,
+		Store:        t.TempDir() + "/pm.db",
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	a := app.(*application)
+	_ = request(t, app, http.MethodGet, "/repositories", "", "michael")
+	_ = request(t, app, http.MethodPost, "/repositories/42", "", "michael")
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("legacy select status = %d", response.Code)
+	}
+	status, err := a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Codex) {
+		t.Fatalf("legacy executor kind = %q, err=%v, want codex", status.ExecutorKind, err)
+	}
+
+	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='',executor_kind='',scope='complex' WHERE repository_id='42'`); err != nil {
+		t.Fatal(err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/select", "", "michael"); response.Code != http.StatusSeeOther {
+		t.Fatalf("scoped select status = %d", response.Code)
+	}
+	status, err = a.intakeStatus(context.Background(), "42")
+	if err != nil || status.ExecutorKind != string(Ralphex) {
+		t.Fatalf("scoped executor kind = %q, err=%v, want ralphex", status.ExecutorKind, err)
+	}
+
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael"); response.Code != http.StatusAccepted {
+		t.Fatalf("scoped plan status = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-planner.done:
+	case <-time.After(time.Second):
+		t.Fatal("planner was not called")
+	}
+	if planner.scope != "complex" {
+		t.Fatalf("planner scope = %q, want complex", planner.scope)
 	}
 }
 

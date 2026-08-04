@@ -1804,16 +1804,24 @@ func (a *application) executorSelect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	status, err := a.intakeStatus(r.Context(), id)
+	if err != nil {
+		http.Error(w, "could not load intake", http.StatusInternalServerError)
+		return
+	}
 	var priorFailures []FailureRecord
 	if a.deps.RunLease != nil {
-		var err error
 		priorFailures, err = a.deps.RunLease.RecentFailures(r.Context(), id, 10)
 		if err != nil {
 			http.Error(w, "could not load executor history", http.StatusInternalServerError)
 			return
 		}
 	}
-	selection := SelectExecutor("medium", "", priorFailures)
+	scope := status.Scope
+	if scope == "" {
+		scope = "medium"
+	}
+	selection := SelectExecutor(scope, "", priorFailures)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := a.db.ExecContext(r.Context(),
 		`INSERT INTO intakes(repository_id,state,executor_kind,executor_rationale,executor_state,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET executor_kind=excluded.executor_kind,executor_rationale=excluded.executor_rationale,executor_state=excluded.executor_state,retry_state='',updated_at=excluded.updated_at WHERE intakes.executor_state IN ('','selected','failed','cleanup_done')`,
@@ -1875,7 +1883,10 @@ func (a *application) executorPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	scope := "medium" // TODO: Get from conversation state
+	scope := status.Scope
+	if scope == "" {
+		scope = "medium"
+	}
 	executorKind := ExecutorKind(status.ExecutorKind)
 	if executorKind == VerificationOnly {
 		a.runVerification(w, r, id, workspacePath)
