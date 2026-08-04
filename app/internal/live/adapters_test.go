@@ -180,7 +180,7 @@ func TestDiscoveryToolsCapCallsAndRedactModelFacingResults(t *testing.T) {
 	if err := os.Mkdir(clone, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	secret := "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+	secret := "ASIAIOSFODNN7EXAMPLE"
 	if err := os.WriteFile(filepath.Join(clone, secret+".txt"), []byte(secret+"\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestDiscoveryToolsCapCallsAndRedactModelFacingResults(t *testing.T) {
 			case 1:
 				name, input = "pm_discovery_glob", map[string]any{"Pattern": "*.txt"}
 			case 2:
-				name, input = "pm_discovery_grep", map[string]any{"Pattern": "ghp_"}
+				name, input = "pm_discovery_grep", map[string]any{"Pattern": "ASIA"}
 			}
 			requests = append(requests, ai.NewToolRequestPart(&ai.ToolRequest{Name: name, Input: input, Ref: fmt.Sprintf("call-%d", call+1)}))
 		}

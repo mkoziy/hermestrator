@@ -12,3 +12,12 @@ func TestSecretsRedactsAWSStaticCredentials(t *testing.T) {
 		t.Fatalf("AWS credentials were not redacted: %q", got)
 	}
 }
+
+func TestSecretsRedactsAWSSTSCredentials(t *testing.T) {
+	accessKey := "ASIAIOSFODNN7EXAMPLE"
+	sessionToken := "FwoGZXIvYXdzEHYaDP//////////wEaDP//////////wE="
+	got := Secrets("AWS_ACCESS_KEY_ID=" + accessKey + "\nAWS_SESSION_TOKEN=" + sessionToken)
+	if strings.Contains(got, accessKey) || strings.Contains(got, sessionToken) {
+		t.Fatalf("AWS STS credentials were not redacted: %q", got)
+	}
+}
