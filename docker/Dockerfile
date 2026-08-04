@@ -51,8 +51,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 # ralphex is an executor binary. Its configuration is supplied through the
 # PM-owned runtime directories, never copied from this repository's old
 # Hermes-era ralphex profiles.
-RUN ARCH="$(dpkg --print-architecture)" \
-    && RELEASE_URL="$(curl -fsSL https://api.github.com/repos/umputun/ralphex/releases/latest | grep -oE 'https://github.com/umputun/ralphex/releases/download/[^\"]*linux_'"${ARCH}"'\.tar\.gz')" \
+RUN --mount=type=secret,id=github_token \
+    ARCH="$(dpkg --print-architecture)" \
+    && AUTH_HEADER=() \
+    && if [ -s /run/secrets/github_token ]; then AUTH_HEADER=(-H "Authorization: Bearer $(cat /run/secrets/github_token)"); fi \
+    && RELEASE_URL="$(curl -fsSL "${AUTH_HEADER[@]}" https://api.github.com/repos/umputun/ralphex/releases/latest | grep -oE 'https://github.com/umputun/ralphex/releases/download/[^\"]*linux_'"${ARCH}"'\.tar\.gz')" \
     && test -n "$RELEASE_URL" \
     && curl -fsSL "$RELEASE_URL" -o /tmp/ralphex.tar.gz \
     && tar -xzf /tmp/ralphex.tar.gz -C /tmp ralphex \
@@ -61,7 +64,8 @@ RUN ARCH="$(dpkg --print-architecture)" \
 
 ENV HOME=/home/app
 ENV NPM_CONFIG_PREFIX=/home/app/.npm-global
-RUN mkdir -p /home/app/.npm-global /home/app/go \
+RUN mkdir -p /data /home/app/.local/bin /home/app/.npm-global /home/app/go \
+    && chown app:app /data \
     && chown -R app:app /home/app
 
 USER app
