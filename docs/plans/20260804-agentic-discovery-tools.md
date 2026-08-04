@@ -144,16 +144,16 @@ This runs before `CloneIntake.Inspect` is deleted (Task 4) so every package comp
 
 Includes the `main.go` caller update in the same task as the `NewOpenRouterModel` signature change, so the module compiles at this task's test gate instead of breaking until a later task.
 
-- [ ] add `const MaxDiscoveryToolCalls = 10` in `adapters.go`, mirroring `MaxCritiqueRounds`'s pattern
-- [ ] change `NewOpenRouterModel` to accept the concrete `CloneIntake` and register `pm_discovery_glob`, `pm_discovery_grep`, `pm_discovery_read` as Genkit tools via `genkitx.DefineTool`, wired into `discoveryAgent` via `ai.WithTools`
-- [ ] add the per-turn call-counter context value, injected on the `context.Context` passed to `agent.Connect` in `Stream`; each tool checks and increments it, returning a fixed "tool budget exhausted" string instead of an error once `MaxDiscoveryToolCalls` is exceeded
-- [ ] pass every tool result (`Glob`, `Grep`, and `Read`, all three) through `redactSecrets` before returning it
-- [ ] update `Stream` to inject `conversation.ClonePath` and a fresh counter into the `Connect` ctx instead of prefixing the prompt with `RepositoryEvidence`
-- [ ] update the discovery system prompt to scope tool usage to requirements/architecture/conventions questions, not code-quality/correctness review
-- [ ] in `main.go`, construct `live.CloneIntake{...}` before `live.NewOpenRouterModel(...)` and pass the same value into both `NewOpenRouterModel` and `dashboard.Dependencies.Intake`
-- [ ] write tests that a turn issuing 11 tool calls still completes with an answer (cap enforced, no error)
-- [ ] write tests that output from each of the three tools is redacted before reaching the model/response
-- [ ] run tests — must pass before task 6
+- [x] add `const MaxDiscoveryToolCalls = 10` in `adapters.go`, mirroring `MaxCritiqueRounds`'s pattern
+- [x] change `NewOpenRouterModel` to accept the concrete `CloneIntake` and register `pm_discovery_glob`, `pm_discovery_grep`, `pm_discovery_read` as Genkit tools via `genkitx.DefineTool`, wired into `discoveryAgent` via `ai.WithTools`
+- [x] add the per-turn call-counter context value, injected on the `context.Context` passed to `agent.Connect` in `Stream`; each tool checks and increments it, returning a fixed "tool budget exhausted" string instead of an error once `MaxDiscoveryToolCalls` is exceeded
+- [x] pass every tool result (`Glob`, `Grep`, and `Read`, all three) through `redactSecrets` before returning it
+- [x] update `Stream` to inject `conversation.ClonePath` and a fresh counter into the `Connect` ctx instead of prefixing the prompt with `RepositoryEvidence`
+- [x] update the discovery system prompt to scope tool usage to requirements/architecture/conventions questions, not code-quality/correctness review
+- [x] in `main.go`, construct `live.CloneIntake{...}` before `live.NewOpenRouterModel(...)` and pass the same value into both `NewOpenRouterModel` and `dashboard.Dependencies.Intake`
+- [x] write tests that a turn issuing 11 tool calls still completes with an answer (cap enforced, no error)
+- [x] write tests that output from each of the three tools is redacted before reaching the model/response
+- [x] run tests — `go test ./...` passes; `make check` unavailable (no target)
 
 ### Task 6: Verify acceptance criteria
 

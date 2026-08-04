@@ -134,7 +134,7 @@ func TestGitHubNextPage(t *testing.T) {
 }
 
 func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
-	model, err := NewOpenRouterModel(context.Background(), "test-key", "openai/gpt-4.1-mini", t.TempDir()+"/pm.db")
+	model, err := NewOpenRouterModel(context.Background(), "test-key", "openai/gpt-4.1-mini", t.TempDir()+"/pm.db", CloneIntake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +147,27 @@ func TestOpenRouterStatusDefaultsBeforeFirstTurn(t *testing.T) {
 	want := dashboard.Status{Phase: "discovery", ModelRole: "discovery", Elapsed: "0s", RecentActivity: "awaiting discovery"}
 	if status != want {
 		t.Fatalf("status = %#v, want %#v", status, want)
+	}
+}
+
+func TestDiscoveryToolCallCapsTurn(t *testing.T) {
+	state := &discoveryTurnState{clonePath: t.TempDir()}
+	ctx := context.WithValue(context.Background(), discoveryTurnStateKey{}, state)
+	for call := 1; call <= MaxDiscoveryToolCalls; call++ {
+		_, message, err := discoveryToolCall(ctx)
+		if err != nil || message != "" {
+			t.Fatalf("call %d: message=%q err=%v", call, message, err)
+		}
+	}
+	_, message, err := discoveryToolCall(ctx)
+	if err != nil || message != "tool budget exhausted" {
+		t.Fatalf("over-budget call: message=%q err=%v", message, err)
+	}
+}
+
+func TestDiscoveryToolResultRedactsSecrets(t *testing.T) {
+	if got := redactSecrets("token ghp_abcdefghijklmnopqrstuvwxyz1234567890"); strings.Contains(got, "ghp_") {
+		t.Fatalf("secret was not redacted: %q", got)
 	}
 }
 

@@ -17,13 +17,13 @@ import (
 func main() {
 	ctx := context.Background()
 	store := envOr("PM_SQLITE_PATH", "pm.db")
-	model, err := live.NewOpenRouterModel(ctx, os.Getenv("OPENROUTER_API_KEY"), envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini"), store)
+	intake := live.CloneIntake{BaseDir: envOr("PM_INTAKE_DIR", filepath.Join(os.TempDir(), "hermestrator-intakes")), WorkspaceDir: envOr("PM_ISSUE_WORKSPACE_DIR", "issue-workspaces")}
+	model, err := live.NewOpenRouterModel(ctx, os.Getenv("OPENROUTER_API_KEY"), envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini"), store, intake)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() { _ = model.Close() }()
 	dashboardURL := envOr("PM_DASHBOARD_URL", "http://localhost:8080")
-	intakeBase := envOr("PM_INTAKE_DIR", filepath.Join(os.TempDir(), "hermestrator-intakes"))
 	issueWorkspaceBase := envOr("PM_EXECUTOR_WORKSPACE_DIR", filepath.Join(os.TempDir(), "hermestrator-executor-workspaces"))
 	planningProfile := envOr("PM_PLANNING_PROFILE", filepath.Join(os.TempDir(), "hermestrator-planning-profile.json"))
 	processRunner := &live.ProcessRunner{}
@@ -38,15 +38,12 @@ func main() {
 		SpecModel:      live.NewReviewModelFunc(model.Genkit(), envOr("PM_MODEL_REVIEW_SPEC", envOr("PM_MODEL_DISCOVERY", "openai/gpt-4.1-mini"))),
 	}
 	app, err := dashboard.New(dashboard.Dependencies{
-		GitHub:      live.GitHub{Token: os.Getenv("GH_TOKEN")},
-		Model:       model,
-		Telegram:    live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
-		Publisher:   live.GHPublisher{},
-		Synthesizer: live.NewGenkitSynthesizer(model.Genkit()),
-		Intake: live.CloneIntake{
-			BaseDir:      intakeBase,
-			WorkspaceDir: envOr("PM_ISSUE_WORKSPACE_DIR", "issue-workspaces"),
-		},
+		GitHub:         live.GitHub{Token: os.Getenv("GH_TOKEN")},
+		Model:          model,
+		Telegram:       live.Telegram{BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), ChatID: os.Getenv("TELEGRAM_CHAT_ID")},
+		Publisher:      live.GHPublisher{},
+		Synthesizer:    live.NewGenkitSynthesizer(model.Genkit()),
+		Intake:         intake,
 		Store:          store,
 		AllowedUsers:   live.AllowedUsers(os.Getenv("PM_ALLOWED_GITHUB_USERS")),
 		DashboardURL:   dashboardURL,
