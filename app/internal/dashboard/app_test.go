@@ -149,13 +149,14 @@ type fakePlanner struct {
 	workspace string
 	scope     string
 	done      chan struct{}
+	doneOnce  sync.Once
 }
 
 func (f *fakePlanner) GeneratePlan(_ context.Context, workspace string, _ ExecutorKind, scope string) (string, error) {
 	f.workspace = workspace
 	f.scope = scope
 	if f.done != nil {
-		close(f.done)
+		f.doneOnce.Do(func() { close(f.done) })
 	}
 	return "# Plan: test\n\n### Task 1: test", nil
 }
@@ -448,7 +449,21 @@ func TestIntakeRequiresConfirmationBeforePublishingAndSurvivesRestart(t *testing
 		}
 	}
 
-	restarted := mustApp(t, deps)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restarted.Close() }()
+	restartedStatus, err := restarted.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load restarted intake status: %v", err)
+	}
+	if restartedStatus.Scope != scope {
+		t.Fatalf("restarted scope = %q, persisted scope = %q", restartedStatus.Scope, scope)
+	}
 	workspace := request(t, restarted, http.MethodGet, "/repositories/42", "", "michael")
 	for _, want := range []string{"Tracked-work intake", "confirmed", "Glossary updates", "operators can create projects"} {
 		if !strings.Contains(workspace.Body.String(), want) {
@@ -818,7 +833,7 @@ func TestADREligibilityDoesNotTrustOperatorAttestation(t *testing.T) {
 
 func TestEstimateScope(t *testing.T) {
 	decision := []string{"one"}
-	threeHeadings := "# One\n## Two\n### Three"
+	threeTickets := "## Ticket 1: One\n## Ticket 2: Two\n## Ticket 3: Three"
 	moreThanFive := []string{"one", "two", "three", "four", "five", "six"}
 
 	tests := []struct {
@@ -828,11 +843,12 @@ func TestEstimateScope(t *testing.T) {
 		want     string
 	}{
 		{name: "empty input", want: "simple"},
-		{name: "simple boundary", resolved: decision, tickets: "# One", want: "simple"},
-		{name: "medium by decisions", resolved: []string{"one", "two"}, tickets: "# One", want: "medium"},
-		{name: "medium by headings", resolved: decision, tickets: "# One\n## Two", want: "medium"},
-		{name: "complex by headings", resolved: decision, tickets: threeHeadings, want: "complex"},
-		{name: "complex by decisions", resolved: moreThanFive, tickets: "# One", want: "complex"},
+		{name: "simple boundary", resolved: decision, tickets: "## Ticket 1: One", want: "simple"},
+		{name: "medium by decisions", resolved: []string{"one", "two"}, tickets: "## Ticket 1: One", want: "medium"},
+		{name: "medium by tickets", resolved: decision, tickets: "## Ticket 1: One\n## Ticket 2: Two", want: "medium"},
+		{name: "complex by tickets", resolved: decision, tickets: threeTickets, want: "complex"},
+		{name: "complex by decisions", resolved: moreThanFive, tickets: "## Ticket 1: One", want: "complex"},
+		{name: "generated ticket set", resolved: decision, tickets: ToTickets(Repository{FullName: "owner/repo"}, decision), want: "simple"},
 	}
 
 	for _, test := range tests {
@@ -1883,6 +1899,55 @@ func TestExistingConversationDatabaseMigratesTelemetryColumns(t *testing.T) {
 	}
 }
 
+func TestExistingIntakeDatabaseMigratesScopeColumn(t *testing.T) {
+	database := t.TempDir() + "/pm.db"
+	legacy, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE intakes (
+			repository_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+			clone_path TEXT NOT NULL DEFAULT '', inspection TEXT NOT NULL DEFAULT '',
+			message_start INTEGER NOT NULL DEFAULT 0, pending_question TEXT NOT NULL DEFAULT '',
+			issue_number INTEGER, issue_url TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+			executor_kind TEXT NOT NULL DEFAULT '', executor_rationale TEXT NOT NULL DEFAULT '',
+			executor_state TEXT NOT NULL DEFAULT '', executor_heartbeat TEXT NOT NULL DEFAULT '',
+			executor_duration_ns INTEGER NOT NULL DEFAULT 0, executor_exit_code INTEGER NOT NULL DEFAULT 0,
+			executor_cancelled INTEGER NOT NULL DEFAULT 0, executor_workspace_path TEXT NOT NULL DEFAULT '',
+			pr_number INTEGER NOT NULL DEFAULT 0, review_findings TEXT NOT NULL DEFAULT '',
+			review_round INTEGER NOT NULL DEFAULT 0, pr_url TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
+			retry_state TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO intakes(repository_id,state,updated_at) VALUES('42','draft','2026-08-04T00:00:00Z');`)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := New(Dependencies{
+		GitHub:       fakeGitHub{repos: []Repository{{ID: "42", FullName: "mkoziy/hermestrator"}}},
+		Model:        fakeModel{},
+		Store:        database,
+		AllowedUsers: map[string]bool{"michael": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+
+	status, err := app.intakeStatus(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("load migrated intake: %v", err)
+	}
+	if status.Scope != "" {
+		t.Fatalf("migrated scope = %q, want empty default", status.Scope)
+	}
+}
+
 func mustApp(t *testing.T, deps Dependencies) http.Handler {
 	t.Helper()
 	app, err := New(deps)
@@ -2027,6 +2092,12 @@ func TestExecutorUsesPersistedScopeAndDefaultsForLegacyIntakes(t *testing.T) {
 	status, err := a.intakeStatus(context.Background(), "42")
 	if err != nil || status.ExecutorKind != string(Codex) {
 		t.Fatalf("legacy executor kind = %q, err=%v, want codex", status.ExecutorKind, err)
+	}
+	if response := request(t, app, http.MethodPost, "/repositories/42/executor/plan", "", "michael"); response.Code != http.StatusAccepted {
+		t.Fatalf("legacy plan status = %d: %s", response.Code, response.Body.String())
+	}
+	if planner.scope != "medium" {
+		t.Fatalf("legacy planner scope = %q, want medium", planner.scope)
 	}
 
 	if _, err := a.db.Exec(`UPDATE intakes SET executor_state='',executor_kind='',scope='complex' WHERE repository_id='42'`); err != nil {
