@@ -38,6 +38,12 @@ without creating another issue. A successful promotion moves the intake clone
 into `PM_ISSUE_WORKSPACE_DIR/issues/<number>`; abandoning an unpublished
 intake removes only its verified temporary clone.
 
+During discovery, the PM can search and read the isolated clone on demand to
+answer requirements, architecture, and convention questions. These read-only
+tools cannot modify the clone: each operator turn is limited to 10 tool calls,
+glob returns at most 200 paths, and read and grep return at most 16 KiB. Glob
+patterns match file base names; grep uses Go regular expressions.
+
 ## Executor orchestration
 
 Implementation runs (Ticket 3 / issue #4) use a separate workspace layout

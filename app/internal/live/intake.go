@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,7 +220,10 @@ const (
 )
 
 // Read returns at most 16 KiB from one regular file below the intake root.
-func (i CloneIntake) Read(_ context.Context, path, relativePath string) (string, error) {
+func (i CloneIntake) Read(ctx context.Context, path, relativePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := i.validateChild(path); err != nil {
 		return "", err
 	}
@@ -227,12 +231,17 @@ func (i CloneIntake) Read(_ context.Context, path, relativePath string) (string,
 	if err != nil {
 		return "", err
 	}
-	body, err := os.ReadFile(file)
+	handle, err := os.Open(file)
 	if err != nil {
 		return "", fmt.Errorf("read intake file %q: %w", relativePath, err)
 	}
-	if len(body) > maxDiscoveryReadBytes {
-		body = body[:maxDiscoveryReadBytes]
+	body, readErr := io.ReadAll(io.LimitReader(handle, maxDiscoveryReadBytes))
+	closeErr := handle.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read intake file %q: %w", relativePath, readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close intake file %q: %w", relativePath, closeErr)
 	}
 	return string(body), nil
 }
@@ -410,7 +419,7 @@ func (i CloneIntake) regularDescendant(root, relativePath string) (string, error
 		return "", fmt.Errorf("refuse invalid intake relative path %q", relativePath)
 	}
 	clean := filepath.Clean(relativePath)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("refuse operation outside isolated intake directory")
 	}
 	candidate := filepath.Join(resolvedRoot, clean)

@@ -2,9 +2,11 @@ package live
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -84,6 +86,12 @@ func TestCloneIntakeCleanupRefusesOutsideItsBaseDirectory(t *testing.T) {
 	}
 	if err := intake.Cleanup(context.Background(), t.TempDir()); err == nil {
 		t.Fatal("cleanup outside the intake base unexpectedly succeeded")
+	}
+	if err := intake.Cleanup(context.Background(), base); err == nil {
+		t.Fatal("cleanup of the intake base unexpectedly succeeded")
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("intake base was removed: %v", err)
 	}
 }
 
@@ -219,6 +227,26 @@ func TestCloneIntakeGlobMatchesNestedBaseNames(t *testing.T) {
 	}
 }
 
+func TestCloneIntakeGlobCapsMatches(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxDiscoveryGlobMatches+1; index++ {
+		if err := os.WriteFile(filepath.Join(root, "match-"+strconv.Itoa(index)+".md"), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := (CloneIntake{BaseDir: base}).Glob(context.Background(), root, "*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches := strings.Split(got, "\n"); len(matches) != maxDiscoveryGlobMatches {
+		t.Fatalf("glob matches = %d, want %d", len(matches), maxDiscoveryGlobMatches)
+	}
+}
+
 func TestCloneIntakeGrepMatchesAndCapsOutput(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "repo")
@@ -307,6 +335,22 @@ func TestCloneIntakeReadCapsSizeAndRefusesUnsafeFiles(t *testing.T) {
 				t.Fatalf("read %q unexpectedly succeeded", relative)
 			}
 		})
+	}
+}
+
+func TestCloneIntakeReadHonorsCancelledContext(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "intake-read")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("repository guide"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (CloneIntake{BaseDir: base}).Read(ctx, path, "README.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("read error = %v, want context cancellation", err)
 	}
 }
 
