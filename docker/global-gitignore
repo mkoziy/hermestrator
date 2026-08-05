@@ -1,4 +1,3 @@
-# Global git excludes baked into this image (git config --global
-# core.excludesFile). Applies to every repo any agent (hermes/ralphex/pi/codex)
-# clones or works in inside this container, not just this project's own repo.
+# Applied through app's global Git configuration so executor worktrees never
+# surface ralphex's per-repository runtime state as untracked changes.
 .ralphex/
