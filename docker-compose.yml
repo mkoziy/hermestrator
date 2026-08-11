@@ -25,7 +25,6 @@ services:
       CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - .:/workspace:ro
       - swamp_worker_cache:/home/worker/.swamp-worker

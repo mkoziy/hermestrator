@@ -38,8 +38,8 @@ git check-ref-format --branch "$BASE_BRANCH" >/dev/null || fail "base_branch is 
 [[ "$BASE_BRANCH" != "$branch" ]] || fail "implementation branch must not be the base branch"
 case "$REQUIRE_AGENT_READY" in true|false) ;; *) fail "require_agent_ready must be true or false" ;; esac
 case "$RALPHEX_CONFIG" in
-  ralphex|ralphex-codex|ralphex-pi) ;;
-  *) fail "ralphex_config must be ralphex, ralphex-codex, or ralphex-pi" ;;
+  ralphex-codex|ralphex-pi) ;;
+  *) fail "ralphex_config must be ralphex-codex or ralphex-pi" ;;
 esac
 
 command -v gh >/dev/null || fail "gh is required"

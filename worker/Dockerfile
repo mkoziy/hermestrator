@@ -9,7 +9,6 @@ ARG RALPHEX_VERSION=1.6.1
 ARG GH_VERSION=2.97.0
 ARG CODEX_VERSION=0.147.0
 ARG PI_VERSION=0.82.1
-ARG CLAUDE_CODE_VERSION=2.1.226
 ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410f95a9925573d4a
 
 RUN apt-get update \
@@ -42,8 +41,6 @@ RUN case "$TARGETARCH" in \
 RUN npm install --global --ignore-scripts \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
     && npm cache clean --force
 
 RUN useradd --create-home --shell /bin/bash worker \
@@ -51,7 +48,6 @@ RUN useradd --create-home --shell /bin/bash worker \
     && chown --recursive worker:worker /workspace /home/worker
 
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
-COPY --chown=worker:worker worker/ralphex/ralphex/ /home/worker/.config/ralphex/
 COPY --chown=worker:worker worker/ralphex-codex/ /home/worker/.config/ralphex-codex/
 COPY --chown=worker:worker worker/ralphex-pi/ /home/worker/.config/ralphex-pi/
 COPY --chown=worker:worker . /workspace

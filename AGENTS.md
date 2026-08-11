@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for coding agents (Claude Code, Codex, Pi, and human contributors)
+Instructions for coding agents (Codex, Pi, and human contributors)
 working in this repository.
 
 ## Start here

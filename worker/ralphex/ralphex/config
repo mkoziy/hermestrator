@@ -1,5 +1,0 @@
-# Default ralphex profile: Claude executes tasks and Codex performs the external review.
-# Credentials are supplied only at runtime (ANTHROPIC_API_KEY and OPENAI_API_KEY).
-claude_args = --dangerously-skip-permissions --output-format stream-json --verbose
-external_review_tool = codex
-preserve_anthropic_api_key = true

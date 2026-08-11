@@ -3,7 +3,7 @@
 Automated GitHub ticket implementation on top of [swamp](https://github.com/swamp-club/swamp)
 and [ralphex](https://github.com/umputun/ralphex): poll a repo for
 `agent-ready` issues that already have a plan committed, then run a coding
-agent (Claude Code, Codex, or Pi) against each one and open a pull request.
+agent (Codex or Pi) against each one and open a pull request.
 
 ## How it works
 

@@ -25,7 +25,6 @@ inputs:
       type: string
       default: ralphex-codex
       enum:
-        - ralphex
         - ralphex-codex
         - ralphex-pi
       description: Installed ralphex profile selected from ~/.config.

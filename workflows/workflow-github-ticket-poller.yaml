@@ -26,7 +26,6 @@ inputs:
       type: string
       default: ralphex-codex
       enum:
-        - ralphex
         - ralphex-codex
         - ralphex-pi
       description: ralphex profile passed through to triggered github-ticket-worker runs.

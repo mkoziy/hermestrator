@@ -9,10 +9,9 @@ mutable checkout for each run.
 ## Image contents
 
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
-CLI, Pi coding agent, and Claude Code; includes git, GitHub CLI, jq, SSH client,
-and ralphex profiles under `/home/worker/.config`:
+CLI, and Pi coding agent; includes git, GitHub CLI, jq, SSH client, and
+ralphex profiles under `/home/worker/.config`:
 
-- `ralphex`: Claude task executor plus Codex external review;
 - `ralphex-codex`: native Codex executor (the workflow default);
 - `ralphex-pi`: Pi through the official ralphex `pi-as-claude.sh` adapter.
 
@@ -35,7 +34,6 @@ environment file. They are never image build arguments or `Dockerfile` values.
 | `CODEX_ACCESS_TOKEN` | automatic subscription-backed Codex auth | ChatGPT Business or Enterprise Codex access token, injected from a secret manager |
 | `OPENAI_API_KEY` | API-billed `ralphex-codex`, or Codex review | alternative Codex auth; entrypoint logs in with stdin |
 | `OPENCODE_API_KEY` | `ralphex-pi` | Pi `opencode-go` provider auth |
-| `ANTHROPIC_API_KEY` | `ralphex` | standard ralphex profile's Claude executor |
 
 Optional volumes are `/home/worker/.swamp-worker` (required in practice: keeps
 the worker identity bound to its enrollment token), `/home/worker/.codex`, and
