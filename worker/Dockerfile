@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22.20.0-bookworm-slim
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ARG TARGETARCH
 ARG SWAMP_VERSION=20260809.004828.0-sha.b61c9de2
 ARG RALPHEX_VERSION=1.6.1
