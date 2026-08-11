@@ -50,7 +50,9 @@ RUN useradd --create-home --shell /bin/bash worker \
     && chown --recursive worker:worker /workspace /home/worker
 
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
-COPY --chown=worker:worker worker/ralphex/ /home/worker/.config/
+COPY --chown=worker:worker worker/ralphex/ralphex/ /home/worker/.config/ralphex/
+COPY --chown=worker:worker worker/ralphex-codex/ /home/worker/.config/ralphex-codex/
+COPY --chown=worker:worker worker/ralphex-pi/ /home/worker/.config/ralphex-pi/
 COPY --chown=worker:worker . /workspace
 
 RUN curl --fail --location --silent --show-error \
