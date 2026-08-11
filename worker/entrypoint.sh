@@ -18,4 +18,8 @@ if [[ -n "${OPENAI_API_KEY:-}" && -z "${CODEX_ACCESS_TOKEN:-}" ]]; then
   printf '%s' "$OPENAI_API_KEY" | gosu worker codex login --with-api-key
 fi
 
+if [[ -n "${GH_TOKEN:-}" ]]; then
+  gosu worker gh auth setup-git
+fi
+
 exec gosu worker "$@"
