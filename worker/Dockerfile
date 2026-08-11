@@ -43,6 +43,7 @@ RUN npm install --global --ignore-scripts \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
     && npm cache clean --force
 
 RUN useradd --create-home --shell /bin/bash worker \
