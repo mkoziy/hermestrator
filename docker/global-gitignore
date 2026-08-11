@@ -1,3 +1,0 @@
-# Applied through app's global Git configuration so executor worktrees never
-# surface ralphex's per-repository runtime state as untracked changes.
-.ralphex/

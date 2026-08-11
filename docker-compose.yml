@@ -1,0 +1,40 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    entrypoint: ["swamp"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "9090", "--trusted-hosts", "orchestrator,localhost"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - .:/workspace
+
+  coding-worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    depends_on:
+      - orchestrator
+    environment:
+      SWAMP_ORCHESTRATOR_URL: ws://orchestrator:9090
+      SWAMP_WORKER_TOKEN: ${SWAMP_WORKER_TOKEN:-}
+      SWAMP_WORKER_LABELS: pool=coding
+      SWAMP_WORKER_CONCURRENCY: "1"
+      GH_TOKEN: ${GH_TOKEN:-}
+      CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - .:/workspace:ro
+      - swamp_worker_cache:/home/worker/.swamp-worker
+      - codex_home:/home/worker/.codex
+      - pi_agent_home:/home/worker/.pi/agent
+    stop_grace_period: 5m
+    restart: on-failure
+
+volumes:
+  swamp_worker_cache:
+  codex_home:
+  pi_agent_home:

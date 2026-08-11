@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: b7f1aab8-2133-4246-91f5-4c60c4981336
+name: github_ticket_worker_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

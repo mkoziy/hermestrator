@@ -1,0 +1,63 @@
+id: 89d87955-e088-44cb-859d-438a8ba0789a
+name: github-ticket-worker
+description: >-
+  Manually implement one open GitHub issue with ralphex and open or reuse its pull request.
+  Requires branch agent/issue-<issue_number> to already exist on origin with a ralphex plan
+  committed to docs/plans/; fails otherwise.
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form.
+    issue_number:
+      type: integer
+      description: Open GitHub issue number to implement.
+    base_branch:
+      type: string
+      default: main
+      description: Branch the implementation must target.
+    require_agent_ready:
+      type: boolean
+      default: false
+      description: Set true to require the future agent-ready label gate.
+    ralphex_config:
+      type: string
+      default: ralphex-codex
+      enum:
+        - ralphex
+        - ralphex-codex
+        - ralphex-pi
+      description: Installed ralphex profile selected from ~/.config.
+  required:
+    - repo
+    - issue_number
+tags: {}
+jobs:
+  - name: main
+    description: Validate, implement through ralphex, and create or reuse one pull request.
+    steps:
+      - name: implement-github-issue
+        description: Runs the isolated manual GitHub issue implementation slice.
+        task:
+          type: model_method
+          modelIdOrName: github_ticket_worker_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-ticket-worker.sh
+            workingDir: .
+            timeout: 7200000
+            env:
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              BASE_BRANCH: ${{ inputs.base_branch }}
+              REQUIRE_AGENT_READY: ${{ string(inputs.require_agent_ready) }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+        labels:
+          pool: coding
+    dependsOn: []
+    weight: 0
+version: 1
