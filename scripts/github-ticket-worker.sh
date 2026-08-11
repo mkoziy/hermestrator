@@ -86,8 +86,8 @@ git show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH" || \
 
 git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1 || \
   fail "branch $branch does not exist on origin; create it with a ralphex plan committed before running this flow"
-git fetch origin "$branch"
-git switch --track -c "$branch" "origin/$branch"
+git fetch origin "$branch:refs/remotes/origin/$branch"
+git switch -c "$branch" "origin/$branch"
 [[ -n "$(git rev-list "origin/$BASE_BRANCH..HEAD")" ]] || \
   fail "branch $branch has no commits beyond $BASE_BRANCH; it must carry a committed ralphex plan"
 
