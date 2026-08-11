@@ -1,0 +1,7 @@
+# Pi coding-agent profile. pi-opencode-go.sh adapts Pi's JSONL output to the
+# Claude stream-json protocol required by ralphex.
+claude_command = /home/worker/.config/ralphex-pi/scripts/pi-opencode-go.sh
+claude_args =
+task_model = deepseek-v4-pro
+review_model = qwen3.7-plus
+external_review_tool = none

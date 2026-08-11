@@ -1,0 +1,60 @@
+id: 6e139501-a04a-49ab-b0fd-685321d9d16e
+name: github-ticket-poller
+description: >-
+  Scans one GitHub repository for open issues labeled agent-ready that already
+  have a ralphex plan committed to an agent/issue-<N> branch, and triggers
+  github-ticket-worker for each. Runs on a cron trigger via swamp serve.
+trigger:
+  schedule: "*/15 * * * *"
+  inputs:
+    repo: OWNER/REPO
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form to poll.
+    base_branch:
+      type: string
+      default: main
+      description: Branch implementation branches are compared against.
+    label:
+      type: string
+      default: agent-ready
+      description: Issue label that marks a ticket as eligible for polling.
+    ralphex_config:
+      type: string
+      default: ralphex-codex
+      enum:
+        - ralphex
+        - ralphex-codex
+        - ralphex-pi
+      description: ralphex profile passed through to triggered github-ticket-worker runs.
+  required:
+    - repo
+tags: {}
+jobs:
+  - name: main
+    description: Trigger github-ticket-worker for every issue with a ready plan branch.
+    steps:
+      - name: poll-and-trigger
+        description: List agent-ready issues with a committed plan and run the worker for each.
+        task:
+          type: model_method
+          modelIdOrName: github_ticket_worker_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-ticket-poller.sh
+            workingDir: .
+            timeout: 300000
+            env:
+              REPO: ${{ inputs.repo }}
+              BASE_BRANCH: ${{ inputs.base_branch }}
+              LABEL: ${{ inputs.label }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

@@ -1,71 +1,44 @@
-# AI guide
+<!-- BEGIN swamp managed section - DO NOT EDIT -->
+# Project
 
-Hermestrator is becoming a web-first project-management runtime. Its accepted
-architecture is recorded in [ADR 0001](docs/adr/0001-use-genkit-for-the-pm-runtime.md).
-Read that ADR, then the current
-[dashboard specification](docs/specs/20260726-genkit-pm-dashboard.md) and
-[ticket breakdown](docs/tickets/20260726-genkit-pm-dashboard.md), before making
-architecture or workflow changes.
+This repository is managed with [swamp](https://github.com/swamp-club/swamp).
 
-## Current direction
+## Rules
 
-- Build the PM service in Go in the `app/` module.
-- Use Genkit's Agents API for agent sessions, typed state, snapshots,
-  interrupts, background work, tools, middleware, artifacts, and telemetry.
-- Use OpenRouter through Genkit's OpenAI-compatible integration.
-- Serve the authenticated operator dashboard with `net/http`, `html/template`,
-  HTMX, and Tabler. The Genkit Developer UI is for diagnostics, not a product
-  dashboard replacement.
-- Persist Genkit sessions and operational projections in SQLite. Use a pure-Go
-  driver and WAL mode.
-- Authenticate dashboard users with `github.com/go-pkgz/auth/v2`. Keep this
-  OAuth identity separate from `GH_TOKEN`, the automation credential for GitHub
-  and git.
-- Send Telegram notifications only for action-required and terminal events.
-  They must link back to the dashboard and never mutate or approve work.
+1. **Search before you build.** When automating AWS, APIs, or any external service: (a) search community extensions with `swamp extension search <query>` — prefer `@swamp/*` official extensions first, (b) search local/installed types with `swamp model type search <query>`, (c) if a community extension exists, install it with `swamp extension pull <package>` instead of building from scratch, (d) extend an existing type if it covers the domain but lacks the method you need, (e) only create a custom extension model in `extensions/models/` as a last resort. Use the `swamp` skill for guidance. The `command/shell` model is ONLY for ad-hoc one-off shell commands, NEVER for wrapping CLI tools or building integrations.
+2. **Extend, don't be clever.** When a model covers the domain but lacks the method you need, extend it with `export const extension` — don't bypass it with shell scripts, CLI tools, or multi-step hacks. One method, one purpose. Use `swamp model type describe <type> --json` to check available methods.
+3. **Use the data model.** Once data exists in a model (via `lookup`, `start`, `sync`, etc.), reference it with CEL expressions. Don't re-fetch data that's already available.
+4. **CEL expressions everywhere.** Wire models together with CEL expressions. Always prefer `data.latest("<name>", "<dataName>").attributes.<field>` over the deprecated `model.<name>.resource.<spec>.<instance>.attributes.<field>` pattern.
+5. **Verify before destructive operations.** Always `swamp model get <name> --json` and verify resource IDs before running delete/stop/destroy methods.
+6. **Prefer fan-out methods over loops.** When operating on multiple targets, use a single method that handles all targets internally (factory pattern) rather than looping N separate `swamp model method run` calls against the same model. Multiple parallel calls against the same model contend on the per-model lock, causing timeouts. A single fan-out method acquires the lock once and produces all outputs in one execution. Check `swamp model type describe` for methods that accept filters or produce multiple outputs.
+7. **Extension npm deps are bundled, not lockfile-tracked.** Swamp's bundler inlines all npm packages (except zod) into extension bundles at bundle time. `deno.lock` and `package.json` do NOT cover extension model dependencies — this is by design. Always pin explicit versions in `npm:` import specifiers (e.g., `npm:lodash-es@4.17.21`).
+8. **Reports for reusable data pipelines.** When the task involves building a repeatable pipeline to transform, aggregate, or analyze model output (security reports, cost analysis, compliance checks, summaries), create a report extension. Use the `swamp` skill for guidance.
+9. **"Workflow" means a swamp workflow.** In this repository the word "workflow" (and "create/run/execute/validate/debug workflow", "automate", "orchestrate", "automated/nightly job") refers to a swamp workflow — a declarative YAML DAG of model-method steps authored via `swamp workflow create`. Load and follow the `swamp` skill for these requests. Do NOT interpret these as a request to build an agent task list, spin up worktrees, or schedule a cron/remote agent. Only use those orchestration mechanisms when the user explicitly names one (e.g. "task list", "subagent", "worktree", "cron", "remote agent") or explicitly asks you to do the work yourself step by step rather than author a swamp workflow.
+10. **Use swamp, don't bypass it.** Always work through swamp commands — don't go around them with raw shell tools. Use `swamp data query` to find data, not `grep`/`find` on `.swamp/` files. Use model methods to interact with resources, not `curl`/`aws`/`gcloud`/`kubectl` when a model type already wraps that API — check with `swamp model type search`. Use `swamp help` for CLI discovery, not guesswork. Composing with swamp output is fine (e.g. piping `--json` through `jq`) — the anti-pattern is bypassing swamp entirely.
+11. **Inspect reports after failures.** When a model method or workflow run fails, inspect its generated reports before retrying or changing definitions. Reports run even on failure and capture structured diagnostics — error messages, execution status, arguments, and data output pointers. Use `swamp report get @swamp/method-summary --model <model> --json` for method failures or `swamp report get @swamp/workflow-summary --workflow <workflow> --json` for workflow failures. Run `swamp help report get` to confirm current retrieval syntax.
 
-## Workflow boundaries
+## Skills
 
-The intended workflow is:
+**IMPORTANT:** Always load swamp skills, even when in plan mode. The skills provide
+essential context for working with this repository.
 
-`grill-with-docs → to-spec → to-tickets → issue → executor selection →
-executor-owned plan → critique → plan approval → execution → verification →
-PR → code review → fixes → merge approval → merge → cleanup`.
+- `swamp` - Swamp CLI — models, workflows, data, vaults, extensions, publishing, repos, reports, issues, and troubleshooting
+- `swamp-getting-started` - Interactive onboarding for new swamp users
 
-The application, not an LLM prompt, must enforce mandatory phase transitions
-and approval gates. Keep agent judgment within the phase it is executing.
+## Getting Started
 
-When executor orchestration is introduced, invoke ralphex, Codex, and Pi
-binaries directly. Own separate ralphex configuration directories for planning
-and execution. Do not reuse `docker/ralphex-wrapper.sh`,
-`docker/ralphex-headless-plan.sh`, or other Hermes-specific orchestration.
-Ralphex owns its own plans; the PM may critique or request regeneration but
-must not rewrite them.
+**IMPORTANT:** At the start of every conversation, run
+`swamp model search --json`. If no models are returned (empty result), you MUST
+immediately invoke the `swamp-getting-started` skill before doing anything else.
+This walks new users through an interactive onboarding tutorial.
 
-## Implementation and testing
+If models already exist, start by using the `swamp` skill to work with
+swamp models.
 
-- Treat the complete `net/http` handler as the primary test seam. Use
-  `httptest` and fake GitHub, Genkit/model, session-store, and Telegram
-  adapters for vertical behavior.
-- Reserve lower-level tests for deterministic state transitions, authorization,
-  and SQLite invariants.
-- Do not store or render secrets, OAuth credentials, `GH_TOKEN`, or model API
-  keys in events, artifacts, logs, or pages.
-- Prefer Genkit facilities, then the Go standard library, before adding
-  dependencies. Pin Genkit dependencies and review upgrades deliberately: the
-  Agents API is beta.
-- Use the repository's `golang-patterns` skill for Go work. Maintain the
-  canonical `make check` validation command and the tracked pre-push hook when
-  adding project tooling.
+## Commands
 
-## Scope discipline
-
-The first vertical slice proves real GitHub login, repository registration,
-durable OpenRouter conversation streaming, telemetry, and a test Telegram
-notification. Follow the acceptance criteria in Ticket 1.
-
-Do not revive Hermes gateway behavior, its Docker startup wiring, or
-`$HERMES_HOME` backup work. Kubernetes deployment, executor orchestration,
-GitHub issue/PR mutations, approval flows, repository leases, clone lifecycle,
-and Telegram commands belong to later tickets unless the task explicitly
-expands scope.
+Use `swamp --help` to see available commands. For a machine-readable JSON
+schema of the CLI (commands, options, arguments) intended for agent
+consumption, run `swamp help [<command>...]` — e.g. `swamp help` returns
+the full tree, and `swamp help model method run` scopes to a subtree.
+<!-- END swamp managed section -->
