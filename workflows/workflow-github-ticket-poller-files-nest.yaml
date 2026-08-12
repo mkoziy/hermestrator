@@ -40,7 +40,7 @@ jobs:
         description: List agent-ready issues with a committed plan and run the worker for each.
         task:
           type: model_method
-          modelIdOrName: github_ticket_worker_shell
+          modelIdOrName: github_ticket_poller_shell
           methodName: execute
           inputs:
             run: scripts/github-ticket-poller.sh

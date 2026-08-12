@@ -76,3 +76,11 @@ buildable and the smoke check passing for any Dockerfile change.
   `ralphex-pi`, `agent-codex` → `ralphex-codex`, neither → the workflow's
   `ralphex_config` default (project-wide). If an issue somehow carries both,
   `agent-pi` wins.
+- The poller workflows (`workflow-github-ticket-poller.yaml`,
+  `-files-nest.yaml`) run on their own `command/shell` model
+  (`github_ticket_poller_shell`), deliberately separate from the worker's
+  (`github_ticket_worker_shell`). A poller step synchronously calls `swamp
+  workflow run github-ticket-worker` from inside its own model-method
+  execution — if it shared the worker's model, that call would deadlock
+  waiting for a lock its own outer execution already holds. Don't merge them
+  back onto one model.
