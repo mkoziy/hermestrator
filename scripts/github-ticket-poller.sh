@@ -8,6 +8,7 @@ set -Eeuo pipefail
 : "${BASE_BRANCH:=main}"
 : "${LABEL:=agent-ready}"
 : "${RALPHEX_CONFIG:=ralphex-codex}"
+: "${STALE_RUN_MINUTES:=45}"
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || { printf 'ERROR: repo must be owner/name\n' >&2; exit 1; }
 
@@ -53,11 +54,18 @@ while IFS=$'\t' read -r n issue_labels; do
   # in flight (or was never marked terminal) — a slow ralphex run that
   # outlives one 15-minute poller tick would otherwise get a duplicate
   # worker run stacked on top of it every tick, contending for the same
-  # command/shell model lock.
+  # command/shell model lock. Runs older than STALE_RUN_MINUTES are treated
+  # as terminal even if still reporting "running": a pod recycle mid-run can
+  # orphan a run's bookkeeping in a stuck non-terminal state that no CLI
+  # command reconciles, which would otherwise block this issue forever.
   active_count="$(swamp workflow history search \
     --input repo="$REPO" --input "issue_number=$n" --json 2>/dev/null \
-    | jq '[.results[] | select(.workflowName == "github-ticket-worker"
-        and (.status | IN("completed","succeeded","failed","cancelled","error","timeout") | not))] | length' \
+    | jq --argjson stale_secs "$((STALE_RUN_MINUTES * 60))" '
+        now as $now
+        | [.results[] | select(.workflowName == "github-ticket-worker"
+            and (.status | IN("completed","succeeded","failed","cancelled","error","timeout") | not)
+            and (($now - (.startedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) < $stale_secs))
+          ] | length' \
       2>/dev/null)" || active_count=0
   if [[ "$active_count" -gt 0 ]]; then
     printf 'Issue #%s: a github-ticket-worker run is already active, skipping\n' "$n"
