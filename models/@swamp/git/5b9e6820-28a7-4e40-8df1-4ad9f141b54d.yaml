@@ -1,0 +1,12 @@
+type: '@swamp/git'
+typeVersion: 2026.08.07.1
+id: 5b9e6820-28a7-4e40-8df1-4ad9f141b54d
+name: vault-repo
+version: 1
+tags: {}
+globalArguments:
+  repoPath: .vault-clone
+  remote: origin
+  authorName: hermestrator
+  authorEmail: hermestrator@users.noreply.github.com
+methods: {}

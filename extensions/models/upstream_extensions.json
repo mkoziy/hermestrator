@@ -1,0 +1,22 @@
+{
+  "@swamp/git": {
+    "version": "2026.08.07.1",
+    "pulledAt": "2026-08-12T15:28:27.644Z",
+    "files": [
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/schemas.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/operations.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/types.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/checks.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/runner.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/_lib/tracing.ts",
+      ".swamp/pulled-extensions/@swamp/git/models/git.ts",
+      ".swamp/bundles/2b63a75e/git.js",
+      ".swamp/pulled-extensions/@swamp/git/files/README.md",
+      ".swamp/pulled-extensions/@swamp/git/files/LICENSE.txt",
+      ".swamp/pulled-extensions/@swamp/git/manifest.yaml"
+    ],
+    "checksum": "b8e5f662f18c2b7a068927a260e984bb62dab88c6da0d34c705b4365f96702a1",
+    "filesChecksum": "69dbf2b6618018bdbe8c4502a8d215e44ae77207ada4ffc555908082720d5c26",
+    "serverUrl": "https://swamp-club.com"
+  }
+}

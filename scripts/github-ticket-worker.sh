@@ -11,9 +11,43 @@ set -Eeuo pipefail
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
 cleanup_workspace=true
+ralphex_started=false
+started_at=""
+
+# Emits one line the vault-sync workflow job greps out of this step's stdout.
+# Only called once ralphex has actually run, so validation failures (bad repo,
+# closed issue, missing plan) don't produce empty/meaningless vault notes.
+emit_vault_note() {
+  local status_label="$1"
+  local progress_file=""
+  if [[ -n "${plan_file:-}" ]]; then
+    progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
+    [[ -f "$progress_file" ]] || progress_file=""
+  fi
+  jq -nc \
+    --arg repo "$REPO" \
+    --argjson issue_number "$ISSUE_NUMBER" \
+    --slurpfile issue "$issue_json" \
+    --arg pr_url "${open_pr:-}" \
+    --arg ralphex_config "$RALPHEX_CONFIG" \
+    --arg status "$status_label" \
+    --arg started_at "$started_at" \
+    --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg branch "$branch" \
+    --arg progress_log "$( [[ -n "$progress_file" ]] && cat "$progress_file" || true )" \
+    '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch, progress_log:$progress_log}' \
+  | { printf 'VAULT_NOTE_JSON:'; cat; printf '\n'; }
+}
 
 cleanup() {
   local status=$?
+  if [[ "$ralphex_started" == true ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      emit_vault_note success || true
+    else
+      emit_vault_note failed || true
+    fi
+  fi
   if [[ -z "$run_root" ]]; then
     :
   elif [[ "$cleanup_workspace" == true ]]; then
@@ -63,7 +97,7 @@ gh repo view "$REPO" --json nameWithOwner >/dev/null || fail "repository does no
 
 printf 'Fetching issue #%s\n' "$ISSUE_NUMBER"
 gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-  --json number,title,body,state,labels,url >"$issue_json" || fail "issue does not exist or is inaccessible"
+  --json number,title,body,state,labels,url,comments >"$issue_json" || fail "issue does not exist or is inaccessible"
 
 [[ "$(jq -r '.state' "$issue_json")" == "OPEN" ]] || fail "issue #$ISSUE_NUMBER is not open"
 if [[ "$REQUIRE_AGENT_READY" == true ]]; then
@@ -94,6 +128,8 @@ esac
 readonly plan_file="${plan_files[0]}"
 
 printf 'Executing ralphex plan %s with config %s\n' "$plan_file" "$RALPHEX_CONFIG"
+ralphex_started=true
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ralphex --config-dir "$ralphex_config_dir" "$plan_file" \
   --base-ref "$BASE_BRANCH" --branch "$branch"
 
@@ -124,8 +160,8 @@ fi
 # No open PR — either the first run, or a follow-up after the previous PR was
 # closed/merged; either way a fresh PR is opened from the same branch.
 issue_title="$(jq -r '.title' "$issue_json")"
-if ! gh pr create --repo "$REPO" --base "$BASE_BRANCH" --head "$branch" \
-  --title "$issue_title" --body "Closes #$ISSUE_NUMBER"; then
+if ! open_pr="$(gh pr create --repo "$REPO" --base "$BASE_BRANCH" --head "$branch" \
+  --title "$issue_title" --body "Closes #$ISSUE_NUMBER")"; then
   open_pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json url --jq '.[0].url // empty')"
   [[ -n "$open_pr" ]] && {
     printf 'Reusing existing pull request created concurrently: %s\n' "$open_pr"

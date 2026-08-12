@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: b85300ac-b347-4abf-8cd7-cccc4ac4ac48
+name: vault_note_writer_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

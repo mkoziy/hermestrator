@@ -7,6 +7,7 @@ app/.genkit/
 progress/
 worktrees/
 app/pm.db*
+.vault-clone/
 
 # BEGIN swamp managed section - DO NOT EDIT
 
