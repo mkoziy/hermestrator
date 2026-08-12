@@ -92,3 +92,9 @@ buildable and the smoke check passing for any Dockerfile change.
   flag) supplies it; default `ws://127.0.0.1:9090` assumes the poller runs
   in the same pod/container as the orchestrator. Without it, the triggered
   worker run fails instantly: "no worker dispatcher is active".
+- Before triggering, `github-ticket-poller.sh` checks
+  `swamp workflow history search --input repo=... --input issue_number=...`
+  for any non-terminal `github-ticket-worker` run on that issue and skips if
+  one exists. Without this, a ralphex run slower than the 15-minute cron
+  interval gets a duplicate worker run stacked on top of it every tick,
+  contending for the same `command/shell` model lock and failing both.

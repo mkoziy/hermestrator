@@ -49,6 +49,21 @@ while IFS=$'\t' read -r n issue_labels; do
     continue
   fi
 
+  # Guard against retriggering an issue whose previous worker run is still
+  # in flight (or was never marked terminal) — a slow ralphex run that
+  # outlives one 15-minute poller tick would otherwise get a duplicate
+  # worker run stacked on top of it every tick, contending for the same
+  # command/shell model lock.
+  active_count="$(swamp workflow history search \
+    --input repo="$REPO" --input "issue_number=$n" --json 2>/dev/null \
+    | jq '[.results[] | select(.workflowName == "github-ticket-worker"
+        and (.status | IN("completed","succeeded","failed","cancelled","error","timeout") | not))] | length' \
+      2>/dev/null)" || active_count=0
+  if [[ "$active_count" -gt 0 ]]; then
+    printf 'Issue #%s: a github-ticket-worker run is already active, skipping\n' "$n"
+    continue
+  fi
+
   printf 'Issue #%s: plan ready on %s, triggering github-ticket-worker with %s\n' "$n" "$branch" "$config"
   swamp workflow run github-ticket-worker \
     --input repo="$REPO" \
