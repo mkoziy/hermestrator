@@ -143,9 +143,15 @@ git diff --cached --quiet || fail "index has uncommitted changes after ralphex"
 
 # Archive the processed plan so a re-added agent-ready label with no new plan
 # is a harmless poller no-op instead of re-running ralphex on stale input.
-mkdir -p docs/plans/archive
-git mv "$plan_file" "docs/plans/archive/$(basename "$plan_file")"
-git commit -m "chore: archive plan for issue #${ISSUE_NUMBER}"
+# Some plans instruct ralphex to move themselves (e.g. to docs/plans/completed/)
+# as one of their own tasks — if ralphex already did that and committed it,
+# $plan_file no longer exists at its original path and there is nothing left
+# to archive here.
+if [[ -f "$plan_file" ]]; then
+  mkdir -p docs/plans/archive
+  git mv "$plan_file" "docs/plans/archive/$(basename "$plan_file")"
+  git commit -m "chore: archive plan for issue #${ISSUE_NUMBER}"
+fi
 
 printf 'Pushing implementation branch %s\n' "$branch"
 git push --set-upstream origin "$branch"

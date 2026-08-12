@@ -98,3 +98,10 @@ buildable and the smoke check passing for any Dockerfile change.
   one exists. Without this, a ralphex run slower than the 15-minute cron
   interval gets a duplicate worker run stacked on top of it every tick,
   contending for the same `command/shell` model lock and failing both.
+- The post-ralphex archive step in `github-ticket-worker.sh` only `git mv`s
+  the plan into `docs/plans/archive/` if it's still at its original path.
+  Some plans instruct ralphex to move themselves elsewhere (e.g.
+  `docs/plans/completed/`) as one of their own tasks — if ralphex already did
+  that and committed it, the original path is gone and `git mv` on it would
+  fail with a fatal "bad source" error (exit 128), killing an otherwise
+  fully-successful run right before push/PR.
