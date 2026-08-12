@@ -42,3 +42,8 @@ schema of the CLI (commands, options, arguments) intended for agent
 consumption, run `swamp help [<command>...]` — e.g. `swamp help` returns
 the full tree, and `swamp help model method run` scopes to a subtree.
 <!-- END swamp managed section -->
+
+## Operational notes
+
+- **A pod recycle mid-workflow-run orphans state that no swamp command reconciles.** Workflow-run status lives in two on-disk files per run: `.swamp/workflow-runs/<workflowId>/workflow-run-<runId>.yaml` and a sibling `.swamp/workflow-runs/<workflowId>/.runs-index.json` (the latter is what `swamp workflow history search` actually reads). Both are cached in `swamp serve`'s memory and only reloaded on process restart. `swamp run doctor --fix` only reaps swamp's internal run-tracking store — it touches neither file. If a pod dies mid-run, both files can stay stuck at `status: running` forever, with no CLI command to reconcile them (recovery requires manually editing both files and restarting the pod).
+- `scripts/github-ticket-poller.sh`'s in-flight-run guard has a `STALE_RUN_MINUTES` (default 45) fallback specifically to survive this: any run reporting a non-terminal status but older than that ceiling is treated as terminal, so a future orphaned run self-heals on the next poller tick instead of permanently blocking that issue.
