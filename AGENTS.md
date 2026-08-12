@@ -72,3 +72,7 @@ buildable and the smoke check passing for any Dockerfile change.
   `agent/issue-<N>` branch and re-add `agent-ready` — the poller re-triggers
   the worker, which pushes into the still-open PR or opens a new one if the
   previous PR was closed/merged.
+- The poller routes each issue to a ralphex profile by label: `agent-pi` →
+  `ralphex-pi`, `agent-codex` → `ralphex-codex`, neither → the workflow's
+  `ralphex_config` default (project-wide). If an issue somehow carries both,
+  `agent-pi` wins.

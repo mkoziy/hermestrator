@@ -15,14 +15,22 @@ command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 command -v swamp >/dev/null || { printf 'ERROR: swamp is required\n' >&2; exit 1; }
 
-issue_numbers="$(gh issue list --repo "$REPO" --label "$LABEL" --state open --json number --jq '.[].number')"
-if [[ -z "$issue_numbers" ]]; then
+issues_json="$(gh issue list --repo "$REPO" --label "$LABEL" --state open --json number,labels)"
+if [[ "$(jq 'length' <<<"$issues_json")" -eq 0 ]]; then
   printf 'No open %s issues on %s\n' "$LABEL" "$REPO"
   exit 0
 fi
 
-while IFS= read -r n; do
+while IFS=$'\t' read -r n issue_labels; do
   branch="agent/issue-${n}"
+
+  # Per-issue agent routing: agent-pi / agent-codex labels override the
+  # project default; agent-pi wins if an issue carries both by mistake.
+  config="$RALPHEX_CONFIG"
+  case ",$issue_labels," in
+    *,agent-pi,*) config="ralphex-pi" ;;
+    *,agent-codex,*) config="ralphex-codex" ;;
+  esac
 
   if ! gh api "repos/${REPO}/branches/${branch}" >/dev/null 2>&1; then
     printf 'Issue #%s: no %s branch yet, skipping\n' "$n" "$branch"
@@ -41,10 +49,10 @@ while IFS= read -r n; do
     continue
   fi
 
-  printf 'Issue #%s: plan ready on %s, triggering github-ticket-worker\n' "$n" "$branch"
+  printf 'Issue #%s: plan ready on %s, triggering github-ticket-worker with %s\n' "$n" "$branch" "$config"
   swamp workflow run github-ticket-worker \
     --input repo="$REPO" \
     --input issue_number="$n" \
     --input base_branch="$BASE_BRANCH" \
-    --input ralphex_config="$RALPHEX_CONFIG"
-done <<<"$issue_numbers"
+    --input ralphex_config="$config"
+done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")

@@ -24,7 +24,7 @@ inputs:
       description: Issue label that marks a ticket as eligible for polling.
     ralphex_config:
       type: string
-      default: ralphex-codex
+      default: ralphex-pi
       enum:
         - ralphex-codex
         - ralphex-pi
