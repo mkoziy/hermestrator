@@ -29,6 +29,13 @@ inputs:
         - ralphex-codex
         - ralphex-pi
       description: ralphex profile passed through to triggered github-ticket-worker runs.
+    server_url:
+      type: string
+      default: ws://127.0.0.1:9090
+      description: >-
+        Loopback URL of the swamp serve instance this poller runs under. Required so the
+        triggered github-ticket-worker run dispatches to enrolled pool:coding workers instead
+        of running as a disconnected local process with no worker dispatcher.
   required:
     - repo
 tags: {}
@@ -51,6 +58,7 @@ jobs:
               BASE_BRANCH: ${{ inputs.base_branch }}
               LABEL: ${{ inputs.label }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              SWAMP_SERVE_URL: ${{ inputs.server_url }}
         dependsOn: []
         weight: 0
         allowFailure: false

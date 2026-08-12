@@ -84,3 +84,11 @@ buildable and the smoke check passing for any Dockerfile change.
   execution — if it shared the worker's model, that call would deadlock
   waiting for a lock its own outer execution already holds. Don't merge them
   back onto one model.
+- `github-ticket-poller.sh` invokes `swamp workflow run github-ticket-worker`
+  without `--server` — as a plain subprocess of the poller's own model-method
+  execution, that call has no connection to the `swamp serve` instance its
+  own workflow is running under. The `server_url` workflow input (env
+  `SWAMP_SERVE_URL`, which `swamp workflow run` reads without a `--server`
+  flag) supplies it; default `ws://127.0.0.1:9090` assumes the poller runs
+  in the same pod/container as the orchestrator. Without it, the triggered
+  worker run fails instantly: "no worker dispatcher is active".
