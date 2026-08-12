@@ -66,3 +66,9 @@ buildable and the smoke check passing for any Dockerfile change.
   remove that convention without updating `scripts/github-ticket-worker.sh`
   and `scripts/github-ticket-poller.sh` together, since the poller depends
   on it to detect a "plan committed" state.
+- After a successful run, the worker moves the processed plan to
+  `docs/plans/archive/` and removes the `agent-ready` label. A follow-up on
+  the same issue is just: commit a new `docs/plans/*.md` file to the same
+  `agent/issue-<N>` branch and re-add `agent-ready` — the poller re-triggers
+  the worker, which pushes into the still-open PR or opens a new one if the
+  previous PR was closed/merged.

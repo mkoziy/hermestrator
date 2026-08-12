@@ -71,12 +71,6 @@ if [[ "$REQUIRE_AGENT_READY" == true ]]; then
     fail "issue #$ISSUE_NUMBER does not have the agent-ready label"
 fi
 
-existing_pr="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json url --jq '.[0].url // empty')"
-if [[ -n "$existing_pr" ]]; then
-  printf 'Reusing existing pull request: %s\n' "$existing_pr"
-  exit 0
-fi
-
 printf 'Cloning %s into isolated workspace\n' "$REPO"
 gh repo clone "$REPO" "$checkout" -- --branch "$BASE_BRANCH" --single-branch
 cd "$checkout"
@@ -111,24 +105,35 @@ git diff --cached --quiet || fail "index has uncommitted changes after ralphex"
 [[ -n "$(git rev-list "origin/$BASE_BRANCH..HEAD")" ]] || \
   fail "implementation branch has no commits beyond $BASE_BRANCH"
 
+# Archive the processed plan so a re-added agent-ready label with no new plan
+# is a harmless poller no-op instead of re-running ralphex on stale input.
+mkdir -p docs/plans/archive
+git mv "$plan_file" "docs/plans/archive/$(basename "$plan_file")"
+git commit -m "chore: archive plan for issue #${ISSUE_NUMBER}"
+
 printf 'Pushing implementation branch %s\n' "$branch"
 git push --set-upstream origin "$branch"
 
-existing_pr="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json url --jq '.[0].url // empty')"
-if [[ -n "$existing_pr" ]]; then
-  printf 'Reusing existing pull request: %s\n' "$existing_pr"
+open_pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json url --jq '.[0].url // empty')"
+if [[ -n "$open_pr" ]]; then
+  printf 'Updated existing pull request: %s\n' "$open_pr"
+  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready
   exit 0
 fi
 
+# No open PR — either the first run, or a follow-up after the previous PR was
+# closed/merged; either way a fresh PR is opened from the same branch.
 issue_title="$(jq -r '.title' "$issue_json")"
 if ! gh pr create --repo "$REPO" --base "$BASE_BRANCH" --head "$branch" \
   --title "$issue_title" --body "Closes #$ISSUE_NUMBER"; then
-  existing_pr="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json url --jq '.[0].url // empty')"
-  [[ -n "$existing_pr" ]] && {
-    printf 'Reusing existing pull request created concurrently: %s\n' "$existing_pr"
+  open_pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json url --jq '.[0].url // empty')"
+  [[ -n "$open_pr" ]] && {
+    printf 'Reusing existing pull request created concurrently: %s\n' "$open_pr"
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready
     exit 0
   }
   fail "pull request creation failed"
 fi
 
 printf 'Created pull request for issue #%s from %s\n' "$ISSUE_NUMBER" "$branch"
+gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready

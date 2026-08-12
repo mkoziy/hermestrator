@@ -24,20 +24,20 @@ fi
 while IFS= read -r n; do
   branch="agent/issue-${n}"
 
-  existing_pr="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json url --jq '.[0].url // empty')"
-  if [[ -n "$existing_pr" ]]; then
-    printf 'Issue #%s: pull request already exists (%s), skipping\n' "$n" "$existing_pr"
-    continue
-  fi
-
   if ! gh api "repos/${REPO}/branches/${branch}" >/dev/null 2>&1; then
     printf 'Issue #%s: no %s branch yet, skipping\n' "$n" "$branch"
     continue
   fi
 
-  ahead_by="$(gh api "repos/${REPO}/compare/${BASE_BRANCH}...${branch}" --jq '.ahead_by')"
-  if [[ "$ahead_by" -eq 0 ]]; then
-    printf 'Issue #%s: %s has no commits beyond %s (no plan committed), skipping\n' "$n" "$branch" "$BASE_BRANCH"
+  # An unarchived plan file is the single source of truth for "there is new
+  # work to do" — it gates both the first run and any later follow-up, and
+  # goes back to zero once github-ticket-worker.sh archives a processed plan.
+  # This also means a re-added agent-ready label with no new plan yet is a
+  # harmless no-op skip instead of a spurious worker trigger.
+  plan_count="$(gh api "repos/${REPO}/contents/docs/plans?ref=${branch}" \
+    --jq '[.[] | select(.type == "file" and (.name | endswith(".md")))] | length' 2>/dev/null)" || plan_count=0
+  if [[ "$plan_count" -eq 0 ]]; then
+    printf 'Issue #%s: %s has no unarchived plan in docs/plans/, skipping\n' "$n" "$branch"
     continue
   fi
 
