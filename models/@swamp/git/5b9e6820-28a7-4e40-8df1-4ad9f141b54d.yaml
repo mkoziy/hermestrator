@@ -5,7 +5,7 @@ name: vault-repo
 version: 1
 tags: {}
 globalArguments:
-  repoPath: .vault-clone
+  repoPath: .swamp/vault-clone
   remote: origin
   authorName: hermestrator
   authorEmail: hermestrator@users.noreply.github.com
