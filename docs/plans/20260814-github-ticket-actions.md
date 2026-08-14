@@ -136,32 +136,39 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `scripts/github-actions-worker.sh`
 
-- [ ] validate `REPO` (`owner/name` regex) and `ISSUE_NUMBER` (positive int) inputs, mirroring the
+- [x] validate `REPO` (`owner/name` regex) and `ISSUE_NUMBER` (positive int) inputs, mirroring the
       validation style in `scripts/github-ticket-worker.sh`
-- [ ] `mktemp -d` workspace + `trap cleanup EXIT`, preserving the workspace on failure for
+- [x] `mktemp -d` workspace + `trap cleanup EXIT`, preserving the workspace on failure for
       diagnosis (same pattern as `github-ticket-worker.sh`)
-- [ ] `gh repo view` + `gh issue view --json number,title,state,url,labels,body,comments`; if issue
+- [x] `gh repo view` + `gh issue view --json number,title,state,url,labels,body,comments`; if issue
       state is not `OPEN`, log a warning and continue (label was already stripped by the poller —
       nothing to re-trigger, but the run should still execute since it was legitimately queued)
-- [ ] `gh repo clone "$REPO" "$checkout" -- --branch "$BASE_BRANCH" --single-branch`; work directly
+- [x] `gh repo clone "$REPO" "$checkout" -- --branch "$BASE_BRANCH" --single-branch`; work directly
       on `$BASE_BRANCH`, no `agent/issue-<n>` branch creation
-- [ ] read `.swamp-actions.yml` from clone root; `fail` with a clear message if absent
-- [ ] parse it with the YAML tool confirmed in Task 2 (e.g. `yq -o=json . .swamp-actions.yml | jq
-      ...`); `command -v` guard it alongside the existing `gh`/`git`/`jq` checks
-- [ ] validate manifest: `version == 1`, `steps` non-empty array, each step has non-empty `name`
+- [x] read `.swamp-actions.yml` from clone root; `fail` with a clear message if absent
+- [x] parse it with the YAML tool confirmed in Task 2 (e.g. `yq -o=json . .swamp-actions.yml | jq
+      ...`); `command -v` guard it alongside the existing `gh`/`git`/`jq` checks — implemented with
+      a `command -v yq` check first, falling back to `ruby -ryaml -rjson` (confirmed available on
+      this dev machine per Task 2's findings) if `yq` is absent; `fail`s if neither is present
+- [x] validate manifest: `version == 1`, `steps` non-empty array, each step has non-empty `name`
       and `run`; `fail` naming the exact invalid field on any violation
-- [ ] execute steps sequentially via `bash -c` from clone root, streaming each step's stdout/stderr
+- [x] execute steps sequentially via `bash -c` from clone root, streaming each step's stdout/stderr
       prefixed `[step: <name>]`; stop at the first non-zero exit, recording `failed_step`,
       `exit_code`, and the tail of that step's output
-- [ ] implement `emit_vault_note()` printing `VAULT_NOTE_JSON:{...}` with `repo`, `issue_number`,
+- [x] implement `emit_vault_note()` printing `VAULT_NOTE_JSON:{...}` with `repo`, `issue_number`,
       `issue`, `status` (`success`/`failed`), `failed_step` (null on success), `steps_log`,
-      `started_at`, `completed_at` — same marker convention as `github-ticket-worker.sh`
-- [ ] `swamp model create command/shell github_actions_worker_shell`
-- [ ] run `shellcheck scripts/github-actions-worker.sh` — must pass before next task
-- [ ] manual dry run: invoke the model directly (`swamp model @command/shell method run execute
-      github_actions_worker_shell --input run=scripts/github-actions-worker.sh --input
-      env.REPO=... --input env.ISSUE_NUMBER=...`) against a real repo/issue with a manifest, confirm
-      `VAULT_NOTE_JSON:` line appears with correct status
+      `started_at`, `completed_at` — same marker convention as `github-ticket-worker.sh` (added an
+      extra `exit_code` field, null on success, since Task 4's comment script needs it and it's
+      free to include alongside `failed_step`)
+- [x] `swamp model create command/shell github_actions_worker_shell` — created successfully
+      (id `45f58514-a394-4ca8-aefc-4dbf7bf6f86b`)
+- [x] run `shellcheck scripts/github-actions-worker.sh` — must pass before next task — passes clean
+      (shellcheck 0.11.0 installed via `brew install shellcheck` for this task)
+- [x] manual dry run (skipped - no live repo/issue available in this environment; instead verified
+      the YAML-parse fallback and the step-execution loop in isolation with a synthetic
+      `.swamp-actions.yml` — a passing step followed by a step that exits 3 followed by a step that
+      must not run — confirmed streaming `[step: <name>]`-prefixed output, correct stop-at-first-
+      failure, and correct `failed_step`/`exit_code` capture)
 
 ### Task 4: `github_actions_comment_shell` model + `scripts/github-actions-comment.sh`
 
