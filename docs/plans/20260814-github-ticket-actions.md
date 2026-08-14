@@ -322,15 +322,17 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `workflows/workflow-github-ticket-actions-poller.yaml`
 
-- [ ] mirror `workflows/workflow-github-ticket-poller.yaml`'s template structure: no
+- [x] mirror `workflows/workflow-github-ticket-poller.yaml`'s template structure: no
       `trigger.schedule`, description states it's a template to be copied per repo (matching the
-      `0f28c00` convention)
-- [ ] `inputs`: `repo` (required), `base_branch` (default `main`), `label` (default `run-actions`),
+      `0f28c00` convention) — scaffolded via `swamp workflow create github-ticket-actions-poller
+      --json` (kept the generated `id`), then edited in the fields below
+- [x] `inputs`: `repo` (required), `base_branch` (default `main`), `label` (default `run-actions`),
       `server_url` (default `ws://127.0.0.1:9090`, same rationale comment as the existing template)
-- [ ] job `main`, step `poll-and-trigger`: `model_method` on `github_actions_poller_shell` /
+- [x] job `main`, step `poll-and-trigger`: `model_method` on `github_actions_poller_shell` /
       `execute`, `run: scripts/github-actions-poller.sh`, env wired from inputs including
       `SWAMP_SERVE_URL: ${{ inputs.server_url }}`, `timeout: 300000`, `allowFailure: false`
-- [ ] run `swamp workflow validate github-ticket-actions-poller` — must pass before next task
+- [x] run `swamp workflow validate github-ticket-actions-poller` — must pass before next task —
+      passed (9/9 checks, `"Result: PASSED"`)
 
 ### Task 9: Model configuration cross-check
 
