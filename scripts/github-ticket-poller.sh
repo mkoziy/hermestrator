@@ -16,6 +16,14 @@ command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 command -v swamp >/dev/null || { printf 'ERROR: swamp is required\n' >&2; exit 1; }
 
+# A hard worker timeout can leave stale run-tracker records that retain a
+# command/shell lock. Reap only records Swamp itself considers stale before
+# deciding whether this issue has an active worker run. Workflow-run files are
+# intentionally left alone; the age-based guard below handles those separately.
+if ! swamp run doctor --fix >/dev/null; then
+  printf 'WARN: unable to reap stale Swamp run-tracker records\n' >&2
+fi
+
 issues_json="$(gh issue list --repo "$REPO" --label "$LABEL" --state open --json number,labels)"
 if [[ "$(jq 'length' <<<"$issues_json")" -eq 0 ]]; then
   printf 'No open %s issues on %s\n' "$LABEL" "$REPO"

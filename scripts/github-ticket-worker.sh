@@ -7,6 +7,7 @@ set -Eeuo pipefail
 : "${BASE_BRANCH:=main}"
 : "${REQUIRE_AGENT_READY:=false}"
 : "${RALPHEX_CONFIG:=ralphex-codex}"
+: "${PROGRESS_PUSH_INTERVAL_SECONDS:=300}"
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
@@ -92,6 +93,8 @@ case "$RALPHEX_CONFIG" in
   ralphex-codex|ralphex-pi) ;;
   *) fail "ralphex_config must be ralphex-codex or ralphex-pi" ;;
 esac
+[[ "$PROGRESS_PUSH_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+  fail "PROGRESS_PUSH_INTERVAL_SECONDS must be a positive integer"
 
 command -v gh >/dev/null || fail "gh is required"
 command -v git >/dev/null || fail "git is required"
@@ -148,7 +151,20 @@ printf 'Executing ralphex plan %s with config %s\n' "$plan_file" "$RALPHEX_CONFI
 ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ralphex --config-dir "$ralphex_config_dir" "$plan_file" \
-  --base-ref "$BASE_BRANCH" --branch "$branch"
+  --base-ref "$BASE_BRANCH" --branch "$branch" &
+ralphex_pid=$!
+elapsed_seconds=0
+while kill -0 "$ralphex_pid" 2>/dev/null; do
+  # Poll frequently enough to finish promptly, while rate-limiting best-effort
+  # progress pushes. A hard workflow timeout can otherwise skip EXIT cleanup.
+  sleep 10
+  elapsed_seconds=$((elapsed_seconds + 10))
+  if (( elapsed_seconds >= PROGRESS_PUSH_INTERVAL_SECONDS )); then
+    push_progress
+    elapsed_seconds=0
+  fi
+done
+wait "$ralphex_pid"
 
 [[ "$(git branch --show-current)" == "$branch" ]] || fail "ralphex left the checkout on an unexpected branch"
 [[ "$branch" != "$BASE_BRANCH" ]] || fail "refusing to push the base branch"
