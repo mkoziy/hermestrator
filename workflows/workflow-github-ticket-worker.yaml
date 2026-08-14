@@ -80,7 +80,14 @@ jobs:
         weight: 0
         allowFailure: true
       - name: write-note
-        description: Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
+        description: >-
+          Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
+          Scoped to this run's own result (not data.latest's global-newest) so a killed
+          or timed-out implement-github-issue that produced no output doesn't fall back
+          to a stale note from an unrelated prior run/issue.
+        guard: >-
+          ${{ size(data.query('modelName == "github_ticket_worker_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0 }}
         task:
           type: model_method
           modelIdOrName: vault_note_writer_shell
@@ -90,7 +97,9 @@ jobs:
             workingDir: .
             timeout: 60000
             env:
-              NOTE_JSON_RAW: ${{ data.latest("github_ticket_worker_shell", "result").attributes.stdout }}
+              NOTE_JSON_RAW: >-
+                ${{ data.query('modelName == "github_ticket_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
               VAULT_DIR: .vault-clone
         dependsOn:
           - step: vault-pull

@@ -39,9 +39,22 @@ emit_vault_note() {
   | { printf 'VAULT_NOTE_JSON:'; cat; printf '\n'; }
 }
 
+
+# Best-effort: push whatever ralphex already committed so a timed-out or
+# killed run isn't redone from scratch next time. The worker already fetches
+# and checks out origin/$branch at start, so a pushed partial commit lets the
+# next invocation continue instead of repeating the same 2h of work forever.
+push_progress() {
+  [[ "$ralphex_started" == true ]] || return 0
+  [[ "$(git branch --show-current 2>/dev/null)" == "$branch" ]] || return 0
+  [[ -n "$(git rev-list "origin/$BASE_BRANCH..HEAD" 2>/dev/null)" ]] || return 0
+  git push --set-upstream origin "$branch" || true
+}
+
 cleanup() {
   local status=$?
   if [[ "$ralphex_started" == true ]]; then
+    push_progress
     if [[ "$status" -eq 0 ]]; then
       emit_vault_note success || true
     else
@@ -58,6 +71,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+# Most timeout mechanisms send SIGTERM before an eventual SIGKILL; catching
+# it here (rather than relying only on the EXIT trap) pushes progress in that
+# grace window even if bash is still blocked waiting on the ralphex child.
+trap 'push_progress' TERM
 
 fail() {
   cleanup_workspace=false
