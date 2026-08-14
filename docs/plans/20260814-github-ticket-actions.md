@@ -434,12 +434,23 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 
 ### Task 11: [Final] Update documentation
 
-- [ ] add a short section to `CLAUDE.md`'s "Operational notes" if this flow reveals any new gotcha
+- [x] add a short section to `CLAUDE.md`'s "Operational notes" if this flow reveals any new gotcha
       worth capturing (e.g. anything discovered in Task 10 analogous to the orphaned-run note
-      already there, or the `vault-commit` guard fix if Task 6 confirmed one was needed)
-- [ ] cross-link `docs/swamp-actions-manifest.md` from wherever `design/`/`docs/` indexes such
-      references, if the repo has one
-- [ ] move this plan to `docs/plans/completed/`
+      already there, or the `vault-commit` guard fix if Task 6 confirmed one was needed) —
+      added a bullet documenting Task 10's finding: a `command/shell` `execute` step that exits
+      non-zero without `ignoreExitCode: true` writes no queryable `result`/`log` data record at
+      all, silently starving any downstream `data.query(...)`/`data.latest(...)` guard (e.g. an
+      always-run report job), mitigated by `ignoreExitCode: true` + a separate `assert` step —
+      matches the style of the existing orphaned-run-state bullet and points to
+      `workflow-github-ticket-actions.yaml`'s `run-actions`/`check-actions-exit` steps as the
+      concrete example
+- [x] cross-link `docs/swamp-actions-manifest.md` from wherever `design/`/`docs/` indexes such
+      references, if the repo has one — checked: no `README.md` in the repo, no `design/`
+      directory, and `docs/` itself has no index file (just `plans/`, `research/`,
+      `remote-worker.md`, `swamp-actions-manifest.md`, none of which cross-link each other) —
+      skipped, no docs index exists in this repo to link into
+- [x] move this plan to `docs/plans/completed/` — not moved — harness moves the plan file after
+      all review/finalize phases complete
 
 ## Post-Completion
 
