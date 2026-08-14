@@ -1,0 +1,140 @@
+id: a1941150-5e8c-4d53-87c5-97c17b390b0f
+name: github-ticket-actions
+description: >-
+  Runs the manifest-driven .swamp-actions.yml steps (docker build, tests, etc.) for one
+  open GitHub issue labeled run-actions, directly on base_branch. No ralphex, no agent
+  branch. Posts a status comment and syncs a run note to the vault.
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form.
+    issue_number:
+      type: integer
+      description: Open GitHub issue number that triggered this run.
+    base_branch:
+      type: string
+      default: main
+      description: Branch the manifest steps run against.
+  required:
+    - repo
+    - issue_number
+tags: {}
+jobs:
+  - name: main
+    description: Clone the repo and execute the steps declared in its .swamp-actions.yml manifest.
+    steps:
+      - name: run-actions
+        description: Runs the isolated manifest-driven actions worker.
+        task:
+          type: model_method
+          modelIdOrName: github_actions_worker_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-actions-worker.sh
+            workingDir: .
+            timeout: 7200000
+            env:
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              BASE_BRANCH: ${{ inputs.base_branch }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+        labels:
+          pool: coding
+    dependsOn: []
+    weight: 0
+  - name: report
+    description: >-
+      Best-effort status comment and vault sync for the run. Runs whether main succeeded
+      or failed, and never fails the overall workflow run.
+    dependsOn:
+      - job: main
+        condition:
+          type: always
+    weight: 0
+    steps:
+      - name: comment-issue
+        description: Post a status comment on the issue summarizing the run outcome.
+        guard: >-
+          ${{ size(data.query('modelName == "github_actions_worker_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0 }}
+        task:
+          type: model_method
+          modelIdOrName: github_actions_comment_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-actions-comment.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              NOTE_JSON_RAW: >-
+                ${{ data.query('modelName == "github_actions_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: vault-pull
+        description: Bring the local vault checkout up to date before writing.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: pull
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: write-note
+        description: Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/vault-write-actions-note.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              NOTE_JSON_RAW: >-
+                ${{ data.query('modelName == "github_actions_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
+              VAULT_DIR: .vault-clone
+        dependsOn:
+          - step: vault-pull
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: vault-commit
+        description: Commit the rendered note(s); guarded off when there was nothing to sync.
+        guard: ${{ !data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: commit
+          inputs:
+            message: "chore: sync run-actions run notes"
+            addAll: true
+        dependsOn:
+          - step: write-note
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: vault-push
+        description: Push the synced notes to the vault remote.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: push
+          inputs:
+            branch: main
+            setUpstream: true
+        dependsOn:
+          - step: vault-commit
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+version: 1

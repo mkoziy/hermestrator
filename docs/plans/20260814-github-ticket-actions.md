@@ -229,37 +229,53 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `workflows/workflow-github-ticket-actions.yaml`
 
-- [ ] `inputs`: `repo` (string, required), `issue_number` (integer, required), `base_branch`
+- [x] `inputs`: `repo` (string, required), `issue_number` (integer, required), `base_branch`
       (string, default `main`)
-- [ ] job `main`, step `run-actions`: `model_method` on `github_actions_worker_shell` / `execute`,
+- [x] job `main`, step `run-actions`: `model_method` on `github_actions_worker_shell` / `execute`,
       `run: scripts/github-actions-worker.sh`, `workingDir: .`, `timeout: 7200000` (same ceiling as
       `implement-github-issue` in `workflow-github-ticket-worker.yaml` — docker builds can run
       long), `labels: {pool: coding}` (**do not omit** — every existing worker step carries this;
       without it the step can land on a runner with no `docker`), env
-      `REPO`/`ISSUE_NUMBER`/`BASE_BRANCH` wired from inputs, `allowFailure: false`
-- [ ] job `report`, `dependsOn: [{job: main, condition: always}]`:
-  - [ ] step `comment-issue`: `model_method` on `github_actions_comment_shell` / `execute`, `env`
+      `REPO`/`ISSUE_NUMBER`/`BASE_BRANCH` wired from inputs, `allowFailure: false` — implemented as
+      specified; scaffolded via `swamp workflow create github-ticket-actions --json` (never
+      hand-wrote the `id`)
+- [x] job `report`, `dependsOn: [{job: main, condition: always}]`:
+  - [x] step `comment-issue`: `model_method` on `github_actions_comment_shell` / `execute`, `env`
         sourced from `data.query('modelName == "github_actions_worker_shell" && name == "result"
         && workflowRunId == "' + run.id + '"')[0].attributes.stdout`, guarded on
-        `size(data.query(...)) > 0`, `allowFailure: true`
-  - [ ] step `vault-pull`: `model_method` on `vault-repo` / `pull`, `allowFailure: true`
-  - [ ] step `write-note`: `model_method` on `vault_note_writer_shell` / `execute`, `run:
+        `size(data.query(...)) > 0`, `allowFailure: true` — implemented as specified (also had to
+        add `run: scripts/github-actions-comment.sh` + `workingDir: .` + `timeout: 60000`, which
+        the checkbox text omitted but `swamp workflow validate` flagged as a missing required
+        input for `command/shell`'s `execute` method — `run` is always required, matching Task 2's
+        confirmed schema)
+  - [x] step `vault-pull`: `model_method` on `vault-repo` / `pull`, `allowFailure: true`
+  - [x] step `write-note`: `model_method` on `vault_note_writer_shell` / `execute`, `run:
         scripts/vault-write-actions-note.sh`, `NOTE_JSON_RAW` from the same `data.query(...)`
         expression as `comment-issue`, `VAULT_DIR: .vault-clone`, `dependsOn: [{step: vault-pull,
         condition: succeeded}]`, `allowFailure: true`
-  - [ ] step `vault-commit`: `model_method` on `vault-repo` / `commit`, guard **must read**
+  - [x] step `vault-commit`: `model_method` on `vault-repo` / `commit`, guard **must read**
         `data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN")`
-        (commit only when the marker is present) — before writing this, actually check the guard
-        in `workflow-github-ticket-worker.yaml`'s `vault-commit` step against its own description
-        ("guarded off when there was nothing to sync"); the two currently read as contradictory
-        (negated `contains`, but description implies the positive case should run). Do not copy
-        that expression blind — verify with `swamp workflow validate` plus a dry run (Task 9) that
-        this step's guard actually fires only when `write-note` produced a note, and fix the
-        existing file too if it's confirmed backwards. `dependsOn: [{step: write-note, condition:
+        (commit only when the marker is present) — investigated per instructions before writing
+        this. Loaded the swamp skill's workflow guide
+        (`references/workflow/reference.md` "Guard (Idempotent Step Execution)" +
+        `references/execution-semantics.md`): **guard semantics are truthy → SKIP the step
+        ("already done"); falsy/absent → step runs.** This is the opposite of a naive "guard true
+        = run" reading. Truth table for `workflow-github-ticket-worker.yaml`'s existing
+        `vault-commit` guard `!data.latest(...).attributes.stdout.contains("NOTE_WRITTEN")`:
+        NOTE_WRITTEN present → `contains` = true → `!true` = false → guard falsy → **step runs**
+        (correct: commit when there's something to sync). NOTE_WRITTEN absent → `contains` = false
+        → `!false` = true → guard truthy → **step skipped** (correct: guarded off when nothing to
+        sync). So the existing expression is NOT backwards — it's correct, and the earlier
+        "contradictory description" read was based on the wrong (naive) guard-truthy-means-run
+        assumption. No fix needed in the worker workflow; used the identical expression
+        `${{ !data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}`
+        for this task's `vault-commit` step. `dependsOn: [{step: write-note, condition:
         succeeded}]`, `allowFailure: true`
-  - [ ] step `vault-push`: `model_method` on `vault-repo` / `push`, `dependsOn: [{step:
+  - [x] step `vault-push`: `model_method` on `vault-repo` / `push`, `dependsOn: [{step:
         vault-commit, condition: succeeded}]`, `allowFailure: true`
-- [ ] run `swamp workflow validate github-ticket-actions` — must pass before next task
+- [x] run `swamp workflow validate github-ticket-actions` — passed (`"passed": true`, 0 warnings)
+      after fixing the `comment-issue` missing-`run`-input error above; also re-ran `swamp workflow
+      validate github-ticket-worker` as a sanity check on the untouched file — still passes
 
 ### Task 7: `github_actions_poller_shell` model + `scripts/github-actions-poller.sh`
 
