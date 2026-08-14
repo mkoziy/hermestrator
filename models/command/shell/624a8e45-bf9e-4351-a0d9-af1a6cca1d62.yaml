@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 624a8e45-bf9e-4351-a0d9-af1a6cca1d62
+name: github_actions_comment_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

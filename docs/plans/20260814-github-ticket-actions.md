@@ -175,16 +175,23 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `scripts/github-actions-comment.sh`
 
-- [ ] accept `NOTE_JSON_RAW` (raw stdout of the worker step) and `REPO`/`ISSUE_NUMBER` (or read
-      them out of the parsed JSON — prefer the JSON to avoid redundant inputs)
-- [ ] `grep -m1 '^VAULT_NOTE_JSON:'` out of `NOTE_JSON_RAW`; if absent, print a no-op message and
+- [x] accept `NOTE_JSON_RAW` (raw stdout of the worker step) and `REPO`/`ISSUE_NUMBER` (or read
+      them out of the parsed JSON — prefer the JSON to avoid redundant inputs) — implemented
+      reading `repo`/`issue_number` out of the parsed `VAULT_NOTE_JSON:` JSON, no separate
+      `REPO`/`ISSUE_NUMBER` env vars
+- [x] `grep -m1 '^VAULT_NOTE_JSON:'` out of `NOTE_JSON_RAW`; if absent, print a no-op message and
       exit 0 (mirrors `vault-write-note.sh`'s guard for a run that failed before emitting)
-- [ ] compose a short comment body: status, and `failed_step`/`exit_code` if failed; post via
+- [x] compose a short comment body: status, and `failed_step`/`exit_code` if failed; post via
       `gh issue comment "$issue_number" --repo "$repo" --body "..."`
-- [ ] `swamp model create command/shell github_actions_comment_shell`
-- [ ] run `shellcheck scripts/github-actions-comment.sh` — must pass before next task
-- [ ] manual dry run: feed it a synthetic `VAULT_NOTE_JSON:` line (both success and failed shapes)
-      against a scratch issue, confirm the comment appears and formats correctly
+- [x] `swamp model create command/shell github_actions_comment_shell` — created successfully
+      (id `624a8e45-bf9e-4351-a0d9-af1a6cca1d62`)
+- [x] run `shellcheck scripts/github-actions-comment.sh` — must pass before next task — passes
+      clean
+- [x] manual dry run (skipped - no live repo/issue available in this environment; instead verified
+      by stubbing `gh` on `PATH` and feeding synthetic `VAULT_NOTE_JSON:` lines for a success
+      shape, a failed shape (with `failed_step`/`exit_code`), and a no-marker case — confirmed the
+      composed `gh issue comment` invocation and body text in all three, and the no-op exit-0 path
+      when the marker is absent)
 
 ### Task 5: `scripts/vault-write-actions-note.sh`
 
