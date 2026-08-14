@@ -7,6 +7,7 @@ ARG TARGETARCH
 ARG SWAMP_VERSION=20260809.004828.0-sha.b61c9de2
 ARG RALPHEX_VERSION=1.6.1
 ARG GH_VERSION=2.97.0
+ARG YQ_VERSION=4.44.6
 ARG CODEX_VERSION=0.147.0
 ARG PI_VERSION=0.82.1
 ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410f95a9925573d4a
@@ -16,8 +17,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
-      amd64) swamp_arch=x86_64; swamp_sha=03c8133320ddd2082647958089f5c15c659aa409c4688fb6288f08ea53f35b68; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112 ;; \
-      arm64) swamp_arch=aarch64; swamp_sha=825d3a2b337c248b6d1ac690ac670740b4e47dca4da0e4e05c69295a4705ff52; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 ;; \
+      amd64) swamp_arch=x86_64; swamp_sha=03c8133320ddd2082647958089f5c15c659aa409c4688fb6288f08ea53f35b68; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; yq_arch=amd64; yq_sha=0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598 ;; \
+      arm64) swamp_arch=aarch64; swamp_sha=825d3a2b337c248b6d1ac690ac670740b4e47dca4da0e4e05c69295a4705ff52; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; yq_arch=arm64; yq_sha=9477ac3cc447b6c083986129e35af8122eb2b938fe55c9c3e40436fb966e5813 ;; \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --silent --show-error \
@@ -36,7 +37,12 @@ RUN case "$TARGETARCH" in \
       --output /tmp/gh.tar.gz \
     && echo "${gh_sha}  /tmp/gh.tar.gz" | sha256sum --check - \
     && tar --extract --gzip --file /tmp/gh.tar.gz --directory /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" \
-    && rm /tmp/gh.tar.gz
+    && rm /tmp/gh.tar.gz \
+    && curl --fail --location --silent --show-error \
+      "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${yq_arch}" \
+      --output /usr/local/bin/yq \
+    && echo "${yq_sha}  /usr/local/bin/yq" | sha256sum --check - \
+    && chmod 0755 /usr/local/bin/yq
 
 RUN npm install --global --ignore-scripts \
       "@openai/codex@${CODEX_VERSION}" \

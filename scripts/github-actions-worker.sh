@@ -63,17 +63,7 @@ git check-ref-format --branch "$BASE_BRANCH" >/dev/null || fail "base_branch is 
 command -v gh >/dev/null || fail "gh is required"
 command -v git >/dev/null || fail "git is required"
 command -v jq >/dev/null || fail "jq is required"
-# yq is preferred; ruby's stdlib yaml is a fallback. Task 2's investigation
-# found yq unavailable on the dev machine but ruby present — the real
-# pool:coding runner was never verified either way, so both are kept rather
-# than assuming yq ships there.
-if command -v yq >/dev/null; then
-  yaml_tool=yq
-elif command -v ruby >/dev/null && ruby -ryaml -e '' >/dev/null 2>&1; then
-  yaml_tool=ruby
-else
-  fail "no YAML parser available (yq or ruby with the yaml stdlib is required)"
-fi
+command -v yq >/dev/null || fail "yq is required"
 
 run_root="$(mktemp -d "${TMPDIR:-/tmp}/github-actions-worker.XXXXXX")"
 readonly checkout="${run_root}/repo"
@@ -106,11 +96,7 @@ cd "$checkout"
 readonly manifest_file="${checkout}/.swamp-actions.yml"
 [[ -f "$manifest_file" ]] || fail ".swamp-actions.yml is missing at the repository root"
 
-case "$yaml_tool" in
-  yq) yq -o=json . "$manifest_file" >"$manifest_json" || fail ".swamp-actions.yml could not be parsed as YAML" ;;
-  ruby) ruby -ryaml -rjson -e 'puts JSON.generate(YAML.load_file(ARGV[0]))' "$manifest_file" >"$manifest_json" \
-    || fail ".swamp-actions.yml could not be parsed as YAML" ;;
-esac
+yq -o=json . "$manifest_file" >"$manifest_json" || fail ".swamp-actions.yml could not be parsed as YAML"
 
 jq -e '.version == 1' "$manifest_json" >/dev/null || fail ".swamp-actions.yml: version must be 1"
 jq -e '(.steps | type) == "array" and (.steps | length) > 0' "$manifest_json" >/dev/null || \
@@ -120,6 +106,14 @@ steps_count="$(jq '.steps | length' "$manifest_json")"
 for ((i = 0; i < steps_count; i++)); do
   jq -e ".steps[$i].name | type == \"string\" and length > 0" "$manifest_json" >/dev/null || \
     fail ".swamp-actions.yml: steps[$i].name must be a non-empty string"
+  # name is printed raw into "[step: <name>] ..." stdout lines that
+  # github-actions-comment.sh/vault-write-actions-note.sh later grep -m1 a
+  # "^VAULT_NOTE_JSON:" marker out of. A name containing a newline could
+  # inject a line that wins that race ahead of the real marker (repo content
+  # is attacker-controlled if the target repo takes external PRs), so reject
+  # embedded newlines here rather than let them reach stdout.
+  jq -e ".steps[$i].name | test(\"\\n\") | not" "$manifest_json" >/dev/null || \
+    fail ".swamp-actions.yml: steps[$i].name must not contain newlines"
   jq -e ".steps[$i].run | type == \"string\" and length > 0" "$manifest_json" >/dev/null || \
     fail ".swamp-actions.yml: steps[$i].run must be a non-empty string"
 done

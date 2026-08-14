@@ -37,7 +37,16 @@ jobs:
     description: Validate, implement through ralphex, and create or reuse one pull request.
     steps:
       - name: implement-github-issue
-        description: Runs the isolated manual GitHub issue implementation slice.
+        description: >-
+          Runs the isolated manual GitHub issue implementation slice. ignoreExitCode is
+          required here: without it, a failing ralphex run makes the model_method call
+          itself fail, and swamp records NO "result"/"log" data output at all on a
+          failed command/shell call (confirmed empirically) — which would silently
+          starve vault-sync's data.query(...)-guarded write-note step even though
+          github-ticket-worker.sh's own cleanup trap already emits a VAULT_NOTE_JSON
+          failed note. The exitCode still comes back on the recorded result, so the
+          check-implement-exit assert step below reconstructs the allowFailure:false
+          job-failure signal.
         task:
           type: model_method
           modelIdOrName: github_ticket_worker_shell
@@ -46,6 +55,7 @@ jobs:
             run: scripts/github-ticket-worker.sh
             workingDir: .
             timeout: 7200000
+            ignoreExitCode: true
             env:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
@@ -58,6 +68,39 @@ jobs:
         allowFailure: false
         labels:
           pool: coding
+      - name: check-implement-exit
+        description: >-
+          Fails the job (and workflow) when the worker script itself exited non-zero,
+          restoring the allowFailure:false signal that ignoreExitCode above otherwise
+          swallows. Scoped to this run's workflowRunId (like write-note/vault-commit
+          below) so a concurrent run's result can't be read instead. Uses a
+          size(...)>0 short-circuit (CEL && is lazy) so an implement-github-issue that
+          produced NO queryable result record at all (worker killed/crashed/dispatch
+          failure before recording) fails this assert with a clear message instead of
+          an opaque out-of-bounds index error — a missing result record is itself a
+          failure signal, not a pass.
+        task:
+          type: assert
+          expr: >-
+            size(data.query('modelName == "github_ticket_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 &&
+            data.query('modelName == "github_ticket_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode == 0
+          message: >-
+            ${{ size(data.query('modelName == "github_ticket_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 ?
+            "github-ticket-worker.sh exited " + string(data.query('modelName ==
+            "github_ticket_worker_shell" && name == "result" && workflowRunId == "'
+            + run.id + '"')[0].attributes.exitCode) :
+            "github-ticket-worker.sh produced no result record for this run (worker
+            crashed or was never dispatched)" }}
+          severity: high
+        dependsOn:
+          - step: implement-github-issue
+            condition:
+              type: completed
+        weight: 0
+        allowFailure: false
     dependsOn: []
     weight: 0
   - name: vault-sync

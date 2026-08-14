@@ -19,6 +19,13 @@ json="${note_line#VAULT_NOTE_JSON:}"
 
 repo="$(jq -r '.repo' <<<"$json")"
 issue_number="$(jq -r '.issue_number' <<<"$json")"
+# Defense in depth: repo/issue_number are expected to be the same
+# already-regex-validated values github-actions-worker.sh put in the
+# VAULT_NOTE_JSON marker, but they arrive here only as parsed text from a
+# grep -m1 match against this step's stdout — revalidate their shape before
+# using them as vault path components.
+[[ "$repo" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || { printf 'ERROR: repo in VAULT_NOTE_JSON has unexpected shape: %s\n' "$repo" >&2; exit 1; }
+[[ "$issue_number" =~ ^[1-9][0-9]*$ ]] || { printf 'ERROR: issue_number in VAULT_NOTE_JSON has unexpected shape: %s\n' "$issue_number" >&2; exit 1; }
 dir="${VAULT_DIR}/${repo}/issue-${issue_number}"
 mkdir -p "$dir/runs"
 
