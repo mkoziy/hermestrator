@@ -82,12 +82,8 @@ jobs:
       - name: write-note
         description: >-
           Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
-          Scoped to this run's own result (not data.latest's global-newest) so a killed
-          or timed-out implement-github-issue that produced no output doesn't fall back
-          to a stale note from an unrelated prior run/issue.
-        guard: >-
-          ${{ size(data.query('modelName == "github_ticket_worker_shell" && name ==
-          "result" && workflowRunId == "' + run.id + '"')) > 0 }}
+          Uses this run's output when it exists; otherwise writes a failed-run fallback
+          from the workflow inputs, so a timeout cannot erase the ticket history.
         task:
           type: model_method
           modelIdOrName: vault_note_writer_shell
@@ -98,8 +94,13 @@ jobs:
             timeout: 60000
             env:
               NOTE_JSON_RAW: >-
-                ${{ data.query('modelName == "github_ticket_worker_shell" && name ==
-                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
+                ${{ size(data.query('modelName == "github_ticket_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')) > 0
+                ? data.query('modelName == "github_ticket_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout : "" }}
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
               VAULT_DIR: .vault-clone
         dependsOn:
           - step: vault-pull
@@ -109,7 +110,7 @@ jobs:
         allowFailure: true
       - name: vault-commit
         description: Commit the rendered note(s); guarded off when there was nothing to sync.
-        guard: ${{ !data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}
+        guard: ${{ data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}
         task:
           type: model_method
           modelIdOrName: vault-repo

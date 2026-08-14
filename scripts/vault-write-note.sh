@@ -1,20 +1,45 @@
 #!/usr/bin/env bash
 # Renders one ralphex run + its ticket snapshot into the Obsidian vault.
 # Invoked by the vault-sync job of the github-ticket-worker Swamp workflow.
-# Input: NOTE_JSON_RAW (stdout of the implement-github-issue step, may contain
-# ordinary log lines plus one "VAULT_NOTE_JSON:{...}" marker line — or none,
-# if that step failed before ralphex ever ran).
+# Input: NOTE_JSON_RAW (stdout of the implement-github-issue step, which may
+# be absent after a hard timeout) and the workflow inputs used to build a
+# fallback failed-run note when no worker output was preserved.
 set -Eeuo pipefail
 
-: "${NOTE_JSON_RAW:?NOTE_JSON_RAW is required}"
+: "${REPO:?REPO is required}"
+: "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
+: "${RALPHEX_CONFIG:?RALPHEX_CONFIG is required}"
+: "${NOTE_JSON_RAW:=}"
 : "${VAULT_DIR:=.vault-clone}"
+
+[[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || {
+  printf 'ERROR: REPO must be owner/name\n' >&2
+  exit 1
+}
+[[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'ERROR: ISSUE_NUMBER must be a positive integer\n' >&2
+  exit 1
+}
+command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
+command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 
 note_line="$(printf '%s\n' "$NOTE_JSON_RAW" | grep -m1 '^VAULT_NOTE_JSON:' || true)"
 if [[ -z "$note_line" ]]; then
-  printf 'No vault note in this run (implement-github-issue produced none); nothing to sync.\n'
-  exit 0
+  issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+    --json number,title,body,state,labels,url,comments)"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  json="$(jq -nc \
+    --arg repo "$REPO" \
+    --argjson issue_number "$ISSUE_NUMBER" \
+    --argjson issue "$issue_json" \
+    --arg ralphex_config "$RALPHEX_CONFIG" \
+    --arg completed_at "$now" \
+    '{repo:$repo, issue_number:$issue_number, issue:$issue, pr_url:"", ralphex_config:$ralphex_config, status:"failed", started_at:$completed_at, completed_at:$completed_at, branch:("agent/issue-" + ($issue_number|tostring)), progress_log:"Worker output was not preserved (for example, after a hard timeout)."}' \
+  )"
+  printf 'No worker note was preserved; writing fallback failed-run note.\n'
+else
+  json="${note_line#VAULT_NOTE_JSON:}"
 fi
-json="${note_line#VAULT_NOTE_JSON:}"
 
 repo="$(jq -r '.repo' <<<"$json")"
 issue_number="$(jq -r '.issue_number' <<<"$json")"
