@@ -1,13 +1,12 @@
 id: 6e139501-a04a-49ab-b0fd-685321d9d16e
 name: github-ticket-poller
 description: >-
-  Scans one GitHub repository for open issues labeled agent-ready that already
-  have a ralphex plan committed to an agent/issue-<N> branch, and triggers
-  github-ticket-worker for each. Runs on a cron trigger via swamp serve.
-trigger:
-  schedule: "*/15 * * * *"
-  inputs:
-    repo: OWNER/REPO
+  Template: scans one GitHub repository for open issues labeled agent-ready
+  that already have a ralphex plan committed to an agent/issue-<N> branch, and
+  triggers github-ticket-worker for each. Has no cron trigger of its own —
+  copy this file per repo (see workflow-github-ticket-poller-files-nest.yaml)
+  and add a trigger.schedule with a real repo input; scheduling this template
+  directly polls the literal placeholder "OWNER/REPO" and fails every run.
 inputs:
   type: object
   properties:
