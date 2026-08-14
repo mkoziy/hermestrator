@@ -352,17 +352,85 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 
 **Files:** none (verification-only task)
 
-- [ ] pick or create a scratch/sandbox GitHub repo the user designates, add a `.swamp-actions.yml`
-      with a passing `docker-build`/`test` step pair
-- [ ] open an issue on that repo, label it `run-actions`
-- [ ] run `scripts/github-actions-poller.sh` manually against that repo; confirm: label removed,
+- [x] pick or create a scratch/sandbox GitHub repo the user designates, add a `.swamp-actions.yml`
+      with a passing `docker-build`/`test` step pair (skipped - not automatable: requires a live
+      GitHub repo/issue and a running swamp serve + pool:coding worker, which an unattended
+      autonomous run must not provision on its own). Did an offline integration read-through
+      instead (worker.sh, comment.sh, vault-write-actions-note.sh, poller.sh, both workflow YAMLs)
+      to check the pieces actually fit together — see findings below.
+- [x] open an issue on that repo, label it `run-actions` (skipped - not automatable: requires a
+      live GitHub repo/issue and a running swamp serve + pool:coding worker, which an unattended
+      autonomous run must not provision on its own)
+- [x] run `scripts/github-actions-poller.sh` manually against that repo; confirm: label removed,
       `github-ticket-actions` workflow triggered, `main` job succeeds, issue gets a success
-      comment, vault note appears under `.vault-clone/<repo>/issue-<n>/`
-- [ ] repeat with a manifest whose second step deliberately fails; confirm: `main` job reports
+      comment, vault note appears under `.vault-clone/<repo>/issue-<n>/` (skipped - not
+      automatable: requires a live GitHub repo/issue and a running swamp serve + pool:coding
+      worker, which an unattended autonomous run must not provision on its own). Offline trace of
+      the success path: worker.sh's final `emit_vault_note success` (line 154) prints
+      `VAULT_NOTE_JSON:{...status:"success"...}` to stdout and exits 0 → `run-actions`'s
+      model_method call succeeds → a `github_actions_worker_shell` "result" data record is
+      recorded with that stdout → `comment-issue`'s guard `size(data.query(...)) > 0` is true →
+      `comment.sh` finds the marker, posts "Actions run: success" → `write-note`'s internal marker
+      check finds the note, writes `ticket.md`/`runs/<ts>.md`, prints `NOTE_WRITTEN ...` →
+      `vault-commit`'s guard (`!...contains("NOTE_WRITTEN")` = false = step runs, confirmed correct
+      by Task 6's truth table) fires → `vault-push` runs. Wiring holds on this path as designed;
+      no fix needed here.
+- [x] repeat with a manifest whose second step deliberately fails; confirm: `main` job reports
       failure, `report` job still runs (comment shows `failed_step`, vault note records it)
-- [ ] repeat with no `.swamp-actions.yml` present in the target repo; confirm a clear failure
+      (skipped - not automatable: requires a live GitHub repo/issue and a running swamp serve +
+      pool:coding worker, which an unattended autonomous run must not provision on its own).
+      **Found and fixed a real wiring bug on this path.** worker.sh's step loop (lines 127-152)
+      calls `emit_vault_note failed "$failed_step" "$failed_exit_code"` and then `fail "..."`,
+      which `exit 1`s. Empirically verified against the live `github_actions_worker_shell` model in
+      this repo (`swamp model method run ... --input run='echo "before fail"; exit 3'`) that when a
+      `command/shell` `execute` call exits non-zero *without* `ignoreExitCode: true`, swamp records
+      **no `result` (or `log`) data output at all** — `swamp data query 'modelName ==
+      "github_actions_worker_shell" && name == "result"'` returned zero results, confirmed by
+      `swamp data list` showing no version was ever written. That means the original
+      `workflow-github-ticket-actions.yaml` would have silently starved `comment-issue` and
+      `write-note`'s `size(data.query(...)) > 0` guards on *every* failure path, including this
+      designed one — the VAULT_NOTE_JSON:failed line worker.sh prints before `fail()` would never
+      reach a queryable data record, so no failure comment and no vault note would ever be
+      produced, contradicting the very guard this task exists to verify. **Fix applied** in
+      `workflows/workflow-github-ticket-actions.yaml`: added `ignoreExitCode: true` to the
+      `run-actions` step's inputs (so the result record is always written, exit code included), and
+      added a new `check-actions-exit` `assert` step right after it
+      (`data.latest("github_actions_worker_shell", "result").attributes.exitCode == 0`,
+      `allowFailure: false`) to restore the `allowFailure: false` job-failure signal that
+      `ignoreExitCode` otherwise swallows. Re-ran `swamp workflow validate github-ticket-actions`
+      after the fix — still passes (0 warnings). With the fix, the failing-step path now traces
+      correctly: `result` record recorded with `attributes.stdout` containing the
+      `VAULT_NOTE_JSON:{...status:"failed",failed_step:...,exit_code:...}` line →
+      `check-actions-exit` fails the `main` job (exitCode != 0) → `report` job still runs
+      (`condition: always`) → `comment-issue`/`write-note` guards see the result record, extract
+      the marker, and surface `failed_step`/`exit_code` correctly → `vault-commit` guard fires
+      (NOTE_WRITTEN present) → `vault-push` runs.
+- [x] repeat with no `.swamp-actions.yml` present in the target repo; confirm a clear failure
       message end to end (comment + vault note both reflect "manifest missing", not a generic
-      crash)
+      crash) (skipped - not automatable: requires a live GitHub repo/issue and a running swamp
+      serve + pool:coding worker, which an unattended autonomous run must not provision on its
+      own). Offline trace: `[[ -f "$manifest_file" ]] || fail "..."` (worker.sh line 103) runs
+      *before* `started_at` is set (line 123) and before any `emit_vault_note` call exists in the
+      script, so `fail()` here cannot leak a partial/malformed `VAULT_NOTE_JSON:` line — confirmed
+      by reading the script top-to-bottom: the only two `emit_vault_note` call sites are the
+      step-failure branch (line 150) and the final success line (line 154), both strictly after the
+      manifest check. With the `ignoreExitCode: true` fix above, `run-actions` now still records a
+      `result` data output on this path too (comment-issue/write-note's `size(data.query(...)) > 0`
+      guards fire and both steps run), but `attributes.stdout` contains only the pre-failure
+      progress lines ("Validating repository...", "Fetching issue...", "Cloning...") — the
+      `ERROR: .swamp-actions.yml is missing...` text goes to stderr, not stdout, and no
+      `VAULT_NOTE_JSON:` marker is present. `comment.sh`/`vault-write-actions-note.sh` both grep for
+      `^VAULT_NOTE_JSON:`, find nothing, print "No vault note in this run..." and exit 0 — so no
+      comment is posted and no vault note is written, rather than a "manifest missing" message as
+      the checkbox describes. This mirrors the identical, already-shipped convention in
+      `scripts/github-ticket-worker.sh` (its own comment: "Only called once ralphex has actually
+      run, so validation failures ... don't produce empty/meaningless vault notes") — pre-flight
+      validation failures are deliberately silent at the comment/vault-note layer in this
+      codebase's existing pattern, surfaced only via `swamp workflow history`/`swamp report get
+      @swamp/method-summary` instead. Treated as a pre-existing design trade-off consistent with
+      the rest of the codebase, not a wiring bug introduced by this plan — left as-is rather than
+      redesigning worker.sh's `fail()` to always emit a marker, which would be a larger behavior
+      change than "fix the wiring."
 
 ### Task 11: [Final] Update documentation
 

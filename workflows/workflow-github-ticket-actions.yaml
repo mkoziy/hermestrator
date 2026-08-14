@@ -26,7 +26,15 @@ jobs:
     description: Clone the repo and execute the steps declared in its .swamp-actions.yml manifest.
     steps:
       - name: run-actions
-        description: Runs the isolated manifest-driven actions worker.
+        description: >-
+          Runs the isolated manifest-driven actions worker. ignoreExitCode is required
+          here: without it, a failing (or missing-manifest) run makes the model_method
+          call itself fail, and swamp records NO "result"/"log" data output at all on a
+          failed command/shell call (confirmed empirically) — which would silently
+          starve the report job's data.query(...)-guarded comment-issue/write-note steps
+          on every failure path, not just the ones with no VAULT_NOTE_JSON to report.
+          The exitCode still comes back on the recorded result, so the check-actions-exit
+          assert step below reconstructs the allowFailure:false job-failure signal.
         task:
           type: model_method
           modelIdOrName: github_actions_worker_shell
@@ -35,6 +43,7 @@ jobs:
             run: scripts/github-actions-worker.sh
             workingDir: .
             timeout: 7200000
+            ignoreExitCode: true
             env:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
@@ -44,6 +53,25 @@ jobs:
         allowFailure: false
         labels:
           pool: coding
+      - name: check-actions-exit
+        description: >-
+          Fails the job (and workflow) when the worker script itself exited non-zero,
+          restoring the allowFailure:false signal that ignoreExitCode above otherwise
+          swallows.
+        task:
+          type: assert
+          expr: >-
+            data.latest("github_actions_worker_shell", "result").attributes.exitCode == 0
+          message: >-
+            github-actions-worker.sh exited ${{
+            string(data.latest("github_actions_worker_shell", "result").attributes.exitCode) }}
+          severity: high
+        dependsOn:
+          - step: run-actions
+            condition:
+              type: completed
+        weight: 0
+        allowFailure: false
     dependsOn: []
     weight: 0
   - name: report
