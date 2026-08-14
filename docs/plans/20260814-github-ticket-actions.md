@@ -445,10 +445,13 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
       `workflow-github-ticket-actions.yaml`'s `run-actions`/`check-actions-exit` steps as the
       concrete example
 - [x] cross-link `docs/swamp-actions-manifest.md` from wherever `design/`/`docs/` indexes such
-      references, if the repo has one — checked: no `README.md` in the repo, no `design/`
-      directory, and `docs/` itself has no index file (just `plans/`, `research/`,
-      `remote-worker.md`, `swamp-actions-manifest.md`, none of which cross-link each other) —
-      skipped, no docs index exists in this repo to link into
+      references, if the repo has one — correction (found during code review): `README.md` DOES
+      exist at the repo root and documents the ralphex/poller flow; the original note above was
+      wrong. Fixed: `README.md`'s "How it works" section now describes both flows (the existing
+      poller/ralphex flow and the new run-actions/`.swamp-actions.yml` flow), and its repository
+      layout table now mentions `docs/swamp-actions-manifest.md` and calls out that
+      `scripts/`/`workflows/`/`models/` each hold two independent flows. There is still no
+      separate `design/` directory or `docs/` index file beyond `README.md` itself.
 - [x] move this plan to `docs/plans/completed/` — not moved — harness moves the plan file after
       all review/finalize phases complete
 

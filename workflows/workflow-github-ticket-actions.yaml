@@ -57,14 +57,17 @@ jobs:
         description: >-
           Fails the job (and workflow) when the worker script itself exited non-zero,
           restoring the allowFailure:false signal that ignoreExitCode above otherwise
-          swallows.
+          swallows. Scoped to this run's workflowRunId (like comment-issue/write-note
+          below) so a concurrent run's result can't be read instead.
         task:
           type: assert
           expr: >-
-            data.latest("github_actions_worker_shell", "result").attributes.exitCode == 0
+            data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode == 0
           message: >-
             github-actions-worker.sh exited ${{
-            string(data.latest("github_actions_worker_shell", "result").attributes.exitCode) }}
+            string(data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode) }}
           severity: high
         dependsOn:
           - step: run-actions
@@ -86,6 +89,13 @@ jobs:
     steps:
       - name: comment-issue
         description: Post a status comment on the issue summarizing the run outcome.
+        # ignoreExitCode:true on run-actions means a data record is recorded on
+        # every path once that step completes, so this guard rarely trips false
+        # in practice. Kept anyway as the defensive fallback for the one path
+        # that still skips it entirely: main's dependsOn: always means report
+        # runs even if run-actions itself never completed (e.g. pool:coding
+        # dispatch failure before the step ran) — this guard is what keeps
+        # comment-issue a no-op instead of an index error in that case.
         guard: >-
           ${{ size(data.query('modelName == "github_actions_worker_shell" && name ==
           "result" && workflowRunId == "' + run.id + '"')) > 0 }}
@@ -115,6 +125,9 @@ jobs:
         allowFailure: true
       - name: write-note
         description: Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
+        guard: >-
+          ${{ size(data.query('modelName == "github_actions_worker_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0 }}
         task:
           type: model_method
           modelIdOrName: vault_note_writer_shell

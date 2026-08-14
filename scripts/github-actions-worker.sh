@@ -63,6 +63,10 @@ git check-ref-format --branch "$BASE_BRANCH" >/dev/null || fail "base_branch is 
 command -v gh >/dev/null || fail "gh is required"
 command -v git >/dev/null || fail "git is required"
 command -v jq >/dev/null || fail "jq is required"
+# yq is preferred; ruby's stdlib yaml is a fallback. Task 2's investigation
+# found yq unavailable on the dev machine but ruby present — the real
+# pool:coding runner was never verified either way, so both are kept rather
+# than assuming yq ships there.
 if command -v yq >/dev/null; then
   yaml_tool=yq
 elif command -v ruby >/dev/null && ruby -ryaml -e '' >/dev/null 2>&1; then

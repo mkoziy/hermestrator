@@ -41,9 +41,14 @@ jq -r --arg ticket_link "[[../ticket]]" '
 
 # ticket.md is fully regenerated each run — the Runs list is derived from
 # runs/*.md on disk rather than parsed out of the old ticket.md, so there is
-# no incremental state to get out of sync.
-run_links="$(cd "$dir/runs" && shopt -s nullglob && files=(./*.md) && ((${#files[@]})) \
-  && printf '%s\n' "${files[@]##*/}" | sed -E 's/\.md$//' | sort | sed 's/^/- [[runs\//; s/$/]]/')"
+# no incremental state to get out of sync. In practice runs/ always has at
+# least this run's file by now (written above), but the `|| true` guards
+# against set -e + pipefail aborting the whole script if that ever changes
+# and the glob doesn't match (ls exits non-zero on no match; sed as the last
+# stage would otherwise mask that, but pipefail makes the pipeline's exit
+# status the first non-zero one regardless of position).
+# shellcheck disable=SC2012,SC2035
+run_links="$(cd "$dir/runs" && ls -1 *.md 2>/dev/null | sort | sed -E 's/\.md$//' | sed 's/^/- [[runs\//; s/$/]]/' || true)"
 
 jq -r --arg run_links_block "$( [[ -n "$run_links" ]] && printf '%s\n' "$run_links" || echo '_none yet_' )" '
   "---\n" +
