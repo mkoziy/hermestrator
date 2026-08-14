@@ -198,19 +198,31 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `scripts/vault-write-actions-note.sh`
 
-- [ ] parse `NOTE_JSON_RAW` the same way `vault-write-note.sh` does (`grep -m1
-      '^VAULT_NOTE_JSON:'`, no-op exit 0 if absent)
-- [ ] render `runs/<timestamp>.md` under `${VAULT_DIR}/${repo}/issue-${issue_number}/runs/` with
+- [x] parse `NOTE_JSON_RAW` the same way `vault-write-note.sh` does (`grep -m1
+      '^VAULT_NOTE_JSON:'`, no-op exit 0 if absent) — implemented identically, prints "No vault
+      note in this run (run-actions produced none); nothing to sync." and exits 0
+- [x] render `runs/<timestamp>.md` under `${VAULT_DIR}/${repo}/issue-${issue_number}/runs/` with
       frontmatter: `repo`, `issue_number`, `status`, `failed_step`, `started_at`, `completed_at`,
       followed by a `## Steps log` section containing `steps_log`
-- [ ] render/refresh `ticket.md` in the same directory (issue title/url/state/labels + links to
+- [x] render/refresh `ticket.md` in the same directory (issue title/url/state/labels + links to
       `runs/*.md`) — reuse the same "regenerate from runs/*.md on disk" approach as
-      `vault-write-note.sh` so there's no incremental state to drift
-- [ ] print `NOTE_WRITTEN <repo> issue-<issue_number> <run_file>` on success (same marker
+      `vault-write-note.sh` so there's no incremental state to drift — omitted the `pr_urls`/
+      "Pull requests"/"Discussion" sections from `vault-write-note.sh`'s ticket.md since this
+      flow has no PR or ralphex fields (no pr_url in the JSON shape); kept `issue.body` for
+      readability since it's already present in the JSON
+- [x] print `NOTE_WRITTEN <repo> issue-<issue_number> <run_file>` on success (same marker
       `vault-commit`'s guard in the workflow will look for)
-- [ ] run `shellcheck scripts/vault-write-actions-note.sh` — must pass before next task
-- [ ] manual dry run: feed a synthetic `VAULT_NOTE_JSON:` line, confirm `runs/*.md` and `ticket.md`
-      render correctly in a scratch `VAULT_DIR`
+- [x] run `shellcheck scripts/vault-write-actions-note.sh` — must pass before next task — passes
+      clean (0.11.0); one deviation from `vault-write-note.sh`'s equivalent line was needed (see
+      deviation note below) since that line trips SC2012/SC2035 and this task requires a clean
+      pass
+- [x] manual dry run: feed a synthetic `VAULT_NOTE_JSON:` line, confirm `runs/*.md` and `ticket.md`
+      render correctly in a scratch `VAULT_DIR` — created a real scratch dir under `/tmp` via
+      `mktemp -d`, ran the script twice against it with two different synthetic
+      `VAULT_NOTE_JSON:` lines (a success run, then a failed run with `failed_step`/`exit_code`)
+      plus a no-marker case; confirmed both `runs/*.md` files render with correct frontmatter and
+      steps log, `ticket.md` accumulates both `- [[runs/...]]` links across the two runs without
+      duplication or loss, and the no-marker case exits 0 with the no-op message
 
 ### Task 6: `workflow-github-ticket-actions.yaml`
 
