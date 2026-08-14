@@ -6,6 +6,11 @@ hermestrator itself. When an open issue in that repo carries the `run-actions` l
 clones the repo, reads this manifest from the clone root, and runs its steps sequentially on
 `base_branch`.
 
+Note: the flow's scripts/models use the `github-actions-*` stem (no `ticket`), diverging from the
+`github-ticket-actions` workflow name and from the naming triad other flows follow. This is a
+known, deliberate divergence — see the "Deliberate naming divergence" note in
+`docs/plans/20260814-github-ticket-actions.md`.
+
 ## v1 schema
 
 ```yaml

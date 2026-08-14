@@ -70,6 +70,16 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
   every actions-flow note) and a separate `report` job (so a worker step that's killed outright —
   OOM, timeout — still gets *some* signal posted, exactly why `vault-sync` is already split from
   `main` in `workflow-github-ticket-worker.yaml`). Keeping both.
+- **Deliberate naming divergence**: the workflow files are `github-ticket-actions[-poller]`, but
+  the scripts/models are `github-actions-*` / `github_actions_*_shell` (missing the `ticket`
+  segment), breaking the workflow<->script<->model stem triad every sibling flow (e.g.
+  `github-ticket-worker`) follows. Caught in code review after all three models
+  (`github_actions_worker_shell`, `github_actions_comment_shell`, `github_actions_poller_shell`)
+  and both workflows were already validated against these exact names. `swamp model` has no
+  rename — fixing it means deleting and recreating all three models plus rewriting every CEL
+  `data.query(...)` reference across both workflow YAMLs and this file's own completed-task
+  history. Judged not worth the churn for a purely cosmetic mismatch with zero functional impact;
+  left as-is on purpose, not an oversight.
 
 ## What Goes Where
 
