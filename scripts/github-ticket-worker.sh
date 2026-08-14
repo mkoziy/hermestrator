@@ -8,6 +8,8 @@ set -Eeuo pipefail
 : "${REQUIRE_AGENT_READY:=false}"
 : "${RALPHEX_CONFIG:=ralphex-codex}"
 : "${PROGRESS_PUSH_INTERVAL_SECONDS:=300}"
+: "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
+: "${RUN_ARTIFACTS_DIR:=${HOME}/.swamp-worker/run-artifacts}"
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
@@ -46,10 +48,19 @@ emit_vault_note() {
 # and checks out origin/$branch at start, so a pushed partial commit lets the
 # next invocation continue instead of repeating the same 2h of work forever.
 push_progress() {
+  sync_progress_artifact
   [[ "$ralphex_started" == true ]] || return 0
   [[ "$(git branch --show-current 2>/dev/null)" == "$branch" ]] || return 0
   [[ -n "$(git rev-list "origin/$BASE_BRANCH..HEAD" 2>/dev/null)" ]] || return 0
   git push --set-upstream origin "$branch" || true
+}
+
+sync_progress_artifact() {
+  [[ "$ralphex_started" == true ]] || return 0
+  local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
+  local progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
+  mkdir -p "$artifact_dir"
+  [[ -f "$progress_file" ]] && cp "$progress_file" "$artifact_dir/progress.log"
 }
 
 cleanup() {
@@ -150,6 +161,7 @@ readonly plan_file="${plan_files[0]}"
 printf 'Executing ralphex plan %s with config %s\n' "$plan_file" "$RALPHEX_CONFIG"
 ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+sync_progress_artifact
 ralphex --config-dir "$ralphex_config_dir" "$plan_file" \
   --base-ref "$BASE_BRANCH" --branch "$branch" &
 ralphex_pid=$!

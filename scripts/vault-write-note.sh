@@ -10,6 +10,8 @@ set -Eeuo pipefail
 : "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
 : "${RALPHEX_CONFIG:?RALPHEX_CONFIG is required}"
 : "${NOTE_JSON_RAW:=}"
+: "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
+: "${RUN_ARTIFACTS_DIR:=${HOME}/.swamp-worker/run-artifacts}"
 : "${VAULT_DIR:=.vault-clone}"
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || {
@@ -28,13 +30,16 @@ if [[ -z "$note_line" ]]; then
   issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json number,title,body,state,labels,url,comments)"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  progress_file="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}/progress.log"
+  progress_log="$( [[ -f "$progress_file" ]] && cat "$progress_file" || printf 'Worker output was not preserved and no progress artifact was available.' )"
   json="$(jq -nc \
     --arg repo "$REPO" \
     --argjson issue_number "$ISSUE_NUMBER" \
     --argjson issue "$issue_json" \
     --arg ralphex_config "$RALPHEX_CONFIG" \
     --arg completed_at "$now" \
-    '{repo:$repo, issue_number:$issue_number, issue:$issue, pr_url:"", ralphex_config:$ralphex_config, status:"failed", started_at:$completed_at, completed_at:$completed_at, branch:("agent/issue-" + ($issue_number|tostring)), progress_log:"Worker output was not preserved (for example, after a hard timeout)."}' \
+    --arg progress_log "$progress_log" \
+    '{repo:$repo, issue_number:$issue_number, issue:$issue, pr_url:"", ralphex_config:$ralphex_config, status:"failed", started_at:$completed_at, completed_at:$completed_at, branch:("agent/issue-" + ($issue_number|tostring)), progress_log:$progress_log}' \
   )"
   printf 'No worker note was preserved; writing fallback failed-run note.\n'
 else

@@ -51,6 +51,7 @@ jobs:
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               BASE_BRANCH: ${{ inputs.base_branch }}
               REQUIRE_AGENT_READY: ${{ string(inputs.require_agent_ready) }}
+              WORKFLOW_RUN_ID: ${{ run.id }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
         dependsOn: []
         weight: 0
@@ -101,6 +102,7 @@ jobs:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              WORKFLOW_RUN_ID: ${{ run.id }}
               VAULT_DIR: .vault-clone
         dependsOn:
           - step: vault-pull
