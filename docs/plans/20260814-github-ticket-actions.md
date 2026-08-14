@@ -86,24 +86,50 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `docs/swamp-actions-manifest.md`
 
-- [ ] document the v1 schema: `version: 1` (required), `steps` (non-empty list), each step has
+- [x] document the v1 schema: `version: 1` (required), `steps` (non-empty list), each step has
       non-empty `name` and `run` (shell command executed via `bash -c` from repo root)
-- [ ] include the example from the brainstorm (`docker-build` + `test` steps)
-- [ ] note explicitly that this is a target-repo file, not a hermestrator file, and that v1
+- [x] include the example from the brainstorm (`docker-build` + `test` steps)
+- [x] note explicitly that this is a target-repo file, not a hermestrator file, and that v1
       intentionally has no `env`/`timeout`/`continue-on-error`/`working-dir` fields
-- [ ] run: none (docs-only task)
+- [x] run: none (docs-only task)
 
 ### Task 2: `swamp model type describe command/shell` cross-check
 
 **Files:** none (verification-only task)
 
-- [ ] run `swamp model type describe command/shell --json` and confirm the `execute` method's
+- [x] run `swamp model type describe command/shell --json` and confirm the `execute` method's
       input shape (`run`, `workingDir`, `timeout`, `env`) and the `pool: coding` label convention
       used by `github_ticket_worker_shell` — record exact field names here before Tasks 3/4/7
-      assume them
-- [ ] confirm `yq` (or an equivalent YAML→JSON tool) is available on the runner pool the worker
+      assume them — confirmed via `swamp model type describe command/shell --json`: the `execute`
+      method's `arguments` schema is `{run: string (required, minLength 1), workingDir: string,
+      timeout: integer (ms, exclusiveMinimum 0), env: object<string,string>, ignoreExitCode:
+      boolean}`, `additionalProperties: false` (no other fields accepted). It also emits a
+      `result` data output spec (`exitCode`, `executedAt`, `command`, `durationMs`, `stdout`,
+      `stderr`) and a streaming `log` file output. Field names match what Tasks 3/6/7's `env`
+      blocks already assume (`REPO`, `ISSUE_NUMBER`, etc. as string-valued env entries). The
+      `pool: coding` convention is **not** a model or `execute`-input field at all — confirmed by
+      reading `workflows/workflow-github-ticket-worker.yaml` lines 39-59: `labels: {pool: coding}`
+      is a **step-level** YAML key, a sibling of `task`/`dependsOn`/`weight`/`allowFailure` inside
+      the job step object (`task.inputs` holds `run`/`workingDir`/`timeout`/`env`; `labels` sits
+      one level up, outside `task`). Task 6 must place `labels: {pool: coding}` on the
+      `run-actions` step itself, not inside its `task.inputs`.
+- [x] confirm `yq` (or an equivalent YAML→JSON tool) is available on the runner pool the worker
       will execute on; `.swamp-actions.yml` is YAML and none of the existing scripts parse YAML
-      (`jq` alone won't do it) — this determines the parsing approach in Task 3
+      (`jq` alone won't do it) — this determines the parsing approach in Task 3 — checked this dev
+      machine (not the actual `pool:coding` runner, which was not reachable from this
+      investigation): `command -v yq` → not found (exit 1). `command -v python3` → found
+      (`/opt/homebrew/bin/python3`), but `python3 -c "import yaml"` fails
+      (`ModuleNotFoundError: No module named 'yaml'`, no pyyaml installed). `ruby -e "require
+      'yaml'"` succeeds — Ruby's stdlib `yaml` library is available on this machine
+      (`/usr/bin/ruby`), so `ruby -ryaml -rjson -e 'puts JSON.generate(YAML.load_file(ARGV[0]))'`
+      is a viable YAML→JSON fallback if `yq` isn't present on the real `pool:coding` runner. Per
+      task instructions, did not attempt to install `yq` (out of scope for a
+      verification-only task; not blocking). **Recommendation for Task 3**: `command -v` guard for
+      `yq` first (preferred, matches the plan's example `yq -o=json . .swamp-actions.yml | jq
+      ...`), and if the actual runner pool turns out not to have `yq` either, fall back to the
+      `ruby -ryaml -rjson` one-liner above (`ruby` ships with macOS/most Linux base images) — do
+      not assume either is present without a runtime `command -v` check on the pool itself, since
+      this cross-check ran on the local dev machine, not the coding pool.
 
 ### Task 3: `github_actions_worker_shell` model + `scripts/github-actions-worker.sh`
 
