@@ -282,28 +282,40 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 **Files:**
 - Create: `scripts/github-actions-poller.sh`
 
-- [ ] accept `REPO` (required), `BASE_BRANCH` (default `main`), `LABEL` (default `run-actions`),
-      `STALE_RUN_MINUTES` (default 45), `SWAMP_SERVE_URL`
-- [ ] `gh issue list --repo "$REPO" --label "$LABEL" --state open --json number`
-- [ ] for each issue: guard on an already-active run via `swamp workflow history search` +
-      `STALE_RUN_MINUTES`, filtering `workflowName == "github-ticket-actions"` — copy the guard
+- [x] accept `REPO` (required), `BASE_BRANCH` (default `main`), `LABEL` (default `run-actions`),
+      `STALE_RUN_MINUTES` (default 45), `SWAMP_SERVE_URL` — implemented; `SWAMP_SERVE_URL` is not
+      referenced directly in the script body (same as `github-ticket-poller.sh`, which also accepts
+      it without using it inline) — it's consumed implicitly by the `swamp` CLI's connection to
+      `swamp serve` when set in the environment, matching the existing poller's convention
+- [x] `gh issue list --repo "$REPO" --label "$LABEL" --state open --json number`
+- [x] for each issue: guard on an already-active run via `swamp workflow history search` +
+      `STALE_RUN_MINUTES`, filtering `workflowName == "github-ticket-actions"` — copied the guard
       block from `github-ticket-poller.sh` verbatim, only changing the workflow name filter
-- [ ] before triggering, strip the label: `gh issue edit "$n" --repo "$REPO" --remove-label
+- [x] before triggering, strip the label: `gh issue edit "$n" --repo "$REPO" --remove-label
       "$LABEL"`; if this fails, skip the issue this tick (do not trigger) rather than risk a
       duplicate trigger on the next tick. Unlike `github-ticket-poller.sh` (which never removes
       labels — the plan-file state is its idempotency guard), this poller's only idempotency guard
       *is* the label removal, so a `swamp workflow run` failure **after** a successful strip loses
-      the ticket silently — nothing re-triggers it. Log a loud, explicit message on that failure
+      the ticket silently — nothing re-triggers it. Logs a loud, explicit message on that failure
       path (`printf 'ERROR: label removed but trigger failed for issue #%s — re-add %s manually to
       retry\n'`) so it's discoverable, since this is the accepted trade-off, not a bug to fix here
-- [ ] on success, `swamp workflow run github-ticket-actions --input repo="$REPO" --input
+- [x] on success, `swamp workflow run github-ticket-actions --input repo="$REPO" --input
       issue_number="$n" --input base_branch="$BASE_BRANCH"`
-- [ ] no agent-pi/agent-codex branching, no `agent/issue-<n>` branch check, no plan-file check —
-      this flow has none of ralphex's preconditions
-- [ ] `swamp model create command/shell github_actions_poller_shell`
-- [ ] run `shellcheck scripts/github-actions-poller.sh` — must pass before next task
-- [ ] manual dry run: label a scratch issue `run-actions`, run the poller model directly, confirm
-      the label is removed and `github-ticket-actions` is triggered exactly once
+- [x] no agent-pi/agent-codex branching, no `agent/issue-<n>` branch check, no plan-file check —
+      this flow has none of ralphex's preconditions — confirmed by structural comparison against
+      `github-ticket-poller.sh`: no `RALPHEX_CONFIG`/label-routing case block, no `gh api
+      repos/.../branches/...` check, no `gh api repos/.../contents/docs/plans` check
+- [x] `swamp model create command/shell github_actions_poller_shell` — created successfully
+      (id `91a2405e-d620-4d45-94e5-659080056db6`)
+- [x] run `shellcheck scripts/github-actions-poller.sh` — must pass before next task — passes clean
+- [x] manual dry run (skipped - no live repo/issue available in this environment; instead did a
+      stubbed dry logic review — put `gh` and `swamp` stubs on `PATH` returning 3 synthetic issues
+      (empty `workflow history search` results for all) and traced all three paths by hand: issue
+      #1 happy path (label removed, `swamp workflow run` succeeds, triggered exactly once), issue
+      #2 label-strip failure (`gh issue edit` exits 1 → issue skipped, no trigger attempted), issue
+      #3 label-strip succeeds but trigger fails (`swamp workflow run` exits 1 → loud `ERROR: label
+      removed but trigger failed for issue #3 — re-add run-actions manually to retry` printed to
+      stderr, script continues rather than aborting). All three behaved as designed.
 
 ### Task 8: `workflow-github-ticket-actions-poller.yaml` (template)
 

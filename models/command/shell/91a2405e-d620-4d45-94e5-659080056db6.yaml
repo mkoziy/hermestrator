@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 91a2405e-d620-4d45-94e5-659080056db6
+name: github_actions_poller_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}
