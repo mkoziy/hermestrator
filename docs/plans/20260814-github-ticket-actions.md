@@ -338,9 +338,15 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 
 **Files:** none (verification-only task)
 
-- [ ] run `swamp model get github_actions_worker_shell --json`, `github_actions_comment_shell
+- [x] run `swamp model get github_actions_worker_shell --json`, `github_actions_comment_shell
       --json`, `github_actions_poller_shell --json` and confirm all three exist and are configured
-      as expected (matches the field names confirmed in Task 2)
+      as expected (matches the field names confirmed in Task 2) — all three ran successfully and
+      returned `type: command/shell`, IDs matching those recorded in Tasks 3/4/7
+      (`45f58514-a394-4ca8-aefc-4dbf7bf6f86b`, `624a8e45-bf9e-4351-a0d9-af1a6cca1d62`,
+      `91a2405e-d620-4d45-94e5-659080056db6`), and identical `execute` method schemas exactly
+      matching Task 2's confirmed shape (`run` required/minLength 1, `workingDir`, `timeout`,
+      `env`, `ignoreExitCode`, `additionalProperties: false`). No drift or misconfiguration found;
+      no fix needed.
 
 ### Task 10: End-to-end manual dry run
 
