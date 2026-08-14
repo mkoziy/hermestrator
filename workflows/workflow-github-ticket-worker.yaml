@@ -111,8 +111,16 @@ jobs:
         weight: 0
         allowFailure: true
       - name: vault-commit
-        description: Commit the rendered note(s); guarded off when there was nothing to sync.
-        guard: ${{ data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}
+        description: >-
+          Commit the rendered note(s); guarded off when there was nothing to sync.
+          Scoped to this run's workflowRunId (like write-note above) so a concurrent
+          run of this or the sibling actions workflow can't be read instead.
+        guard: >-
+          ${{ !(size(data.query('modelName == "vault_note_writer_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0 &&
+          data.query('modelName == "vault_note_writer_shell" && name ==
+          "result" && workflowRunId == "' + run.id +
+          '"')[0].attributes.stdout.contains("NOTE_WRITTEN")) }}
         task:
           type: model_method
           modelIdOrName: vault-repo
