@@ -58,16 +58,27 @@ jobs:
           Fails the job (and workflow) when the worker script itself exited non-zero,
           restoring the allowFailure:false signal that ignoreExitCode above otherwise
           swallows. Scoped to this run's workflowRunId (like comment-issue/write-note
-          below) so a concurrent run's result can't be read instead.
+          below) so a concurrent run's result can't be read instead. Uses a
+          size(...)>0 short-circuit (CEL && is lazy) so a run-actions that produced
+          NO queryable result record at all (worker killed/crashed/dispatch failure
+          before recording) fails this assert with a clear message instead of an
+          opaque out-of-bounds index error — a missing result record is itself a
+          failure signal, not a pass.
         task:
           type: assert
           expr: >-
+            size(data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 &&
             data.query('modelName == "github_actions_worker_shell" && name ==
             "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode == 0
           message: >-
-            github-actions-worker.sh exited ${{
-            string(data.query('modelName == "github_actions_worker_shell" && name ==
-            "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode) }}
+            ${{ size(data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 ?
+            "github-actions-worker.sh exited " + string(data.query('modelName ==
+            "github_actions_worker_shell" && name == "result" && workflowRunId == "'
+            + run.id + '"')[0].attributes.exitCode) :
+            "github-actions-worker.sh produced no result record for this run (worker
+            crashed or was never dispatched)" }}
           severity: high
         dependsOn:
           - step: run-actions
