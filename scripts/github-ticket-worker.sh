@@ -60,7 +60,11 @@ sync_progress_artifact() {
   local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
   local progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
   mkdir -p "$artifact_dir"
-  [[ -f "$progress_file" ]] && cp "$progress_file" "$artifact_dir/progress.log"
+  # ralphex creates this file only after it has made progress. Its absence is
+  # normal at startup, and this diagnostic copy must never abort the worker.
+  if [[ -f "$progress_file" ]]; then
+    cp "$progress_file" "$artifact_dir/progress.log"
+  fi
 }
 
 cleanup() {

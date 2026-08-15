@@ -111,8 +111,7 @@ jobs:
         weight: 0
         allowFailure: true
       - name: vault-commit
-        description: Commit the rendered note(s); guarded off when there was nothing to sync.
-        guard: ${{ data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}
+        description: Commit the note rendered by the preceding successful write step.
         task:
           type: model_method
           modelIdOrName: vault-repo
