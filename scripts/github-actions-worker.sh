@@ -3,27 +3,20 @@
 # workflow. Clones the target repo, runs the steps declared in its own
 # .swamp-actions.yml manifest directly on $BASE_BRANCH (no agent branch, no
 # ralphex), and reports the outcome as a VAULT_NOTE_JSON: marker line.
+#
+# Runs in two phases so that manifest steps (potentially attacker-controlled
+# via .swamp-actions.yml in a repo that takes external PRs) never execute in
+# a process whose /proc/<pid>/environ contains GH_TOKEN/CODEX_ACCESS_TOKEN/
+# OPENAI_API_KEY/OPENCODE_API_KEY/SWAMP_WORKER_TOKEN. A shell `unset` does
+# NOT clear /proc/<pid>/environ (it only reflects the process's env at its
+# own execve()); any same-UID process, not just children, can read it. The
+# only real fix is a genuine execve() with a scrubbed envp, which is what
+# `exec env -i ...` below does: phase 1 does all credential-needing setup
+# (repo view/clone, issue fetch, manifest parse+validate) and writes what
+# phase 2 needs to disk under $run_root, then re-execs itself (same PID) via
+# `exec` into a fully clean environment for phase 2, which runs the manifest
+# steps and emits the vault note using only on-disk state.
 set -Eeuo pipefail
-
-: "${REPO:?REPO is required}"
-: "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
-: "${BASE_BRANCH:=main}"
-
-run_root=""
-cleanup_workspace=true
-
-cleanup() {
-  local status=$?
-  if [[ -z "$run_root" ]]; then
-    :
-  elif [[ "$cleanup_workspace" == true ]]; then
-    rm -rf "$run_root"
-  else
-    printf 'Workspace preserved for diagnosis: %s\n' "$run_root" >&2
-  fi
-  exit "$status"
-}
-trap cleanup EXIT
 
 fail() {
   cleanup_workspace=false
@@ -54,6 +47,101 @@ emit_vault_note() {
       steps_log:$steps_log, started_at:$started_at, completed_at:$completed_at}' \
   | { printf 'VAULT_NOTE_JSON:'; cat; printf '\n'; }
 }
+
+cleanup() {
+  local status=$?
+  if [[ -z "$run_root" ]]; then
+    :
+  elif [[ "$cleanup_workspace" == true ]]; then
+    rm -rf "$run_root"
+  else
+    printf 'Workspace preserved for diagnosis: %s\n' "$run_root" >&2
+  fi
+  exit "$status"
+}
+
+run_steps() {
+  steps_count="$(jq '.steps | length' "$manifest_json")"
+  failed_step=""
+  failed_exit_code=""
+
+  for ((i = 0; i < steps_count; i++)); do
+    name="$(jq -r ".steps[$i].name" "$manifest_json")"
+    run="$(jq -r ".steps[$i].run" "$manifest_json")"
+
+    printf '\n[step: %s] running\n' "$name" | tee -a "$steps_log"
+
+    # Manifest steps come from the target repo's own .swamp-actions.yml,
+    # which is potentially untrusted (external-PR-controlled) content. This
+    # process's own environment is already fully scrubbed of credentials
+    # (see the re-exec in phase 1 below), and env -i strips even the
+    # non-secret phase-2 bookkeeping vars (RUN_ROOT/REPO/etc.) from what the
+    # step itself sees, so a step only ever gets PATH/HOME/LANG/TMPDIR.
+    set +e
+    env -i \
+      PATH="$PATH" \
+      HOME="$HOME" \
+      LANG="${LANG:-C.UTF-8}" \
+      TMPDIR="${TMPDIR:-/tmp}" \
+      bash -c "$run" 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
+      printf '[step: %s] %s\n' "$name" "$line"
+    done | tee -a "$steps_log"
+    exit_code="${PIPESTATUS[0]}"
+    set -e
+
+    if [[ "$exit_code" -ne 0 ]]; then
+      printf '[step: %s] failed with exit code %s\n' "$name" "$exit_code" | tee -a "$steps_log" >&2
+      failed_step="$name"
+      failed_exit_code="$exit_code"
+      break
+    fi
+    printf '[step: %s] succeeded\n' "$name" | tee -a "$steps_log"
+  done
+
+  if [[ -n "$failed_step" ]]; then
+    emit_vault_note failed "$failed_step" "$failed_exit_code"
+    fail "step '$failed_step' failed with exit code $failed_exit_code"
+  fi
+
+  emit_vault_note success
+}
+
+if [[ "${GITHUB_ACTIONS_PHASE2:-}" == "1" ]]; then
+  # Phase 2: this process was re-exec'd with a scrubbed environment (see
+  # phase 1 below), so /proc/$$/environ no longer contains any credential.
+  # All state needed here was written to disk by phase 1 under $RUN_ROOT.
+  : "${RUN_ROOT:?RUN_ROOT is required in phase 2}"
+  : "${REPO:?REPO is required in phase 2}"
+  : "${ISSUE_NUMBER:?ISSUE_NUMBER is required in phase 2}"
+  : "${STARTED_AT:?STARTED_AT is required in phase 2}"
+
+  run_root="$RUN_ROOT"
+  cleanup_workspace=true
+  trap cleanup EXIT
+  trap 'cleanup_workspace=false' ERR
+
+  readonly checkout="${run_root}/repo"
+  readonly issue_json="${run_root}/issue.json"
+  readonly manifest_json="${run_root}/manifest.json"
+  readonly steps_log="${run_root}/steps.log"
+  started_at="$STARTED_AT"
+
+  cd "$checkout"
+  run_steps
+  exit 0
+fi
+
+# Phase 1: normal (credentialed) setup. Nothing below the re-exec at the
+# bottom of this branch may depend on GH_TOKEN/CODEX_ACCESS_TOKEN/
+# OPENAI_API_KEY/OPENCODE_API_KEY/SWAMP_WORKER_TOKEN.
+
+: "${REPO:?REPO is required}"
+: "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
+: "${BASE_BRANCH:=main}"
+
+run_root=""
+cleanup_workspace=true
+trap cleanup EXIT
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || fail "repo must be owner/name"
 [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "issue_number must be a positive integer"
@@ -119,34 +207,24 @@ for ((i = 0; i < steps_count; i++)); do
 done
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-failed_step=""
-failed_exit_code=""
 
-for ((i = 0; i < steps_count; i++)); do
-  name="$(jq -r ".steps[$i].name" "$manifest_json")"
-  run="$(jq -r ".steps[$i].run" "$manifest_json")"
-
-  printf '\n[step: %s] running\n' "$name" | tee -a "$steps_log"
-
-  set +e
-  bash -c "$run" 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
-    printf '[step: %s] %s\n' "$name" "$line"
-  done | tee -a "$steps_log"
-  exit_code="${PIPESTATUS[0]}"
-  set -e
-
-  if [[ "$exit_code" -ne 0 ]]; then
-    printf '[step: %s] failed with exit code %s\n' "$name" "$exit_code" | tee -a "$steps_log" >&2
-    failed_step="$name"
-    failed_exit_code="$exit_code"
-    break
-  fi
-  printf '[step: %s] succeeded\n' "$name" | tee -a "$steps_log"
-done
-
-if [[ -n "$failed_step" ]]; then
-  emit_vault_note failed "$failed_step" "$failed_exit_code"
-  fail "step '$failed_step' failed with exit code $failed_exit_code"
-fi
-
-emit_vault_note success
+# Everything needed by phase 2 (manifest step execution + vault note
+# emission) is now on disk under $run_root. Re-exec via a genuine execve()
+# (same PID) into a fully scrubbed environment: this is the only way to
+# actually clear /proc/<pid>/environ of GH_TOKEN and friends -- `unset`
+# only updates this shell's variable table, not the environ that execve()
+# already wrote to the kernel/procfs at this process's own startup. Any
+# same-UID process (including a malicious manifest step) could otherwise
+# read this process's original secrets straight out of /proc/<pid>/environ
+# regardless of parent/child relationship.
+exec env -i \
+  PATH="$PATH" \
+  HOME="$HOME" \
+  LANG="${LANG:-C.UTF-8}" \
+  TMPDIR="${TMPDIR:-/tmp}" \
+  GITHUB_ACTIONS_PHASE2=1 \
+  RUN_ROOT="$run_root" \
+  REPO="$REPO" \
+  ISSUE_NUMBER="$ISSUE_NUMBER" \
+  STARTED_AT="$started_at" \
+  bash "$0"

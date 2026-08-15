@@ -49,6 +49,23 @@ so a missing manifest produces **no issue comment and no vault note** — only
 the workflow run's own log shows the `.swamp-actions.yml is missing at the
 repository root` error. Confirmed during Task 10's dry run.
 
+## Platform limitation: NOTE_JSON_RAW is threaded through an env var
+
+The `run-actions` workflow's `report` job passes the worker step's full stdout to
+`github-actions-comment.sh`/`vault-write-actions-note.sh` as the `NOTE_JSON_RAW`
+environment variable (via `data.query(...)[0].attributes.stdout` in
+`workflows/workflow-github-ticket-actions.yaml`). The `command/shell` model
+type's `execute` method only accepts `env` (a string map) and has no `stdin` or
+file-based input mechanism, so there is no way to hand a large payload to a step
+without materializing it into an OS environment variable first — this is a
+platform-level constraint of `command/shell`, not something fixable in this
+workflow's YAML. In practice `steps_log` (the largest field in the JSON) is
+capped by the manifest's own verbosity, and OS env size limits (`ARG_MAX`,
+typically several MB) are far above what a normal build/test log produces, but
+a sufficiently verbose manifest could still hit the ceiling. If that becomes a
+real problem, the fix has to happen at the `command/shell` model level (e.g. an
+input that writes to a file instead of an env var), not in this workflow.
+
 ## Explicitly out of scope for v1
 
 The following fields are **not** supported and will not be read by v1:

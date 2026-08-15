@@ -75,6 +75,15 @@ with that provider's login; do not assume it is compatible with OpenCode Go.
 
 ## Local Docker development
 
+Export a repository-capable GitHub token first — the orchestrator container
+also reads `GH_TOKEN` at compose-up time (its unlabeled `write-note`/
+`comment-issue` steps call `gh` directly), so starting it before exporting the
+token leaves it captured empty:
+
+```bash
+export GH_TOKEN='github-token'
+```
+
 Build and start the orchestrator:
 
 ```bash
@@ -82,15 +91,14 @@ docker compose up -d --build orchestrator
 ```
 
 Create a one-time enrollment token, copy the complete `coding.<secret>` value,
-then start the dedicated worker. Export a repository-capable GitHub token, plus
-the provider key for the profile you intend to use.
+then start the dedicated worker. Export the provider key for the profile you
+intend to use.
 
 ```bash
 docker compose exec orchestrator swamp worker token create coding \
   --duration 24h --server ws://localhost:9090
 
 export SWAMP_WORKER_TOKEN='coding.<secret>'
-export GH_TOKEN='github-token'
 export CODEX_ACCESS_TOKEN='worker-access-token' # automatic Codex login
 # export OPENAI_API_KEY='openai-api-key' # API-billed alternative
 # export OPENCODE_API_KEY='opencode-api-key' # for ralphex-pi

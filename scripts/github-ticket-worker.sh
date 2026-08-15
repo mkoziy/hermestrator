@@ -61,8 +61,14 @@ sync_progress_artifact() {
   local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
   local progress_file
   progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
-  mkdir -p "$artifact_dir"
-  [[ -f "$progress_file" ]] && cp "$progress_file" "$artifact_dir/progress.log"
+  # Best-effort: this runs from the EXIT/TERM trap path under set -e, so a
+  # write failure here (disk full, permission issue on the shared volume)
+  # must not abort the rest of cleanup() — emit_vault_note and the workspace
+  # rm -rf still need to run even if the artifact sync itself fails.
+  mkdir -p "$artifact_dir" || true
+  if [[ -f "$progress_file" ]]; then
+    cp "$progress_file" "$artifact_dir/progress.log" || true
+  fi
   # Retention: this dir lives on the shared swamp_worker_cache volume and is
   # never otherwise cleaned up, so on a long-lived poller-driven deployment
   # it grows unbounded. Prune run-artifact subdirectories past their retention
