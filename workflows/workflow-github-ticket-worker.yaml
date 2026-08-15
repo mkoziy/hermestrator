@@ -103,7 +103,7 @@ jobs:
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
               WORKFLOW_RUN_ID: ${{ run.id }}
-              VAULT_DIR: .vault-clone
+              VAULT_DIR: .swamp/vault-clone
         dependsOn:
           - step: vault-pull
             condition:
