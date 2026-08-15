@@ -45,7 +45,7 @@ emit_vault_note() {
     --arg status "$status_label" \
     --arg failed_step "$failed_step_val" \
     --arg exit_code "$exit_code_val" \
-    --arg steps_log "$(cat "$steps_log" 2>/dev/null || true)" \
+    --rawfile steps_log "$steps_log" \
     --arg started_at "$started_at" \
     --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{repo:$repo, issue_number:$issue_number, issue:$issue[0], status:$status,

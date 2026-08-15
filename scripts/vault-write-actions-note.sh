@@ -7,8 +7,10 @@
 # step failed before emitting one).
 set -Eeuo pipefail
 
-: "${NOTE_JSON_RAW:?NOTE_JSON_RAW is required}"
+: "${NOTE_JSON_RAW:=}"
 : "${VAULT_DIR:=.vault-clone}"
+
+command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 
 note_line="$(printf '%s\n' "$NOTE_JSON_RAW" | grep -m1 '^VAULT_NOTE_JSON:' || true)"
 if [[ -z "$note_line" ]]; then

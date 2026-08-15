@@ -7,7 +7,7 @@
 # out of the parsed JSON rather than passed as separate env vars.
 set -Eeuo pipefail
 
-: "${NOTE_JSON_RAW:?NOTE_JSON_RAW is required}"
+: "${NOTE_JSON_RAW:=}"
 
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
