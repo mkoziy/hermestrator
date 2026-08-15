@@ -9,7 +9,7 @@ mutable checkout for each run.
 ## Image contents
 
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
-CLI, and Pi coding agent; includes git, GitHub CLI, jq, SSH client, and
+CLI, and Pi coding agent; includes git, GitHub CLI, jq, yq, SSH client, and
 ralphex profiles under `/home/worker/.config`:
 
 - `ralphex-codex`: native Codex executor (the workflow default);
@@ -42,6 +42,16 @@ they are not required for API-key authentication. Do not mount a personal Codex
 or Pi auth directory by default, because its stored auth can override runtime
 environment credentials.
 
+The orchestrator container also mounts `/home/worker/.swamp-worker` from the
+same `swamp_worker_cache` volume, read-only. The vault-sync steps (`write-note`
+etc.) run unlabeled, i.e. on the orchestrator, not on the `pool: coding` worker,
+but `scripts/github-ticket-worker.sh` writes its progress-log artifact under
+`$RUN_ARTIFACTS_DIR` (`$HOME/.swamp-worker/run-artifacts`) from inside the
+coding-worker container. Without the shared mount the two containers each see
+their own private `/home/worker/.swamp-worker`, and the timeout-fallback vault
+note in `vault-write-note.sh` silently loses the progress log it's supposed to
+preserve.
+
 ## Fully unattended Codex authentication
 
 The image does not require a human to log in. Inject `CODEX_ACCESS_TOKEN` at
@@ -65,6 +75,15 @@ with that provider's login; do not assume it is compatible with OpenCode Go.
 
 ## Local Docker development
 
+Export a repository-capable GitHub token first — the orchestrator container
+also reads `GH_TOKEN` at compose-up time (its unlabeled `write-note`/
+`comment-issue` steps call `gh` directly), so starting it before exporting the
+token leaves it captured empty:
+
+```bash
+export GH_TOKEN='github-token'
+```
+
 Build and start the orchestrator:
 
 ```bash
@@ -72,15 +91,14 @@ docker compose up -d --build orchestrator
 ```
 
 Create a one-time enrollment token, copy the complete `coding.<secret>` value,
-then start the dedicated worker. Export a repository-capable GitHub token, plus
-the provider key for the profile you intend to use.
+then start the dedicated worker. Export the provider key for the profile you
+intend to use.
 
 ```bash
 docker compose exec orchestrator swamp worker token create coding \
   --duration 24h --server ws://localhost:9090
 
 export SWAMP_WORKER_TOKEN='coding.<secret>'
-export GH_TOKEN='github-token'
 export CODEX_ACCESS_TOKEN='worker-access-token' # automatic Codex login
 # export OPENAI_API_KEY='openai-api-key' # API-billed alternative
 # export OPENCODE_API_KEY='opencode-api-key' # for ralphex-pi

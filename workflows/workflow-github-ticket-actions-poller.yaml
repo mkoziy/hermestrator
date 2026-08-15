@@ -1,0 +1,57 @@
+id: e8b25e02-39b1-4828-bbb0-c0f2d80c37ea
+name: github-ticket-actions-poller
+description: >-
+  Template: scans one GitHub repository for open issues labeled run-actions and
+  triggers github-ticket-actions for each. Has no cron trigger of its own — copy
+  this file per repo and add a trigger.schedule with a real repo input; scheduling
+  this template directly polls the literal placeholder "OWNER/REPO" and fails
+  every run.
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form to poll.
+    base_branch:
+      type: string
+      default: main
+      description: Branch the manifest steps run against.
+    label:
+      type: string
+      default: run-actions
+      description: Issue label that marks a ticket as eligible for polling.
+    server_url:
+      type: string
+      default: ws://127.0.0.1:9090
+      description: >-
+        Loopback URL of the swamp serve instance this poller runs under. Required so the
+        triggered github-ticket-actions run dispatches to enrolled pool:coding workers instead
+        of running as a disconnected local process with no worker dispatcher.
+  required:
+    - repo
+tags: {}
+jobs:
+  - name: main
+    description: Trigger github-ticket-actions for every open run-actions issue.
+    steps:
+      - name: poll-and-trigger
+        description: List run-actions issues and run the actions workflow for each.
+        task:
+          type: model_method
+          modelIdOrName: github_actions_poller_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-actions-poller.sh
+            workingDir: .
+            timeout: 300000
+            env:
+              REPO: ${{ inputs.repo }}
+              BASE_BRANCH: ${{ inputs.base_branch }}
+              LABEL: ${{ inputs.label }}
+              SWAMP_SERVE_URL: ${{ inputs.server_url }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

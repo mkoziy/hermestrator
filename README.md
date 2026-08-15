@@ -1,9 +1,17 @@
 # hermestrator
 
-Automated GitHub ticket implementation on top of [swamp](https://github.com/swamp-club/swamp)
-and [ralphex](https://github.com/umputun/ralphex): poll a repo for
-`agent-ready` issues that already have a plan committed, then run a coding
-agent (Codex or Pi) against each one and open a pull request.
+Automated GitHub ticket handling on top of [swamp](https://github.com/swamp-club/swamp).
+Two independent flows share this repo's `scripts/`, `workflows/`, and `models/`:
+
+- **agent-ready / ralphex** — poll for `agent-ready` issues that already have a
+  plan committed, run a coding agent ([ralphex](https://github.com/umputun/ralphex),
+  Codex or Pi) against each one, and open a pull request.
+- **run-actions** — poll for `run-actions` issues, clone the target repo, and
+  run the steps declared in its own `.swamp-actions.yml` manifest directly on
+  `base_branch` (no agent, no branch, no PR) — see
+  [docs/swamp-actions-manifest.md](docs/swamp-actions-manifest.md) for the
+  manifest schema. Requires `yq` at runtime to parse the manifest (already
+  pinned in [worker/Dockerfile](worker/Dockerfile)).
 
 ## How it works
 
@@ -20,20 +28,36 @@ workflow-github-ticket-worker  (manual or triggered)
       opens or reuses the pull request
 ```
 
-Both workflows run as `swamp` model-method steps labeled `pool: coding`, so
-they execute on a remote worker built from [worker/Dockerfile](worker/Dockerfile) —
-see [docs/remote-worker.md](docs/remote-worker.md) for image contents, required
-runtime credentials, and local Docker Compose setup.
+```
+workflow-github-ticket-actions-poller  (per-repo template, cron)
+  → scripts/github-actions-poller.sh
+      finds open `run-actions` issues, guards against a still-active or
+      orphaned prior run, strips the label
+  → triggers workflow-github-ticket-actions for each match
+
+workflow-github-ticket-actions  (manual or triggered)
+  → scripts/github-actions-worker.sh
+      clones the repo, checks out base_branch directly, runs the steps
+      declared in its .swamp-actions.yml manifest, reports success/failure
+  → posts a status comment on the issue and syncs a run note to the vault
+```
+
+Each workflow's implementation step (`implement-github-issue`, `run-actions`)
+is a `swamp` model-method step labeled `pool: coding`, so it executes on a
+remote worker built from [worker/Dockerfile](worker/Dockerfile) — see
+[docs/remote-worker.md](docs/remote-worker.md) for image contents, required
+runtime credentials, and local Docker Compose setup. The surrounding
+vault-sync and issue-comment steps run unlabeled, on the orchestrator itself.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `workflows/` | swamp workflow definitions (poller + worker) |
-| `scripts/` | shell implementations invoked by the workflows |
-| `models/` | swamp model definitions |
+| `workflows/` | swamp workflow definitions — poller + worker for both the ralphex flow and the run-actions flow |
+| `scripts/` | shell implementations invoked by the workflows — two independent sets, one per flow |
+| `models/` | swamp model definitions — command/shell models backing both flows |
 | `worker/` | Dockerfile and entrypoint for the remote coding worker, plus per-agent ralphex profiles |
-| `docs/` | operational docs (remote worker setup, research notes) |
+| `docs/` | operational docs — remote worker setup, research notes, and [swamp-actions-manifest.md](docs/swamp-actions-manifest.md) (the run-actions `.swamp-actions.yml` schema) |
 | `.github/workflows/` | CI: builds and publishes the worker image on tag push |
 
 ## Getting started

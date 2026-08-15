@@ -1,0 +1,201 @@
+id: a1941150-5e8c-4d53-87c5-97c17b390b0f
+name: github-ticket-actions
+description: >-
+  Runs the manifest-driven .swamp-actions.yml steps (docker build, tests, etc.) for one
+  open GitHub issue labeled run-actions, directly on base_branch. No ralphex, no agent
+  branch. Posts a status comment and syncs a run note to the vault.
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form.
+    issue_number:
+      type: integer
+      description: Open GitHub issue number that triggered this run.
+    base_branch:
+      type: string
+      default: main
+      description: Branch the manifest steps run against.
+  required:
+    - repo
+    - issue_number
+tags: {}
+jobs:
+  - name: main
+    description: Clone the repo and execute the steps declared in its .swamp-actions.yml manifest.
+    steps:
+      - name: run-actions
+        description: >-
+          Runs the isolated manifest-driven actions worker. ignoreExitCode is required
+          here: without it, a failing (or missing-manifest) run makes the model_method
+          call itself fail, and swamp records NO "result"/"log" data output at all on a
+          failed command/shell call (confirmed empirically) — which would silently
+          starve the report job's data.query(...)-guarded comment-issue/write-note steps
+          on every failure path, not just the ones with no VAULT_NOTE_JSON to report.
+          The exitCode still comes back on the recorded result, so the check-actions-exit
+          assert step below reconstructs the allowFailure:false job-failure signal.
+        task:
+          type: model_method
+          modelIdOrName: github_actions_worker_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-actions-worker.sh
+            workingDir: .
+            timeout: 7200000
+            ignoreExitCode: true
+            env:
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              BASE_BRANCH: ${{ inputs.base_branch }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+        labels:
+          pool: coding
+      - name: check-actions-exit
+        description: >-
+          Fails the job (and workflow) when the worker script itself exited non-zero,
+          restoring the allowFailure:false signal that ignoreExitCode above otherwise
+          swallows. Scoped to this run's workflowRunId (like comment-issue/write-note
+          below) so a concurrent run's result can't be read instead. Uses a
+          size(...)>0 short-circuit (CEL && is lazy) so a run-actions that produced
+          NO queryable result record at all (worker killed/crashed/dispatch failure
+          before recording) fails this assert with a clear message instead of an
+          opaque out-of-bounds index error — a missing result record is itself a
+          failure signal, not a pass.
+        task:
+          type: assert
+          expr: >-
+            size(data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 &&
+            data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')[0].attributes.exitCode == 0
+          message: >-
+            ${{ size(data.query('modelName == "github_actions_worker_shell" && name ==
+            "result" && workflowRunId == "' + run.id + '"')) > 0 ?
+            "github-actions-worker.sh exited " + string(data.query('modelName ==
+            "github_actions_worker_shell" && name == "result" && workflowRunId == "'
+            + run.id + '"')[0].attributes.exitCode) :
+            "github-actions-worker.sh produced no result record for this run (worker
+            crashed or was never dispatched)" }}
+          severity: high
+        dependsOn:
+          - step: run-actions
+            condition:
+              type: completed
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+  - name: report
+    description: >-
+      Best-effort status comment and vault sync for the run. Runs whether main succeeded
+      or failed, and never fails the overall workflow run.
+    dependsOn:
+      - job: main
+        condition:
+          type: always
+    weight: 0
+    steps:
+      - name: comment-issue
+        description: Post a status comment on the issue summarizing the run outcome.
+        # ignoreExitCode:true on run-actions means a data record is recorded on
+        # every path once that step completes, so this guard (skip when no
+        # result exists for this run) rarely trips true in practice. Kept
+        # anyway as the defensive fallback for the one path that still skips
+        # run-actions entirely: main's dependsOn: always means report runs
+        # even if run-actions itself never completed (e.g. pool:coding
+        # dispatch failure before the step ran) — this guard is what keeps
+        # comment-issue a no-op instead of an index error in that case.
+        guard: >-
+          ${{ !(size(data.query('modelName == "github_actions_worker_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0) }}
+        task:
+          type: model_method
+          modelIdOrName: github_actions_comment_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-actions-comment.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              NOTE_JSON_RAW: >-
+                ${{ data.query('modelName == "github_actions_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: vault-pull
+        description: Bring the local vault checkout up to date before writing.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: pull
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: write-note
+        description: Render this run's ticket.md and runs/<timestamp>.md into the vault checkout.
+        guard: >-
+          ${{ !(size(data.query('modelName == "github_actions_worker_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0) }}
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/vault-write-actions-note.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              NOTE_JSON_RAW: >-
+                ${{ data.query('modelName == "github_actions_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout }}
+              VAULT_DIR: .vault-clone
+        dependsOn:
+          - step: vault-pull
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: vault-commit
+        description: >-
+          Commit the rendered note(s); guarded off when there was nothing to sync.
+          Scoped to this run's workflowRunId (like comment-issue/write-note above) so a
+          concurrent run of this or the sibling worker workflow can't be read instead.
+        guard: >-
+          ${{ !(size(data.query('modelName == "vault_note_writer_shell" && name ==
+          "result" && workflowRunId == "' + run.id + '"')) > 0 &&
+          data.query('modelName == "vault_note_writer_shell" && name ==
+          "result" && workflowRunId == "' + run.id +
+          '"')[0].attributes.stdout.contains("NOTE_WRITTEN")) }}
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: commit
+          inputs:
+            message: "chore: sync run-actions run notes"
+            addAll: true
+        dependsOn:
+          - step: write-note
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: vault-push
+        description: Push the synced notes to the vault remote.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: push
+          inputs:
+            branch: main
+            setUpstream: true
+        dependsOn:
+          - step: vault-commit
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+version: 1
