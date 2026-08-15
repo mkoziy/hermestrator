@@ -9,14 +9,33 @@
 # a process whose /proc/<pid>/environ contains GH_TOKEN/CODEX_ACCESS_TOKEN/
 # OPENAI_API_KEY/OPENCODE_API_KEY/SWAMP_WORKER_TOKEN. A shell `unset` does
 # NOT clear /proc/<pid>/environ (it only reflects the process's env at its
-# own execve()); any same-UID process, not just children, can read it. The
-# only real fix is a genuine execve() with a scrubbed envp, which is what
-# `exec env -i ...` below does: phase 1 does all credential-needing setup
-# (repo view/clone, issue fetch, manifest parse+validate) and writes what
-# phase 2 needs to disk under $run_root, then re-execs itself (same PID) via
-# `exec` into a fully clean environment for phase 2, which runs the manifest
-# steps and emits the vault note using only on-disk state.
+# own execve()); the only way to scrub THIS process's own environ is a
+# genuine execve() with a scrubbed envp, which is what `exec env -i ...`
+# below does: phase 1 does all credential-needing setup (repo view/clone,
+# issue fetch, manifest parse+validate) and writes what phase 2 needs to disk
+# under $run_root, then re-execs itself (same PID) via `exec` into a fully
+# clean environment for phase 2, which runs the manifest steps and emits the
+# vault note using only on-disk state.
+#
+# IMPORTANT (honest limitation, do not "fix" this again at the script level):
+# this re-exec closes the leak vector for THIS script's own process only. It
+# does NOT close /proc/<pid>/environ readability in general: on Linux that's
+# per-UID, not per-process-tree, so any co-resident same-UID process can read
+# it -- and the `swamp worker` daemon that launched this script as a
+# subprocess holds the same credentials in its OWN environ for the entire
+# lifetime of the coding-worker container, re-exec or no re-exec. No amount
+# of process hygiene inside this one script can close that. See "Security
+# considerations" in docs/swamp-actions-manifest.md for the actual scope of
+# what is and isn't covered, and what closing it fully would require
+# (infra-level: a separate, narrowly-scoped worker pool for run-actions, or
+# OS-level sandboxing of manifest step execution).
 set -Eeuo pipefail
+
+# Captured before any `cd` so the phase-1 -> phase-2 `exec ... bash "$script_path"`
+# re-exec below still works when this script is invoked via a relative path
+# (the workflow invokes it as `scripts/github-actions-worker.sh`, so `$0` stops
+# resolving correctly the moment phase 1 does `cd "$checkout"`).
+script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 fail() {
   cleanup_workspace=false
@@ -61,13 +80,24 @@ cleanup() {
 }
 
 run_steps() {
-  steps_count="$(jq '.steps | length' "$manifest_json")"
+  # Read the manifest into memory exactly once, before any step runs, and
+  # iterate over that in-memory copy for the rest of the loop. $manifest_json
+  # lives at $run_root/manifest.json, a copy made before step 1 runs -- but a
+  # malicious manifest step's `run:` command still executes with filesystem
+  # access and could overwrite that copy; re-reading the file from disk on
+  # each iteration would let an early step rewrite later steps (or forge a
+  # success marker) out from under phase-1's validation (TOCTOU).
+  # manifest_content is never re-read from disk after this point.
+  local manifest_content
+  manifest_content="$(cat "$manifest_json")"
+
+  steps_count="$(jq '.steps | length' <<<"$manifest_content")"
   failed_step=""
   failed_exit_code=""
 
   for ((i = 0; i < steps_count; i++)); do
-    name="$(jq -r ".steps[$i].name" "$manifest_json")"
-    run="$(jq -r ".steps[$i].run" "$manifest_json")"
+    name="$(jq -r ".steps[$i].name" <<<"$manifest_content")"
+    run="$(jq -r ".steps[$i].run" <<<"$manifest_content")"
 
     printf '\n[step: %s] running\n' "$name" | tee -a "$steps_log"
 
@@ -210,13 +240,15 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Everything needed by phase 2 (manifest step execution + vault note
 # emission) is now on disk under $run_root. Re-exec via a genuine execve()
-# (same PID) into a fully scrubbed environment: this is the only way to
-# actually clear /proc/<pid>/environ of GH_TOKEN and friends -- `unset`
-# only updates this shell's variable table, not the environ that execve()
-# already wrote to the kernel/procfs at this process's own startup. Any
-# same-UID process (including a malicious manifest step) could otherwise
-# read this process's original secrets straight out of /proc/<pid>/environ
-# regardless of parent/child relationship.
+# (same PID) into a fully scrubbed environment: this clears *this process's
+# own* /proc/<pid>/environ of GH_TOKEN and friends -- `unset` only updates
+# this shell's variable table, not the environ that execve() already wrote
+# to the kernel/procfs at this process's own startup. This closes the leak
+# for this specific PID, but /proc/<pid>/environ readability is per-UID, not
+# per-process-tree: the `swamp worker` daemon that spawned this script also
+# holds these same secrets in its own environ, for the container's entire
+# life, and this re-exec does nothing about that. See "Security
+# considerations" in docs/swamp-actions-manifest.md.
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
@@ -227,4 +259,4 @@ exec env -i \
   REPO="$REPO" \
   ISSUE_NUMBER="$ISSUE_NUMBER" \
   STARTED_AT="$started_at" \
-  bash "$0"
+  bash "$script_path"

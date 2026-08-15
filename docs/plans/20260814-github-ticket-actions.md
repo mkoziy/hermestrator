@@ -517,3 +517,14 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
   `run-actions` does anything useful there; this is per-repo work outside hermestrator.
 - **Docker availability on runners**: confirm the `pool:coding` worker pool actually has a working
   `docker` CLI/daemon available before relying on `docker build` steps in any real manifest.
+- **Narrow worker pool for `run-actions`**: `github-actions-worker.sh` isolates manifest-step
+  execution from its own process environment (`env -i` re-exec, see "Security considerations" in
+  `docs/swamp-actions-manifest.md`), but the co-resident `swamp worker` daemon holds
+  `GH_TOKEN`/`CODEX_ACCESS_TOKEN`/`OPENAI_API_KEY`/`OPENCODE_API_KEY`/`SWAMP_WORKER_TOKEN` in its
+  own environ for the coding-worker container's entire life, and `/proc/<pid>/environ` readability is per-UID, not
+  per-process-tree — no script-level fix can close that. Fully closing it needs infra: either a
+  separate, narrowly-scoped worker pool/container/OS user for `run-actions` that never receives
+  those credentials, or genuine OS-level sandboxing (user namespace, gVisor, restricted
+  container-in-container) around manifest step execution. Until that exists, only enable
+  `run-actions` polling on repos whose `.swamp-actions.yml` changes go through the same
+  trust/review gate as code merged to the repo.

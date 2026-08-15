@@ -66,6 +66,51 @@ a sufficiently verbose manifest could still hit the ceiling. If that becomes a
 real problem, the fix has to happen at the `command/shell` model level (e.g. an
 input that writes to a file instead of an env var), not in this workflow.
 
+## Security considerations
+
+Manifest steps run `.swamp-actions.yml` content from the **target repo**, which
+`github-actions-worker.sh` treats as untrusted (it may arrive via an external,
+unreviewed PR). The worker takes two, deliberately scoped, precautions:
+
+- Each step's `run:` command executes under `env -i` with an explicit
+  allowlist (`PATH`/`HOME`/`LANG`/`TMPDIR`) — it never inherits
+  `GH_TOKEN`/`CODEX_ACCESS_TOKEN`/`OPENAI_API_KEY`/`OPENCODE_API_KEY`/
+  `SWAMP_WORKER_TOKEN` as a direct child-process environment variable.
+- The worker script itself re-execs (`exec env -i ... bash "$script_path"`)
+  into a scrubbed environment before running any manifest step, so the
+  step-execution process's own `/proc/<pid>/environ` contains no credentials
+  either.
+
+**What this does NOT close:** `/proc/<pid>/environ` readability on Linux is
+per-UID, not per-process-tree. A manifest step (or anything else running as
+the same OS user) does not need to read *this script's* proc entry to get a
+credential — it can read the environ of **any** co-resident same-UID process,
+including the `swamp worker` daemon that launched this script as a
+subprocess. That daemon holds `GH_TOKEN`/`CODEX_ACCESS_TOKEN`/
+`OPENAI_API_KEY`/`OPENCODE_API_KEY`/`SWAMP_WORKER_TOKEN` in its own
+environment for the entire lifetime of the coding-worker container — re-exec'ing this one script cannot
+change that. So this flow provides environment-variable isolation from the
+immediate worker process, **not** full OS-level isolation from the
+container's credential-holding daemon. Scrubbing environment variables also
+does not scrub the filesystem: manifest steps still run with
+`HOME=/home/worker`, a real, persistent, volume-mounted directory that may
+hold cached `gh`/git credential material readable by anything with access to
+that path.
+
+**Practical guidance:** only enable `run-actions` polling (the `run-actions`
+label) on repos whose `.swamp-actions.yml` changes go through the same
+trust/review gate as code merged to that repo — i.e. don't point this flow at
+a repo that accepts manifest changes via unreviewed external PRs. Fully
+closing this gap requires an infrastructure change this task cannot make by
+itself: either a separate, narrowly-scoped worker pool/container/OS user for
+the `run-actions` flow that never receives these credentials in its
+environment at all (this flow only needs to read a few issue fields and post
+one comment, unlike the ralphex flow which needs full agent credentials), or
+genuine OS-level sandboxing (user namespace, gVisor, restricted
+container-in-container) around manifest step execution. Both are
+Post-Completion / future-infra items, not something addressable inside
+`github-actions-worker.sh`.
+
 ## Explicitly out of scope for v1
 
 The following fields are **not** supported and will not be read by v1:
