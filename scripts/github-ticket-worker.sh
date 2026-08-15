@@ -10,6 +10,7 @@ set -Eeuo pipefail
 : "${PROGRESS_PUSH_INTERVAL_SECONDS:=300}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
 : "${RUN_ARTIFACTS_DIR:=${HOME}/.swamp-worker/run-artifacts}"
+: "${RUN_ARTIFACTS_RETENTION_DAYS:=14}"
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
@@ -58,9 +59,16 @@ push_progress() {
 sync_progress_artifact() {
   [[ "$ralphex_started" == true ]] || return 0
   local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
-  local progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
+  local progress_file
+  progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
   mkdir -p "$artifact_dir"
   [[ -f "$progress_file" ]] && cp "$progress_file" "$artifact_dir/progress.log"
+  # Retention: this dir lives on the shared swamp_worker_cache volume and is
+  # never otherwise cleaned up, so on a long-lived poller-driven deployment
+  # it grows unbounded. Prune run-artifact subdirectories past their retention
+  # window each time we sync; best-effort only, never fail the run over it.
+  find "$RUN_ARTIFACTS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime "+${RUN_ARTIFACTS_RETENTION_DAYS}" \
+    -exec rm -rf {} + 2>/dev/null || true
 }
 
 cleanup() {

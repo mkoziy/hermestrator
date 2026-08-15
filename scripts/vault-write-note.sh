@@ -75,6 +75,7 @@ jq -r --arg ticket_link "[[../ticket]]" '
 # so there is no incremental state to get out of sync.
 pr_urls="$(grep -h '^pr_url:' "$dir"/runs/*.md 2>/dev/null \
   | sed -E 's/^pr_url: *"?//; s/"?$//' | grep -v '^$' | sort -u || true)"
+# shellcheck disable=SC2012,SC2035
 run_links="$(cd "$dir/runs" && ls -1 *.md 2>/dev/null | sort | sed -E 's/\.md$//' | sed 's/^/- [[runs\//; s/$/]]/')"
 
 jq -r --arg pr_urls_block "$( [[ -n "$pr_urls" ]] && printf '%s\n' "$pr_urls" | sed 's/^/  - /' || true )" \

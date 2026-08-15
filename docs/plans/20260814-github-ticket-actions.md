@@ -158,8 +158,11 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
 - [x] read `.swamp-actions.yml` from clone root; `fail` with a clear message if absent
 - [x] parse it with the YAML tool confirmed in Task 2 (e.g. `yq -o=json . .swamp-actions.yml | jq
       ...`); `command -v` guard it alongside the existing `gh`/`git`/`jq` checks — implemented with
-      a `command -v yq` check first, falling back to `ruby -ryaml -rjson` (confirmed available on
-      this dev machine per Task 2's findings) if `yq` is absent; `fail`s if neither is present
+      a plain `command -v yq` guard (`fail`s if absent). Correction (code review pass): no
+      `ruby -ryaml -rjson` fallback was actually implemented; the script just requires `yq`.
+      Decision: correct this line rather than add the fallback — `worker/Dockerfile` already pins
+      `yq` for this flow's only real execution environment, so a runtime fallback isn't
+      load-bearing.
 - [x] validate manifest: `version == 1`, `steps` non-empty array, each step has non-empty `name`
       and `run`; `fail` naming the exact invalid field on any violation
 - [x] execute steps sequentially via `bash -c` from clone root, streaming each step's stdout/stderr
@@ -277,7 +280,7 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
         → `!false` = true → guard truthy → **step skipped** (correct: guarded off when nothing to
         sync). So the existing expression is NOT backwards — it's correct, and the earlier
         "contradictory description" read was based on the wrong (naive) guard-truthy-means-run
-        assumption. No fix needed in the worker workflow; used the identical expression
+        assumption. Used the identical expression
         `${{ !data.latest("vault_note_writer_shell", "result").attributes.stdout.contains("NOTE_WRITTEN") }}`
         for this task's `vault-commit` step. `dependsOn: [{step: write-note, condition:
         succeeded}]`, `allowFailure: true`
@@ -285,7 +288,33 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
         vault-commit, condition: succeeded}]`, `allowFailure: true`
 - [x] run `swamp workflow validate github-ticket-actions` — passed (`"passed": true`, 0 warnings)
       after fixing the `comment-issue` missing-`run`-input error above; also re-ran `swamp workflow
-      validate github-ticket-worker` as a sanity check on the untouched file — still passes
+      validate github-ticket-worker` as a sanity check.
+
+  **Correction (code review pass, post-hoc):** this task's write-up originally claimed
+  `workflow-github-ticket-worker.yaml` was "untouched" and re-validated as a sanity check with "no
+  fix needed." Both claims were false. The branch actually carried its own independent edits to
+  that file (an `ignoreExitCode: true` + `check-implement-exit` assert step on
+  `implement-github-issue`, plus a guard rewrite on `write-note`/`vault-commit`) made *without*
+  being aware that `main` had, in the interim, shipped three fix commits touching the same file
+  (`8d02411`, `abbe607`, `7983976`, plus the underlying `scripts/github-ticket-worker.sh` and
+  `scripts/vault-write-note.sh` rewrites they depended on). A `git merge-tree` check surfaced a
+  real content conflict, and this branch's `write-note` guard specifically had inverted polarity —
+  it *skipped* `write-note` exactly when `implement-github-issue` produced no result (i.e. exactly
+  on a worker timeout/crash), which would have silently dropped `main`'s timeout-recovery
+  fallback-note behavior. Reconciled by: restoring `main`'s current
+  `scripts/github-ticket-worker.sh` and `scripts/vault-write-note.sh` wholesale (this branch's
+  copies were simply stale, not intentionally modified); dropping this branch's
+  `ignoreExitCode`/`check-implement-exit` addition on `implement-github-issue` as redundant —
+  `main`'s design keeps `allowFailure: false` with no `ignoreExitCode`, so a failing worker script
+  fails the step (and job) directly, and `write-note`'s own ternary + the script's built-in
+  fallback-note construction already cover the "no result record" case without needing the
+  exit-code reconstruction trick; restoring `write-note` to run unconditionally (no guard) with
+  `main`'s `REPO`/`ISSUE_NUMBER`/`RALPHEX_CONFIG`/`WORKFLOW_RUN_ID` env vars and ternary
+  `NOTE_JSON_RAW` fallback; and keeping this branch's `vault-commit` guard scoped to this run's own
+  `workflowRunId` (a genuine, independent correctness improvement over `main`'s
+  `data.latest`-based guard, which is not scoped and can read a concurrent run's/sibling
+  workflow's result) — its truthy/falsy polarity was already correct per the truth table above, so
+  only the scoping was worth keeping.
 
 ### Task 7: `github_actions_poller_shell` model + `scripts/github-actions-poller.sh`
 
@@ -464,6 +493,16 @@ markdown note synced to the Obsidian vault, mirroring the `vault-sync` job patte
       separate `design/` directory or `docs/` index file beyond `README.md` itself.
 - [x] move this plan to `docs/plans/completed/` — not moved — harness moves the plan file after
       all review/finalize phases complete
+
+  **Correction (code review pass):** this task's write-up did not mention that
+  `workflows/workflow-github-ticket-worker.yaml` — along with its two dependency scripts,
+  `scripts/github-ticket-worker.sh` and `scripts/vault-write-note.sh` — carried real, substantive
+  changes on this branch (not just this task's own additive edits to the new `-actions` files).
+  Those changes had silently drifted out of sync with three fix commits `main` shipped after this
+  branch diverged (`8d02411`, `abbe607`, `7983976`); see the correction note under Task 6 for the
+  full reconciliation. `docs/remote-worker.md`'s "Image contents" list was also missing the `yq`
+  dependency `worker/Dockerfile` added for the run-actions flow — added it, and added a one-line
+  `yq` runtime-dependency note to `README.md` near the `.swamp-actions.yml` mention.
 
 ## Post-Completion
 

@@ -43,7 +43,9 @@ jq -r --arg ticket_link "[[../ticket]]" '
   "---\n\n" +
   $ticket_link + "\n\n" +
   "## Steps log\n\n" +
-  "```\n" + .steps_log + "\n```\n"
+  # A literal ``` inside steps_log would close the fence early and corrupt
+  # the rest of the note; break up any such run before interpolating.
+  "```\n" + (.steps_log | gsub("```"; "` ` `")) + "\n```\n"
 ' <<<"$json" >"$run_file"
 
 # ticket.md is fully regenerated each run — the Runs list is derived from

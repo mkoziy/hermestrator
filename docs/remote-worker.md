@@ -9,7 +9,7 @@ mutable checkout for each run.
 ## Image contents
 
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
-CLI, and Pi coding agent; includes git, GitHub CLI, jq, SSH client, and
+CLI, and Pi coding agent; includes git, GitHub CLI, jq, yq, SSH client, and
 ralphex profiles under `/home/worker/.config`:
 
 - `ralphex-codex`: native Codex executor (the workflow default);
@@ -41,6 +41,16 @@ the worker identity bound to its enrollment token), `/home/worker/.codex`, and
 they are not required for API-key authentication. Do not mount a personal Codex
 or Pi auth directory by default, because its stored auth can override runtime
 environment credentials.
+
+The orchestrator container also mounts `/home/worker/.swamp-worker` from the
+same `swamp_worker_cache` volume, read-only. The vault-sync steps (`write-note`
+etc.) run unlabeled, i.e. on the orchestrator, not on the `pool: coding` worker,
+but `scripts/github-ticket-worker.sh` writes its progress-log artifact under
+`$RUN_ARTIFACTS_DIR` (`$HOME/.swamp-worker/run-artifacts`) from inside the
+coding-worker container. Without the shared mount the two containers each see
+their own private `/home/worker/.swamp-worker`, and the timeout-fallback vault
+note in `vault-write-note.sh` silently loses the progress log it's supposed to
+preserve.
 
 ## Fully unattended Codex authentication
 

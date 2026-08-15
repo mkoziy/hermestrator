@@ -10,7 +10,8 @@ Two independent flows share this repo's `scripts/`, `workflows/`, and `models/`:
   run the steps declared in its own `.swamp-actions.yml` manifest directly on
   `base_branch` (no agent, no branch, no PR) — see
   [docs/swamp-actions-manifest.md](docs/swamp-actions-manifest.md) for the
-  manifest schema.
+  manifest schema. Requires `yq` at runtime to parse the manifest (already
+  pinned in [worker/Dockerfile](worker/Dockerfile)).
 
 ## How it works
 
@@ -41,10 +42,12 @@ workflow-github-ticket-actions  (manual or triggered)
   → posts a status comment on the issue and syncs a run note to the vault
 ```
 
-All workflows run as `swamp` model-method steps labeled `pool: coding`, so
-they execute on a remote worker built from [worker/Dockerfile](worker/Dockerfile) —
-see [docs/remote-worker.md](docs/remote-worker.md) for image contents, required
-runtime credentials, and local Docker Compose setup.
+Each workflow's implementation step (`implement-github-issue`, `run-actions`)
+is a `swamp` model-method step labeled `pool: coding`, so it executes on a
+remote worker built from [worker/Dockerfile](worker/Dockerfile) — see
+[docs/remote-worker.md](docs/remote-worker.md) for image contents, required
+runtime credentials, and local Docker Compose setup. The surrounding
+vault-sync and issue-comment steps run unlabeled, on the orchestrator itself.
 
 ## Repository layout
 

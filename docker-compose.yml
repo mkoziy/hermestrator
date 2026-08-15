@@ -9,6 +9,13 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - .:/workspace
+      # Read-only access to the coding-worker's run-artifacts cache: vault-sync
+      # steps (write-note) run here, not on coding-worker, but need to read the
+      # progress-log artifact that scripts/github-ticket-worker.sh writes there
+      # under $RUN_ARTIFACTS_DIR during a coding-worker run. Without this mount
+      # the two containers resolve the same $HOME-relative path to two separate
+      # filesystems and the timeout-fallback progress log is never found.
+      - swamp_worker_cache:/home/worker/.swamp-worker:ro
 
   coding-worker:
     build:

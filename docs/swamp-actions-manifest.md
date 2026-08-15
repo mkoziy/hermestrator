@@ -39,6 +39,16 @@ steps:
     run: docker run --rm my-app npm test
 ```
 
+## Failure visibility
+
+If `.swamp-actions.yml` is missing (or any other pre-clone validation in
+`github-actions-worker.sh` fails before it runs), the worker exits via its
+`fail()` helper without ever emitting a `VAULT_NOTE_JSON:` marker line. The
+report job's `comment-issue` and `write-note` steps both key off that marker,
+so a missing manifest produces **no issue comment and no vault note** — only
+the workflow run's own log shows the `.swamp-actions.yml is missing at the
+repository root` error. Confirmed during Task 10's dry run.
+
 ## Explicitly out of scope for v1
 
 The following fields are **not** supported and will not be read by v1:
