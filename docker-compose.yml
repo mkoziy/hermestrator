@@ -9,6 +9,7 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - .:/workspace
+      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
 
   coding-worker:
     build:
@@ -28,6 +29,7 @@ services:
     volumes:
       - .:/workspace:ro
       - swamp_worker_cache:/home/worker/.swamp-worker
+      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
       - codex_home:/home/worker/.codex
       - pi_agent_home:/home/worker/.pi/agent
     stop_grace_period: 5m
@@ -35,5 +37,6 @@ services:
 
 volumes:
   swamp_worker_cache:
+  swamp_worker_artifacts:
   codex_home:
   pi_agent_home:

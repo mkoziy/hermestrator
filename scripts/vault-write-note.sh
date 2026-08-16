@@ -11,7 +11,7 @@ set -Eeuo pipefail
 : "${RALPHEX_CONFIG:?RALPHEX_CONFIG is required}"
 : "${NOTE_JSON_RAW:=}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
-: "${RUN_ARTIFACTS_DIR:=${HOME}/.swamp-worker/run-artifacts}"
+: "${RUN_ARTIFACTS_DIR:=/var/lib/swamp-worker-artifacts}"
 : "${VAULT_DIR:=.vault-clone}"
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || {
@@ -22,28 +22,71 @@ set -Eeuo pipefail
   printf 'ERROR: ISSUE_NUMBER must be a positive integer\n' >&2
   exit 1
 }
+[[ "$WORKFLOW_RUN_ID" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || {
+  printf 'ERROR: WORKFLOW_RUN_ID contains unsupported characters\n' >&2
+  exit 1
+}
+[[ "$RUN_ARTIFACTS_DIR" == /* ]] || {
+  printf 'ERROR: RUN_ARTIFACTS_DIR must be an absolute path\n' >&2
+  exit 1
+}
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 
+read_worker_artifacts() {
+  local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
+  local file
+  local wrote=false
+  for file in progress.log ralphex.stdout.log ralphex.stderr.log; do
+    [[ -f "$artifact_dir/$file" ]] || continue
+    if [[ "$wrote" == true ]]; then
+      printf '\n'
+    fi
+    printf '%s\n' "--- $file ---"
+    cat "$artifact_dir/$file"
+    wrote=true
+  done
+  [[ "$wrote" == true ]]
+}
+
+artifact_log_file=""
+cleanup() {
+  [[ -z "$artifact_log_file" ]] || rm -f -- "$artifact_log_file"
+}
+trap cleanup EXIT
+
+capture_worker_artifacts() {
+  artifact_log_file="$(mktemp "${TMPDIR:-/tmp}/vault-write-note-progress.XXXXXX")"
+  if ! read_worker_artifacts >"$artifact_log_file"; then
+    rm -f -- "$artifact_log_file"
+    artifact_log_file=""
+    return 1
+  fi
+}
+
 note_line="$(printf '%s\n' "$NOTE_JSON_RAW" | grep -m1 '^VAULT_NOTE_JSON:' || true)"
 if [[ -z "$note_line" ]]; then
+  if ! capture_worker_artifacts; then
+    artifact_log_file="$(mktemp "${TMPDIR:-/tmp}/vault-write-note-progress.XXXXXX")"
+    printf 'Worker output was not preserved and no progress artifact was available.' >"$artifact_log_file"
+  fi
   issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json number,title,body,state,labels,url,comments)"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  progress_file="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}/progress.log"
-  progress_log="$( [[ -f "$progress_file" ]] && cat "$progress_file" || printf 'Worker output was not preserved and no progress artifact was available.' )"
   json="$(jq -nc \
     --arg repo "$REPO" \
     --argjson issue_number "$ISSUE_NUMBER" \
     --argjson issue "$issue_json" \
     --arg ralphex_config "$RALPHEX_CONFIG" \
     --arg completed_at "$now" \
-    --arg progress_log "$progress_log" \
-    '{repo:$repo, issue_number:$issue_number, issue:$issue, pr_url:"", ralphex_config:$ralphex_config, status:"failed", started_at:$completed_at, completed_at:$completed_at, branch:("agent/issue-" + ($issue_number|tostring)), progress_log:$progress_log}' \
+    '{repo:$repo, issue_number:$issue_number, issue:$issue, pr_url:"", ralphex_config:$ralphex_config, status:"failed", started_at:$completed_at, completed_at:$completed_at, branch:("agent/issue-" + ($issue_number|tostring))}' \
   )"
   printf 'No worker note was preserved; writing fallback failed-run note.\n'
 else
   json="${note_line#VAULT_NOTE_JSON:}"
+  if [[ "$(jq -r '.status' <<<"$json")" == "failed" ]]; then
+    capture_worker_artifacts || true
+  fi
 fi
 
 repo="$(jq -r '.repo' <<<"$json")"
@@ -66,9 +109,15 @@ jq -r --arg ticket_link "[[../ticket]]" '
   "branch: " + (.branch|@json) + "\n" +
   "---\n\n" +
   $ticket_link + "\n\n" +
-  "## Progress log\n\n" +
-  "```\n" + .progress_log + "\n```\n"
+  "## Progress log\n\n```\n"
 ' <<<"$json" >"$run_file"
+
+if [[ -n "$artifact_log_file" ]]; then
+  cat "$artifact_log_file" >>"$run_file"
+else
+  jq -r '.progress_log // empty' <<<"$json" >>"$run_file"
+fi
+printf '\n```\n' >>"$run_file"
 
 # ticket.md is fully regenerated each run — pr_urls and the Runs list are
 # derived from runs/*.md on disk rather than parsed out of the old ticket.md,

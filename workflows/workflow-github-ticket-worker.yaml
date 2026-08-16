@@ -53,6 +53,7 @@ jobs:
               REQUIRE_AGENT_READY: ${{ string(inputs.require_agent_ready) }}
               WORKFLOW_RUN_ID: ${{ run.id }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
         dependsOn: []
         weight: 0
         allowFailure: false
@@ -103,6 +104,7 @@ jobs:
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
               WORKFLOW_RUN_ID: ${{ run.id }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
               VAULT_DIR: .swamp/vault-clone
         dependsOn:
           - step: vault-pull
@@ -136,6 +138,25 @@ jobs:
             setUpstream: true
         dependsOn:
           - step: vault-commit
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: cleanup-artifacts
+        description: Remove this run's artifacts only after its vault note has been pushed.
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/cleanup-run-artifacts.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              WORKFLOW_RUN_ID: ${{ run.id }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+        dependsOn:
+          - step: vault-push
             condition:
               type: succeeded
         weight: 0

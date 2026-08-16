@@ -42,6 +42,17 @@ they are not required for API-key authentication. Do not mount a personal Codex
 or Pi auth directory by default, because its stored auth can override runtime
 environment credentials.
 
+The GitHub ticket worker also requires a writable artifact volume mounted at
+`/var/lib/swamp-worker-artifacts` in both the coding worker and the
+orchestrator. It preserves ralphex stdout, stderr, and progress across a hard
+worker timeout so the orchestrator-side vault-sync job can record them. The
+included Compose deployment provisions this named volume; non-Compose
+deployments must provide an equivalent shared writable mount at the same path.
+The coding-worker entrypoint initializes the mount and assigns it to the
+unprivileged `worker` user before starting the worker process. A run's
+artifacts are removed only after its vault note is successfully pushed; if
+vault synchronization fails, they are retained for diagnosis and retry.
+
 ## Fully unattended Codex authentication
 
 The image does not require a human to log in. Inject `CODEX_ACCESS_TOKEN` at

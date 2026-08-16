@@ -9,7 +9,9 @@ set -Eeuo pipefail
 : "${RALPHEX_CONFIG:=ralphex-codex}"
 : "${PROGRESS_PUSH_INTERVAL_SECONDS:=300}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
-: "${RUN_ARTIFACTS_DIR:=${HOME}/.swamp-worker/run-artifacts}"
+# The workflow supplies a named volume mounted at this path in both the coding
+# worker and orchestrator. It must not live in the read-only /workspace mount.
+: "${RUN_ARTIFACTS_DIR:=/var/lib/swamp-worker-artifacts}"
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
@@ -57,9 +59,7 @@ push_progress() {
 
 sync_progress_artifact() {
   [[ "$ralphex_started" == true ]] || return 0
-  local artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
   local progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
-  mkdir -p "$artifact_dir"
   # ralphex creates this file only after it has made progress. Its absence is
   # normal at startup, and this diagnostic copy must never abort the worker.
   if [[ -f "$progress_file" ]]; then
@@ -110,6 +110,9 @@ case "$RALPHEX_CONFIG" in
 esac
 [[ "$PROGRESS_PUSH_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
   fail "PROGRESS_PUSH_INTERVAL_SECONDS must be a positive integer"
+[[ "$WORKFLOW_RUN_ID" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || \
+  fail "workflow_run_id contains unsupported characters"
+[[ "$RUN_ARTIFACTS_DIR" == /* ]] || fail "run_artifacts_dir must be an absolute path"
 
 command -v gh >/dev/null || fail "gh is required"
 command -v git >/dev/null || fail "git is required"
@@ -123,8 +126,11 @@ readonly ralphex_config_dir="${HOME}/.config/${RALPHEX_CONFIG}"
 run_root="$(mktemp -d "${TMPDIR:-/tmp}/github-ticket-worker.XXXXXX")"
 readonly checkout="${run_root}/repo"
 readonly issue_json="${run_root}/issue.json"
+mkdir -p "$RUN_ARTIFACTS_DIR"
+readonly artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
+mkdir -p "$artifact_dir"
 # A failed implementation run is diagnostically useful; preserve its checkout
-# while Swamp retains the command's streaming log and original exit status.
+# and the run artifacts while retaining the original exit status.
 trap 'cleanup_workspace=false' ERR
 
 printf 'Validating repository %s\n' "$REPO"
@@ -167,7 +173,9 @@ ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sync_progress_artifact
 ralphex --config-dir "$ralphex_config_dir" "$plan_file" \
-  --base-ref "$BASE_BRANCH" --branch "$branch" &
+  --base-ref "$BASE_BRANCH" --branch "$branch" \
+  >"$artifact_dir/ralphex.stdout.log" \
+  2>"$artifact_dir/ralphex.stderr.log" &
 ralphex_pid=$!
 elapsed_seconds=0
 while kill -0 "$ralphex_pid" 2>/dev/null; do
