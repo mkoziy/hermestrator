@@ -9,7 +9,8 @@ mutable checkout for each run.
 ## Image contents
 
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
-CLI, and Pi coding agent; includes git, GitHub CLI, jq, SSH client, and
+CLI, Pi coding agent, and go-gremlins; includes git, GitHub CLI, jq, SSH client,
+and the `gremlins` mutation-testing command on `PATH` for both agents, plus
 ralphex profiles under `/home/worker/.config`:
 
 - `ralphex-codex`: native Codex executor (the workflow default);

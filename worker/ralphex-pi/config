@@ -2,6 +2,6 @@
 # Claude stream-json protocol required by ralphex.
 claude_command = /home/worker/.config/ralphex-pi/scripts/pi-opencode-go.sh
 claude_args =
-task_model = deepseek-v4-pro
+task_model = deepseek-v4-flash
 review_model = qwen3.7-plus
 external_review_tool = none

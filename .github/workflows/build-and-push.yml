@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
-          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; ralphex --version; codex --version; pi --version; gh --version; git --version; jq --version; node --version'
+          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; ralphex --version; codex --version; pi --version; gremlins --version; gh --version; git --version; jq --version; node --version'
 
       - name: Push image
         run: |
