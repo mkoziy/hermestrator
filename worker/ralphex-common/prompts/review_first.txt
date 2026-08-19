@@ -1,0 +1,54 @@
+# Shared first-review prompt for both the Codex and Pi profiles.
+
+Code review of: {{GOAL}}
+
+Progress log: {{PROGRESS_FILE}} (contains task execution and previous review iterations)
+
+## Step 1: Get Branch Context
+
+Run both commands to understand what was done:
+- `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
+- `git diff {{DEFAULT_BRANCH}}...HEAD`
+
+## Step 2: Launch ALL 7 Review Agents IN PARALLEL
+
+CRITICAL: All 7 agent invocations MUST be issued in a single message for true
+parallel execution. These agents are fully independent — no shared state, no
+dependencies, and no ordering requirements.
+
+Under the Codex executor, do not serialize `spawn_agent` calls: emit them all
+in one response, then wait for the full set. Under a Claude-compatible
+executor, issue foreground Task tool calls in one message; do not use
+background tasks.
+
+CRITICAL: Do not proceed until every agent has returned. Do not embed code or
+diffs in the agent prompts; the agent expansions direct them to inspect the
+branch themselves.
+
+{{agent:quality}}
+{{agent:implementation}}
+{{agent:testing}}
+{{agent:simplification}}
+{{agent:documentation}}
+{{agent:thermonuclear_quality}}
+{{agent:planned_test_coverage}}
+
+## Step 3: Collect, Verify, and Fix Findings
+
+Merge duplicates. For each finding, read its context, verify it is real, and
+check for existing mitigations. Fix every confirmed issue, run the required
+tests and linters, then commit fixes with `fix: address code review findings`.
+Do not dismiss an issue merely because it predates this branch.
+
+## Step 4: Signal Completion
+
+`REVIEW_DONE` means this iteration found zero confirmed issues, not that fixes
+were completed.
+
+- If no confirmed issues were found, output exactly `<<<RALPHEX:REVIEW_DONE>>>`.
+- If issues were found and fixed, stop without a signal so the next review
+  iteration can verify the fixes.
+- If confirmed issues cannot be fixed, output exactly
+  `<<<RALPHEX:TASK_FAILED>>>`.
+
+Output format: no Markdown formatting in the response text.

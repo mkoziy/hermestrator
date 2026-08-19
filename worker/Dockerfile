@@ -57,6 +57,10 @@ RUN useradd --create-home --shell /bin/bash worker \
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
 COPY --chown=worker:worker worker/ralphex-codex/ /home/worker/.config/ralphex-codex/
 COPY --chown=worker:worker worker/ralphex-pi/ /home/worker/.config/ralphex-pi/
+COPY --chown=worker:worker worker/ralphex-common/agents/ /home/worker/.config/ralphex-codex/agents/
+COPY --chown=worker:worker worker/ralphex-common/prompts/ /home/worker/.config/ralphex-codex/prompts/
+COPY --chown=worker:worker worker/ralphex-common/agents/ /home/worker/.config/ralphex-pi/agents/
+COPY --chown=worker:worker worker/ralphex-common/prompts/ /home/worker/.config/ralphex-pi/prompts/
 COPY --chown=worker:worker . /workspace
 
 RUN curl --fail --location --silent --show-error \

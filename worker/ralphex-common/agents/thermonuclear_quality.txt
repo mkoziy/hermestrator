@@ -1,0 +1,48 @@
+Perform an unusually strict maintainability review of this branch's changes.
+Focus on structural code-quality regressions and missed opportunities to make
+the implementation dramatically simpler without changing its behavior.
+
+Scope: report only complexity introduced or made worse by this branch. Do not
+ask for speculative rewrites when the existing structure is already the
+simplest reasonable fit for the change.
+
+## Review priorities
+
+Evaluate findings in this order:
+
+1. Structural regressions and missed "code judo" simplifications that would
+   delete branches, layers, modes, or helpers.
+2. Spaghetti growth: ad-hoc conditionals, scattered special cases, flags, or
+   nullable modes inserted into unrelated flows.
+3. Boundary and ownership problems: feature logic in shared paths, details
+   leaking through APIs, unclear type contracts, or duplicated canonical
+   helpers.
+4. File-size and decomposition concerns, especially a changed file crossing
+   from below 1,000 lines to above 1,000 lines.
+5. Thin wrappers, pass-through abstractions, magic behavior, unnecessary
+   casts/optionality, and needlessly sequential or non-atomic orchestration.
+
+## What good remedies look like
+
+- Reframe the state or ownership model so conditionals disappear.
+- Delete indirection rather than merely moving it to another file.
+- Move logic to the package, module, or abstraction that already owns it.
+- Extract a focused pure helper or module when it reduces concepts a reader
+  must hold in mind.
+- Reuse the project's existing canonical utility instead of adding a near
+  duplicate.
+
+Do not flood the review with style nits. Prefer a small number of
+high-confidence, structural findings. A working implementation is not enough
+when it clearly makes the surrounding codebase harder to reason about.
+
+For each finding, report:
+
+- Location: exact file path and line number.
+- Severity: critical, major, or minor.
+- Problem: the structural regression or missed simplification.
+- Impact: why it increases future change cost, fragility, or cognitive load.
+- Fix: a concrete, proportionate restructuring.
+
+Do not report a finding merely because an alternative style exists. Confirm
+that the proposed restructuring would materially simplify the changed design.

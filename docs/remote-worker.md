@@ -11,10 +11,24 @@ mutable checkout for each run.
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
 CLI, Pi coding agent, and go-gremlins; includes git, GitHub CLI, jq, SSH client,
 and the `gremlins` mutation-testing command on `PATH` for both agents, plus
-ralphex profiles under `/home/worker/.config`:
+ralphex configuration under `/home/worker/.config`:
 
-- `ralphex-codex`: native Codex executor (the workflow default);
-- `ralphex-pi`: Pi through the official ralphex `pi-as-claude.sh` adapter.
+- `ralphex-codex/config`: native Codex executor and its model choices (the
+  workflow default);
+- `ralphex-pi/config`: Pi through the official ralphex `pi-as-claude.sh`
+  adapter and its model choices;
+- `ralphex-common/agents` and `ralphex-common/prompts`: the single source for
+  shared reviewer-agent definitions and phase prompts. The image build copies
+  them into both profiles, so a reviewer or prompt change applies consistently
+  to Codex and Pi.
+
+ralphex searches the selected config directory for those two directories before
+falling back to its embedded defaults. Add or override `*.txt` files in
+`worker/ralphex-common/agents/` and `worker/ralphex-common/prompts/`; do not put
+provider- or model-specific settings there. A reviewer is only run when its
+name is invoked by a review prompt, so adding a reviewer also requires a shared
+`review_first.txt` or `review_second.txt` override containing
+`{{agent:<reviewer-name>}}`.
 
 The canonical Pi adapter is downloaded from the pinned ralphex release and
 verified with its SHA-256 during the image build. The small `pi-opencode-go.sh`

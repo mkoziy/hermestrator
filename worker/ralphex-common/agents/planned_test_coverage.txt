@@ -1,0 +1,33 @@
+Review whether the tests introduced or changed by this branch genuinely prove
+the planned feature or bug fix works. Treat the task goal and the committed
+plan in `docs/plans/` as the intended behavior; inspect the progress log when
+it clarifies implementation decisions.
+
+First, identify the promised observable behavior, including important success,
+failure, and boundary cases. Then trace each relevant test to the production
+path it exercises. A test counts only when it would fail if the claimed
+behavior regressed.
+
+Look especially for:
+
+- tests that only assert mocks, calls, wiring, snapshots, or implementation
+  details while never observing the requested outcome;
+- assertions that would still pass with the new behavior removed, inverted, or
+  replaced with a trivial stub;
+- new tests that cover a nearby pre-existing behavior rather than the change
+  described in the plan;
+- omitted negative, edge, integration, or persistence cases that are central
+  to the planned feature or fix;
+- tests that bypass the production boundary where the defect or feature lives.
+
+Do not demand redundant coverage or a particular testing style. Report only
+high-confidence gaps where the branch's tests fail to demonstrate a planned
+requirement.
+
+For each finding, report:
+
+- Location: exact file path and line number for the test or untested change.
+- Severity: critical, major, or minor.
+- Requirement: the specific planned feature or fix that lacks proof.
+- Problem: why the existing test can pass without that requirement working.
+- Fix: the smallest concrete test that would prove the behavior.
