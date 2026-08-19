@@ -64,8 +64,21 @@ capture_worker_artifacts() {
   fi
 }
 
+read_worker_note() {
+  local note_file="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}/note.json"
+  [[ -f "$note_file" ]] || return 1
+  jq -e 'type == "object" and (.repo | type == "string") and
+    (.issue_number | type == "number") and (.status | type == "string")' \
+    "$note_file" >/dev/null || return 1
+  cat "$note_file"
+}
+
 note_line="$(printf '%s\n' "$NOTE_JSON_RAW" | grep -m1 '^VAULT_NOTE_JSON:' || true)"
-if [[ -z "$note_line" ]]; then
+if artifact_json="$(read_worker_note 2>/dev/null)"; then
+  # Prefer the payload written by the worker itself. Unlike model stdout it
+  # survives dispatch cleanup and contains the PR URL created late in a run.
+  json="$artifact_json"
+elif [[ -z "$note_line" ]]; then
   if ! capture_worker_artifacts; then
     artifact_log_file="$(mktemp "${TMPDIR:-/tmp}/vault-write-note-progress.XXXXXX")"
     printf 'Worker output was not preserved and no progress artifact was available.' >"$artifact_log_file"

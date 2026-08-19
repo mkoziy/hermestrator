@@ -66,3 +66,25 @@ rg -F -- '--- ralphex.stdout.log ---' "$failed_note" >/dev/null
 rg -F -- 'ralphex stdout line 99999' "$failed_note" >/dev/null
 rg -F -- '--- ralphex.stderr.log ---' "$failed_note" >/dev/null
 rg -F -- 'ralphex stderr' "$failed_note" >/dev/null
+
+# A completed worker persists a structured outcome alongside its logs. The
+# vault writer must prefer it over missing model stdout so successful PR runs
+# are not recorded as empty fallback failures.
+cat >"$test_root/artifacts/run-123/note.json" <<'JSON'
+{"repo":"owner/repo","issue_number":7,"issue":{"title":"Test issue","body":"body","state":"OPEN","labels":[],"url":"https://example.test/issues/7","comments":[]},"pr_url":"https://example.test/pull/9","ralphex_config":"ralphex-codex","status":"success","started_at":"2026-08-16T13:34:56Z","completed_at":"2026-08-16T13:35:57Z","branch":"agent/issue-7","progress_log":"implemented all tasks"}
+JSON
+
+REPO="owner/repo" \
+ISSUE_NUMBER=7 \
+RALPHEX_CONFIG=ralphex-codex \
+WORKFLOW_RUN_ID=run-123 \
+RUN_ARTIFACTS_DIR="$test_root/artifacts" \
+VAULT_DIR="$test_root/vault" \
+NOTE_JSON_RAW='' \
+"$repo_root/scripts/vault-write-note.sh" >/dev/null
+
+success_note="$test_root/vault/owner/repo/issue-7/runs/20260816133456.md"
+[[ -f "$success_note" ]]
+rg -F -- 'status: "success"' "$success_note" >/dev/null
+rg -F -- 'pr_url: "https://example.test/pull/9"' "$success_note" >/dev/null
+rg -F -- 'implemented all tasks' "$success_note" >/dev/null

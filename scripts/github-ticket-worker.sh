@@ -29,6 +29,9 @@ emit_vault_note() {
     progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
     [[ -f "$progress_file" ]] || progress_file=""
   fi
+  # Swamp may not retain a terminated worker's stdout long enough for the
+  # follow-up vault job to query it. Keep the same payload in the shared
+  # artifact volume, which also makes a successful PR link available there.
   jq -nc \
     --arg repo "$REPO" \
     --argjson issue_number "$ISSUE_NUMBER" \
@@ -41,7 +44,10 @@ emit_vault_note() {
     --arg branch "$branch" \
     --arg progress_log "$( [[ -n "$progress_file" ]] && cat "$progress_file" || true )" \
     '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch, progress_log:$progress_log}' \
-  | { printf 'VAULT_NOTE_JSON:'; cat; printf '\n'; }
+    >"$artifact_dir/note.json"
+  printf 'VAULT_NOTE_JSON:'
+  cat "$artifact_dir/note.json"
+  printf '\n'
 }
 
 
@@ -94,6 +100,9 @@ trap 'push_progress' TERM
 
 fail() {
   cleanup_workspace=false
+  if [[ -n "${artifact_dir:-}" ]]; then
+    printf 'ERROR: %s\n' "$*" >>"$artifact_dir/worker.log"
+  fi
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
 }
@@ -114,6 +123,12 @@ esac
   fail "workflow_run_id contains unsupported characters"
 [[ "$RUN_ARTIFACTS_DIR" == /* ]] || fail "run_artifacts_dir must be an absolute path"
 
+# Create the cross-worker handoff before any external checks. That preserves a
+# useful failure reason even when ralphex never gets as far as starting.
+mkdir -p "$RUN_ARTIFACTS_DIR"
+readonly artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
+mkdir -p "$artifact_dir"
+
 command -v gh >/dev/null || fail "gh is required"
 command -v git >/dev/null || fail "git is required"
 command -v jq >/dev/null || fail "jq is required"
@@ -126,9 +141,6 @@ readonly ralphex_config_dir="${HOME}/.config/${RALPHEX_CONFIG}"
 run_root="$(mktemp -d "${TMPDIR:-/tmp}/github-ticket-worker.XXXXXX")"
 readonly checkout="${run_root}/repo"
 readonly issue_json="${run_root}/issue.json"
-mkdir -p "$RUN_ARTIFACTS_DIR"
-readonly artifact_dir="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}"
-mkdir -p "$artifact_dir"
 # A failed implementation run is diagnostically useful; preserve its checkout
 # and the run artifacts while retaining the original exit status.
 trap 'cleanup_workspace=false' ERR
