@@ -185,18 +185,17 @@ mapfile -t plan_files < <(find docs/plans -maxdepth 1 -name '*.md' -type f | sor
 review_only=false
 case "${#plan_files[@]}" in
   0)
-    # ralphex can archive a plan itself as part of its own task work (into
-    # docs/plans/completed/, its own convention — separate from this
-    # script's docs/plans/archive/ fallback below) before the overall run
-    # finishes: e.g. a review-phase failure right after task execution
-    # already committed and pushed. That leaves a branch with a fully
-    # implemented plan, zero unarchived plans, and no PR — resume with a
-    # review-only pass against whichever archived plan this branch itself
-    # added, instead of treating "no active plan" as nothing left to do.
+    # ralphex (move_plan_on_completion = true, our default) can archive a
+    # plan itself into docs/plans/completed/ and commit it before the
+    # overall run finishes — e.g. a review-phase failure right after task
+    # execution already committed and pushed. That leaves a branch with a
+    # fully implemented plan, zero unarchived plans, and no PR — resume with
+    # a review-only pass against whichever plan this branch itself archived,
+    # instead of treating "no active plan" as nothing left to do.
     mapfile -t plan_files < <(git diff --name-only --diff-filter=A \
-      "origin/${BASE_BRANCH}...HEAD" -- docs/plans/completed docs/plans/archive | sort)
+      "origin/${BASE_BRANCH}...HEAD" -- docs/plans/completed | sort)
     [[ "${#plan_files[@]}" -gt 0 ]] || \
-      fail "no plan file found in docs/plans/, docs/plans/completed/, or docs/plans/archive/ added by branch $branch"
+      fail "no plan file found in docs/plans/ or docs/plans/completed/ added by branch $branch"
     [[ "${#plan_files[@]}" -eq 1 ]] || \
       fail "expected exactly one archived plan added by branch $branch, found: ${plan_files[*]}"
     review_only=true
@@ -241,18 +240,16 @@ git diff --cached --quiet || fail "index has uncommitted changes after ralphex"
 [[ -n "$(git rev-list "origin/$BASE_BRANCH..HEAD")" ]] || \
   fail "implementation branch has no commits beyond $BASE_BRANCH"
 
-# Archive the processed plan so a re-added agent-ready label with no new plan
-# is a harmless poller no-op instead of re-running ralphex on stale input.
-# Some plans instruct ralphex to move themselves (e.g. to docs/plans/completed/)
-# as one of their own tasks — if ralphex already did that and committed it,
-# $plan_file no longer exists at its original path and there is nothing left
-# to archive here. A review-only resume starts from an already-archived
-# $plan_file (docs/plans/completed/ or docs/plans/archive/ from a prior
-# partial run) and must not be re-archived from wherever it already sits.
-if [[ "$review_only" != true && -f "$plan_file" ]]; then
-  mkdir -p docs/plans/archive
-  git mv "$plan_file" "docs/plans/archive/$(basename "$plan_file")"
-  git commit -m "chore: archive plan for issue #${ISSUE_NUMBER}"
+# Both ralphex-codex and ralphex-pi run with the default
+# move_plan_on_completion = true, so ralphex itself moves a successfully
+# completed plan into docs/plans/completed/ (and commits it) before this
+# script ever sees the checkout again. $plan_file existing here after a full
+# (non-review-only) run means ralphex did not archive it as expected — a
+# poller re-added agent-ready with no new plan would then spuriously
+# re-trigger this issue forever, so treat it as a hard failure to surface
+# rather than silently archiving it a different way ourselves.
+if [[ "$review_only" != true ]]; then
+  [[ -f "$plan_file" ]] && fail "ralphex left $plan_file in place after a successful run instead of archiving it"
 fi
 
 printf 'Pushing implementation branch %s\n' "$branch"
