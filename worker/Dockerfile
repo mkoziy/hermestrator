@@ -13,7 +13,7 @@ ARG GREMLINS_VERSION=0.6.0
 ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410f95a9925573d4a
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y bash ca-certificates curl git gosu jq openssh-client \
+    && apt-get install --no-install-recommends -y bash build-essential ca-certificates curl git gosu jq openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
