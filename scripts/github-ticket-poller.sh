@@ -46,16 +46,26 @@ while IFS=$'\t' read -r n issue_labels; do
     continue
   fi
 
-  # An unarchived plan file is the single source of truth for "there is new
-  # work to do" — it gates both the first run and any later follow-up, and
-  # goes back to zero once github-ticket-worker.sh archives a processed plan.
-  # This also means a re-added agent-ready label with no new plan yet is a
-  # harmless no-op skip instead of a spurious worker trigger.
+  # An unarchived plan file is normally the signal for "there is new work to
+  # do" — it gates both the first run and any later follow-up, and goes back
+  # to zero once github-ticket-worker.sh archives a processed plan. But
+  # ralphex can archive a plan itself as part of its own task work (into
+  # docs/plans/completed/) before the overall run finishes — e.g. a
+  # review-phase failure after task execution already committed and pushed.
+  # That leaves a branch with zero unarchived plans and no PR: real,
+  # unfinished work that this check must not treat as done. Only skip once a
+  # PR actually exists for the branch; otherwise a re-added agent-ready label
+  # with truly no new plan and no prior branch is still a harmless skip
+  # (caught by the "no branch yet" check above).
   plan_count="$(gh api "repos/${REPO}/contents/docs/plans?ref=${branch}" \
     --jq '[.[] | select(.type == "file" and (.name | endswith(".md")))] | length' 2>/dev/null)" || plan_count=0
   if [[ "$plan_count" -eq 0 ]]; then
-    printf 'Issue #%s: %s has no unarchived plan in docs/plans/, skipping\n' "$n" "$branch"
-    continue
+    pr_count="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json number --jq 'length' 2>/dev/null)" || pr_count=0
+    if [[ "$pr_count" -gt 0 ]]; then
+      printf 'Issue #%s: %s has no unarchived plan and already has a pull request, skipping\n' "$n" "$branch"
+      continue
+    fi
+    printf 'Issue #%s: %s has an archived plan but no pull request yet, resuming\n' "$n" "$branch"
   fi
 
   # Guard against retriggering an issue whose previous worker run is still

@@ -182,19 +182,41 @@ git switch -c "$branch" "origin/$branch"
   fail "branch $branch has no commits beyond $BASE_BRANCH; it must carry a committed ralphex plan"
 
 mapfile -t plan_files < <(find docs/plans -maxdepth 1 -name '*.md' -type f | sort)
+review_only=false
 case "${#plan_files[@]}" in
-  0) fail "no plan file found in docs/plans/ on branch $branch" ;;
+  0)
+    # ralphex can archive a plan itself as part of its own task work (into
+    # docs/plans/completed/, its own convention — separate from this
+    # script's docs/plans/archive/ fallback below) before the overall run
+    # finishes: e.g. a review-phase failure right after task execution
+    # already committed and pushed. That leaves a branch with a fully
+    # implemented plan, zero unarchived plans, and no PR — resume with a
+    # review-only pass against whichever archived plan this branch itself
+    # added, instead of treating "no active plan" as nothing left to do.
+    mapfile -t plan_files < <(git diff --name-only --diff-filter=A \
+      "origin/${BASE_BRANCH}...HEAD" -- docs/plans/completed docs/plans/archive | sort)
+    [[ "${#plan_files[@]}" -gt 0 ]] || \
+      fail "no plan file found in docs/plans/, docs/plans/completed/, or docs/plans/archive/ added by branch $branch"
+    [[ "${#plan_files[@]}" -eq 1 ]] || \
+      fail "expected exactly one archived plan added by branch $branch, found: ${plan_files[*]}"
+    review_only=true
+    ;;
   1) ;;
   *) fail "expected exactly one plan file in docs/plans/ on branch $branch, found: ${plan_files[*]}" ;;
 esac
 readonly plan_file="${plan_files[0]}"
 
-printf 'Executing ralphex plan %s with config %s\n' "$plan_file" "$RALPHEX_CONFIG"
+ralphex_args=(--config-dir "$ralphex_config_dir" "$plan_file" --base-ref "$BASE_BRANCH" --branch "$branch")
+if [[ "$review_only" == true ]]; then
+  printf 'Plan %s already archived; resuming with review-only pass, config %s\n' "$plan_file" "$RALPHEX_CONFIG"
+  ralphex_args+=(--review)
+else
+  printf 'Executing ralphex plan %s with config %s\n' "$plan_file" "$RALPHEX_CONFIG"
+fi
 ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sync_progress_artifact
-ralphex --config-dir "$ralphex_config_dir" "$plan_file" \
-  --base-ref "$BASE_BRANCH" --branch "$branch" \
+ralphex "${ralphex_args[@]}" \
   >"$artifact_dir/ralphex.stdout.log" \
   2>"$artifact_dir/ralphex.stderr.log" &
 ralphex_pid=$!
@@ -224,8 +246,10 @@ git diff --cached --quiet || fail "index has uncommitted changes after ralphex"
 # Some plans instruct ralphex to move themselves (e.g. to docs/plans/completed/)
 # as one of their own tasks — if ralphex already did that and committed it,
 # $plan_file no longer exists at its original path and there is nothing left
-# to archive here.
-if [[ -f "$plan_file" ]]; then
+# to archive here. A review-only resume starts from an already-archived
+# $plan_file (docs/plans/completed/ or docs/plans/archive/ from a prior
+# partial run) and must not be re-archived from wherever it already sits.
+if [[ "$review_only" != true && -f "$plan_file" ]]; then
   mkdir -p docs/plans/archive
   git mv "$plan_file" "docs/plans/archive/$(basename "$plan_file")"
   git commit -m "chore: archive plan for issue #${ISSUE_NUMBER}"
