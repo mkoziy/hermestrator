@@ -15,3 +15,14 @@ The shared first-review prompt adds `thermonuclear_quality` and
 `thermonuclear_quality` is a strict, diff-scoped maintainability review adapted
 from Cursor's thermo-nuclear code-quality-review skill. `planned_test_coverage`
 checks that introduced tests genuinely prove the planned feature or fix.
+
+Both `review_first.txt` and `review_second.txt` are overridden here — not to
+change reviewer selection on the second pass, but because ralphex's stock
+signal contract (`<<<RALPHEX:REVIEW_DONE>>>` / `<<<RALPHEX:TASK_FAILED>>>`) is
+scanned for anywhere in the model's response, not just as a final line. A
+model that quotes those tokens verbatim while reasoning about which path
+applies (e.g. "the instructions say output `<<<RALPHEX:TASK_FAILED>>>`
+when...") gets misread as actually signaling that outcome. Both prompts add an
+explicit instruction against quoting the tokens outside the one final
+standalone signal line. If ralphex ships a fix for this upstream, these two
+overrides can be deleted back to the built-in defaults.

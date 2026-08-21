@@ -42,13 +42,23 @@ Do not dismiss an issue merely because it predates this branch.
 
 ## Step 4: Signal Completion
 
+SIGNAL LOGIC — read carefully, and decide only after Steps 1-3 are fully done:
+
 `REVIEW_DONE` means this iteration found zero confirmed issues, not that fixes
 were completed.
 
-- If no confirmed issues were found, output exactly `<<<RALPHEX:REVIEW_DONE>>>`.
-- If issues were found and fixed, stop without a signal so the next review
-  iteration can verify the fixes.
-- If confirmed issues cannot be fixed, output exactly
+- Path A — no confirmed issues found: output exactly `<<<RALPHEX:REVIEW_DONE>>>`.
+- Path B — issues found and fixed: stop with no signal at all. Do not output
+  `REVIEW_DONE`. The external loop runs another review iteration to verify
+  your fixes, since they might have introduced new issues.
+- Path C — confirmed issues found that cannot be fixed: output exactly
   `<<<RALPHEX:TASK_FAILED>>>`.
+
+Do not write the literal signal tokens anywhere except as that one final,
+standalone line when a path calls for one. In particular, never quote or
+restate `<<<RALPHEX:TASK_FAILED>>>` or `<<<RALPHEX:REVIEW_DONE>>>` while
+reasoning about which path applies — ralphex scans the whole response for
+these tokens, so quoting one elsewhere is indistinguishable from signaling it
+and will be misread as that outcome even when you took a different path.
 
 Output format: no Markdown formatting in the response text.

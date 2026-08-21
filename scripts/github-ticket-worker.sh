@@ -19,16 +19,26 @@ cleanup_workspace=true
 ralphex_started=false
 started_at=""
 
+# ralphex names the progress file after the branch slug, not the plan file
+# (e.g. branch agent/issue-28 -> progress-agentissue-28.txt) — undocumented
+# beyond the glob shape in its README. The worker only ever runs one plan per
+# checkout, so .ralphex/progress/ holds exactly one file; glob instead of
+# reconstructing ralphex's naming rule.
+find_progress_file() {
+  local f
+  for f in .ralphex/progress/progress-*.txt; do
+    [[ -f "$f" ]] && { printf '%s\n' "$f"; return 0; }
+  done
+  return 1
+}
+
 # Emits one line the vault-sync workflow job greps out of this step's stdout.
 # Only called once ralphex has actually run, so validation failures (bad repo,
 # closed issue, missing plan) don't produce empty/meaningless vault notes.
 emit_vault_note() {
   local status_label="$1"
   local progress_file=""
-  if [[ -n "${plan_file:-}" ]]; then
-    progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
-    [[ -f "$progress_file" ]] || progress_file=""
-  fi
+  progress_file="$(find_progress_file || true)"
   # Swamp may not retain a terminated worker's stdout long enough for the
   # follow-up vault job to query it. Keep the same payload in the shared
   # artifact volume, which also makes a successful PR link available there.
@@ -65,12 +75,11 @@ push_progress() {
 
 sync_progress_artifact() {
   [[ "$ralphex_started" == true ]] || return 0
-  local progress_file=".ralphex/progress/progress-$(basename "$plan_file" .md).txt"
+  local progress_file
   # ralphex creates this file only after it has made progress. Its absence is
   # normal at startup, and this diagnostic copy must never abort the worker.
-  if [[ -f "$progress_file" ]]; then
-    cp "$progress_file" "$artifact_dir/progress.log"
-  fi
+  progress_file="$(find_progress_file)" || return 0
+  cp "$progress_file" "$artifact_dir/progress.log"
 }
 
 cleanup() {
