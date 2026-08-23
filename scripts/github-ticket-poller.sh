@@ -10,6 +10,13 @@ set -Eeuo pipefail
 : "${RALPHEX_CONFIG:=ralphex-codex}"
 : "${STALE_RUN_MINUTES:=45}"
 
+# Per-repo fine-grained PATs can't span multiple owners/orgs; a workflow that
+# needs a different token than the pod-level default sets GH_TOKEN_OVERRIDE
+# (sourced from a vault, see workflow-github-ticket-poller-streamberg.yaml).
+if [[ -n "${GH_TOKEN_OVERRIDE:-}" ]]; then
+  export GH_TOKEN="$GH_TOKEN_OVERRIDE"
+fi
+
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || { printf 'ERROR: repo must be owner/name\n' >&2; exit 1; }
 
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
@@ -95,5 +102,6 @@ while IFS=$'\t' read -r n issue_labels; do
     --input repo="$REPO" \
     --input issue_number="$n" \
     --input base_branch="$BASE_BRANCH" \
-    --input ralphex_config="$config"
+    --input ralphex_config="$config" \
+    --input gh_token_override="${GH_TOKEN_OVERRIDE:-}"
 done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")

@@ -36,6 +36,12 @@ inputs:
         Loopback URL of the swamp serve instance this poller runs under. Required so the
         triggered github-ticket-worker run dispatches to enrolled pool:coding workers instead
         of running as a disconnected local process with no worker dispatcher.
+    gh_token_override:
+      type: string
+      default: ${{ vault.get('github-tokens', 'STREAMBERG_GH_TOKEN') }}
+      description: >-
+        Fine-grained PAT scoped to mkoziy/streamberg. The pod-level GH_TOKEN belongs to a
+        different owner and can't reach this repo, so this poller carries its own token.
   required:
     - repo
 tags: {}
@@ -59,6 +65,7 @@ jobs:
               LABEL: ${{ inputs.label }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
               SWAMP_SERVE_URL: ${{ inputs.server_url }}
+              GH_TOKEN_OVERRIDE: ${{ inputs.gh_token_override }}
         dependsOn: []
         weight: 0
         allowFailure: false
