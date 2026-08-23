@@ -28,12 +28,6 @@ inputs:
         - ralphex-codex
         - ralphex-pi
       description: Installed ralphex profile selected from ~/.config.
-    gh_token_override:
-      type: string
-      default: ""
-      description: >-
-        Optional GitHub token for repos the pod-level GH_TOKEN can't reach (fine-grained
-        PATs are scoped to a single owner). Empty falls back to the pod-level token.
   required:
     - repo
     - issue_number
@@ -60,7 +54,6 @@ jobs:
               WORKFLOW_RUN_ID: ${{ run.id }}
               RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
               RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
-              GH_TOKEN_OVERRIDE: ${{ inputs.gh_token_override }}
         dependsOn: []
         weight: 0
         allowFailure: false

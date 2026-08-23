@@ -13,12 +13,13 @@ set -Eeuo pipefail
 # worker and orchestrator. It must not live in the read-only /workspace mount.
 : "${RUN_ARTIFACTS_DIR:=/var/lib/swamp-worker-artifacts}"
 
-# Per-repo fine-grained PATs can't span multiple owners/orgs; a workflow that
-# needs a different token than the pod-level default sets GH_TOKEN_OVERRIDE
-# (sourced from a vault, see workflow-github-ticket-poller-streamberg.yaml).
-if [[ -n "${GH_TOKEN_OVERRIDE:-}" ]]; then
-  export GH_TOKEN="$GH_TOKEN_OVERRIDE"
-fi
+# Fine-grained PATs are scoped to a single owner, so the pod-level GH_TOKEN
+# can't reach repos under a different owner. Pick the owner-matching token
+# from a plain env var (set alongside GH_TOKEN in the pod's secret manager) —
+# see AGENTS.md "GitHub tokens" for onboarding a new owner.
+case "$REPO" in
+  mkoziy/*) : "${GH_TOKEN_MKOZIY:?GH_TOKEN_MKOZIY is required to work on $REPO}"; export GH_TOKEN="$GH_TOKEN_MKOZIY" ;;
+esac
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""

@@ -10,14 +10,15 @@ set -Eeuo pipefail
 : "${RALPHEX_CONFIG:=ralphex-codex}"
 : "${STALE_RUN_MINUTES:=45}"
 
-# Per-repo fine-grained PATs can't span multiple owners/orgs; a workflow that
-# needs a different token than the pod-level default sets GH_TOKEN_OVERRIDE
-# (sourced from a vault, see workflow-github-ticket-poller-streamberg.yaml).
-if [[ -n "${GH_TOKEN_OVERRIDE:-}" ]]; then
-  export GH_TOKEN="$GH_TOKEN_OVERRIDE"
-fi
-
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || { printf 'ERROR: repo must be owner/name\n' >&2; exit 1; }
+
+# Fine-grained PATs are scoped to a single owner, so the pod-level GH_TOKEN
+# can't reach repos under a different owner. Pick the owner-matching token
+# from a plain env var (set alongside GH_TOKEN in the pod's secret manager) —
+# see AGENTS.md "GitHub tokens" for onboarding a new owner.
+case "$REPO" in
+  mkoziy/*) : "${GH_TOKEN_MKOZIY:?GH_TOKEN_MKOZIY is required to poll $REPO}"; export GH_TOKEN="$GH_TOKEN_MKOZIY" ;;
+esac
 
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
@@ -102,6 +103,5 @@ while IFS=$'\t' read -r n issue_labels; do
     --input repo="$REPO" \
     --input issue_number="$n" \
     --input base_branch="$BASE_BRANCH" \
-    --input ralphex_config="$config" \
-    --input gh_token_override="${GH_TOKEN_OVERRIDE:-}"
+    --input ralphex_config="$config"
 done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")

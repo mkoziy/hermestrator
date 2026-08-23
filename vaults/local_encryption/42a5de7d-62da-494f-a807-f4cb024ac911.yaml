@@ -1,7 +1,0 @@
-id: 42a5de7d-62da-494f-a807-f4cb024ac911
-name: github-tokens
-type: local_encryption
-config:
-  auto_generate: true
-  base_dir: /Users/michael/github.com/mkoziy/hermestrator
-createdAt: '2026-08-23T15:36:39.674Z'
