@@ -24,8 +24,12 @@ if [[ -n "${OPENAI_API_KEY:-}" && -z "${CODEX_ACCESS_TOKEN:-}" ]]; then
   printf '%s' "$OPENAI_API_KEY" | gosu worker codex login --with-api-key
 fi
 
-if [[ -n "${GH_TOKEN:-}" ]]; then
-  gosu worker gh auth setup-git
-fi
+# Per-owner tokens (GH_TOKEN_<OWNER>, see scripts/github-ticket-*.sh) are
+# exported as GH_TOKEN only right before each script's own gh/git calls, not
+# at container start, so this can't branch on GH_TOKEN being pre-set. Force
+# the credential helper onto github.com regardless — gh's helper reads
+# GH_TOKEN from the process env at call time, not from auth state captured
+# here.
+gosu worker gh auth setup-git --hostname github.com --force
 
 exec gosu worker "$@"

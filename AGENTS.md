@@ -57,30 +57,37 @@ buildable and the smoke check passing for any Dockerfile change.
 
 ## GitHub tokens
 
-The pod-level `GH_TOKEN` is a single fine-grained PAT scoped to one GitHub
-owner — fine-grained PATs can't span multiple owners/orgs.
-`moontechs/files-nest` uses that pod-level token. A repo under a *different*
-owner (e.g. `mkoziy/streamberg`) needs its own token:
+Fine-grained PATs are scoped to a single GitHub owner — there is no generic
+`GH_TOKEN`, every owner polled gets its own `GH_TOKEN_<OWNER>` env var
+(`GH_TOKEN_MOONTECHS` for `moontechs/*`, `GH_TOKEN_MKOZIY` for `mkoziy/*`).
+`worker/entrypoint.sh` runs `gh auth setup-git --hostname github.com --force`
+unconditionally at container start (not gated on any specific token env var
+existing) so the credential helper is wired up regardless of which owner's
+token a given run ends up exporting.
 
-1. Create a fine-grained PAT scoped to the new owner, granting only
+Onboarding a new owner:
+
+1. Create a fine-grained PAT scoped to that owner, granting only
    **Contents** (read/write — `gh api .../contents/...` and `git push`),
    **Issues** (read — `gh issue list`), **Pull requests** (read/write —
    `gh pr list`/`gh pr create`). Skip `Administration` and `Actions` — this
    pipeline never uses them.
 2. Add a `case "$REPO" in ... esac` arm for the new owner in both
    `scripts/github-ticket-poller.sh` and `scripts/github-ticket-worker.sh`,
-   exporting `GH_TOKEN` from a distinctly-named env var (the existing arm:
-   `mkoziy/*` → `GH_TOKEN_MKOZIY`).
-3. Set that env var (`GH_TOKEN_<OWNER>`) alongside `GH_TOKEN` wherever the
-   pod's other secrets already live — `docker-compose.yml`'s `orchestrator`
-   *and* `coding-worker` services for local dev (the poller job runs
-   unlabeled, i.e. on the orchestrator; the worker job runs on
-   `pool: coding`), the equivalent k3s Secret/env for a cluster deployment.
-   Both need it: the poller reads issues with it, the coding worker pushes
-   commits and opens the PR with it.
+   exporting `GH_TOKEN` from a distinctly-named `GH_TOKEN_<OWNER>` env var.
+   The `*)` fallback arm fails loudly on an unmapped owner — never silently
+   fall through to some other owner's token.
+3. Set that `GH_TOKEN_<OWNER>` var wherever the pod's other secrets already
+   live — `docker-compose.yml`'s `orchestrator` *and* `coding-worker`
+   services for local dev (the poller job runs unlabeled, i.e. on the
+   orchestrator; the worker job runs on `pool: coding`), the equivalent k3s
+   Secret/env for a cluster deployment. Both need it: the poller reads
+   issues with it, the coding worker pushes commits and opens the PR with
+   it. If both roles happen to run in the same container, set it once there
+   — the scripts don't care how many containers are involved.
 
 No workflow YAML or vault involved — this is a plain env var, injected the
-same way as `GH_TOKEN`, `CODEX_ACCESS_TOKEN`, etc. (see the table in
+same way as `CODEX_ACCESS_TOKEN`, `OPENAI_API_KEY`, etc. (see the table in
 [docs/remote-worker.md](docs/remote-worker.md)). Swamp's `local_encryption`
 vault type was tried and reverted here: its auto-generated decryption key
 lives under `.swamp/` (gitignored, host-local), so it isn't available

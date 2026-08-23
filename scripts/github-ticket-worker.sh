@@ -13,12 +13,13 @@ set -Eeuo pipefail
 # worker and orchestrator. It must not live in the read-only /workspace mount.
 : "${RUN_ARTIFACTS_DIR:=/var/lib/swamp-worker-artifacts}"
 
-# Fine-grained PATs are scoped to a single owner, so the pod-level GH_TOKEN
-# can't reach repos under a different owner. Pick the owner-matching token
-# from a plain env var (set alongside GH_TOKEN in the pod's secret manager) —
-# see AGENTS.md "GitHub tokens" for onboarding a new owner.
+# Fine-grained PATs are scoped to a single owner: every polled owner gets its
+# own GH_TOKEN_<OWNER> env var, set in the pod's secret manager — see
+# AGENTS.md "GitHub tokens" for onboarding a new owner.
 case "$REPO" in
+  moontechs/*) : "${GH_TOKEN_MOONTECHS:?GH_TOKEN_MOONTECHS is required to work on $REPO}"; export GH_TOKEN="$GH_TOKEN_MOONTECHS" ;;
   mkoziy/*) : "${GH_TOKEN_MKOZIY:?GH_TOKEN_MKOZIY is required to work on $REPO}"; export GH_TOKEN="$GH_TOKEN_MKOZIY" ;;
+  *) printf 'ERROR: no GH_TOKEN_<OWNER> mapped for %s\n' "$REPO" >&2; exit 1 ;;
 esac
 
 readonly branch="agent/issue-${ISSUE_NUMBER}"

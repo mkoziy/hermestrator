@@ -45,8 +45,7 @@ environment file. They are never image build arguments or `Dockerfile` values.
 | `SWAMP_ORCHESTRATOR_URL` | always, worker only | WebSocket URL of `swamp serve` |
 | `SWAMP_WORKER_TOKEN` | always, worker only | worker enrollment token |
 | `SWAMP_SERVER_TOKEN` | if server token auth is enabled | worker connection authentication |
-| `GH_TOKEN` | always for the ticket workflow | GitHub clone, push, issue, and PR access |
-| `GH_TOKEN_<OWNER>` | one per additional GitHub owner polled | fine-grained PATs are scoped to a single owner; `GH_TOKEN` covers the default owner, each other owner (e.g. `GH_TOKEN_MKOZIY` for `mkoziy/*`) needs its own token, set on both the orchestrator and the coding worker — see `scripts/github-ticket-poller.sh`/`scripts/github-ticket-worker.sh` |
+| `GH_TOKEN_<OWNER>` | one per GitHub owner polled | fine-grained PATs are scoped to a single owner, so there is no generic `GH_TOKEN` — each owner (e.g. `GH_TOKEN_MOONTECHS` for `moontechs/*`, `GH_TOKEN_MKOZIY` for `mkoziy/*`) needs its own token, set on both the orchestrator and the coding worker — see `scripts/github-ticket-poller.sh`/`scripts/github-ticket-worker.sh` |
 | `CODEX_ACCESS_TOKEN` | automatic subscription-backed Codex auth | ChatGPT Business or Enterprise Codex access token, injected from a secret manager |
 | `OPENAI_API_KEY` | API-billed `ralphex-codex`, or Codex review | alternative Codex auth; entrypoint logs in with stdin |
 | `OPENCODE_API_KEY` | `ralphex-pi` | Pi `opencode-go` provider auth |
@@ -107,7 +106,8 @@ docker compose exec orchestrator swamp worker token create coding \
   --duration 24h --server ws://localhost:9090
 
 export SWAMP_WORKER_TOKEN='coding.<secret>'
-export GH_TOKEN='github-token'
+export GH_TOKEN_MOONTECHS='github-token-for-moontechs-owned-repos'
+export GH_TOKEN_MKOZIY='github-token-for-mkoziy-owned-repos'
 export CODEX_ACCESS_TOKEN='worker-access-token' # automatic Codex login
 # export OPENAI_API_KEY='openai-api-key' # API-billed alternative
 # export OPENCODE_API_KEY='opencode-api-key' # for ralphex-pi
