@@ -8,6 +8,9 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     environment:
+      # The notes vault has its own credential. Do not alias it to an
+      # owner-specific ticket-worker token.
+      VAULT_GH_TOKEN: ${VAULT_GH_TOKEN:-}
       GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
       GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
     volumes:

@@ -60,6 +60,9 @@ buildable and the smoke check passing for any Dockerfile change.
 Fine-grained PATs are scoped to a single GitHub owner — there is no generic
 `GH_TOKEN`, every owner polled gets its own `GH_TOKEN_<OWNER>` env var
 (`GH_TOKEN_MOONTECHS` for `moontechs/*`, `GH_TOKEN_MKOZIY` for `mkoziy/*`).
+The notes vault is a separate GitHub repository and uses its own
+`VAULT_GH_TOKEN`; do not alias it to an owner token. Its fine-grained PAT must
+be scoped to the vault's owner and grant the repository contents read/write.
 `worker/entrypoint.sh` runs `gh auth setup-git --hostname github.com --force`
 unconditionally at container start (not gated on any specific token env var
 existing) so the credential helper is wired up regardless of which owner's
@@ -85,6 +88,10 @@ Onboarding a new owner:
    issues with it, the coding worker pushes commits and opens the PR with
    it. If both roles happen to run in the same container, set it once there
    — the scripts don't care how many containers are involved.
+
+The orchestrator additionally needs `VAULT_GH_TOKEN` for `vault-repo`; it is
+not used by either ticket script and must be injected separately from the
+owner tokens.
 
 No workflow YAML or vault involved — this is a plain env var, injected the
 same way as `CODEX_ACCESS_TOKEN`, `OPENAI_API_KEY`, etc. (see the table in
