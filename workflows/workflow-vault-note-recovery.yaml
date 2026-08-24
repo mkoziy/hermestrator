@@ -1,0 +1,89 @@
+id: 5b97f15e-9e6c-4bd1-aaf8-774c28ed84ba
+name: vault-note-recovery
+description: >-
+  Recovers vault notes retained by ticket workers whose workflow result could
+  not be recorded after an orchestrator reload.
+trigger:
+  schedule: "*/15 * * * *"
+inputs:
+  type: object
+  properties: {}
+tags: {}
+jobs:
+  - name: recover
+    description: Render, commit, and push retained ticket-worker notes.
+    steps:
+      - name: vault-pull
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: pull
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: write-notes
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/recover-vault-notes.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+              VAULT_DIR: .swamp/vault-clone
+        dependsOn:
+          - step: vault-pull
+            condition:
+              type: always
+        weight: 0
+        allowFailure: false
+      - name: vault-commit
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: commit
+          inputs:
+            message: "chore: recover ralphex run notes"
+            addAll: true
+        dependsOn:
+          - step: write-notes
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: vault-push
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: push
+          inputs:
+            branch: main
+            setUpstream: true
+        dependsOn:
+          - step: vault-commit
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: cleanup-artifacts
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/cleanup-recovered-vault-notes.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+        dependsOn:
+          - step: vault-push
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

@@ -71,7 +71,16 @@ while IFS=$'\t' read -r n issue_labels; do
   if [[ "$plan_count" -eq 0 ]]; then
     pr_count="$(gh pr list --repo "$REPO" --head "$branch" --state all --limit 1 --json number --jq 'length' 2>/dev/null)" || pr_count=0
     if [[ "$pr_count" -gt 0 ]]; then
-      printf 'Issue #%s: %s has no unarchived plan and already has a pull request, skipping\n' "$n" "$branch"
+      # A reload can land after ralphex pushed/opened the PR but before the
+      # worker's final label update. The archived plan and PR are durable
+      # evidence of completion, so finish that idempotent update here.
+      if gh issue edit "$n" --repo "$REPO" --remove-label "$LABEL"; then
+        printf 'Issue #%s: %s has no unarchived plan and already has a pull request; removed stale %s label\n' \
+          "$n" "$branch" "$LABEL"
+      else
+        printf 'ERROR: Issue #%s: unable to remove stale %s label; will retry next poll\n' \
+          "$n" "$LABEL" >&2
+      fi
       continue
     fi
     printf 'Issue #%s: %s has an archived plan but no pull request yet, resuming\n' "$n" "$branch"

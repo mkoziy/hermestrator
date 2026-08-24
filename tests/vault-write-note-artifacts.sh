@@ -17,6 +17,9 @@ trap cleanup EXIT
   "$repo_root/docker-compose.yml")" == '2' ]]
 rg -F -- 'chown --recursive worker:worker' "$repo_root/worker/entrypoint.sh" | \
   rg -F -- '"$RUN_ARTIFACTS_DIR"' >/dev/null
+rg -F -- 'name: vault-note-recovery' "$repo_root/workflows/workflow-vault-note-recovery.yaml" >/dev/null
+rg -U -- 'name: write-notes[\\s\\S]*?step: vault-pull[\\s\\S]*?type: always' \
+  "$repo_root/workflows/workflow-vault-note-recovery.yaml" >/dev/null
 
 mkdir -p "$test_root/artifacts/run-123" "$test_root/vault"
 gh() {
