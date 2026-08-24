@@ -10,9 +10,9 @@ Run both commands to understand what was done:
 - `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
 - `git diff {{DEFAULT_BRANCH}}...HEAD`
 
-## Step 2: Launch ALL 7 Review Agents IN PARALLEL
+## Step 2: Launch ALL 6 Review Agents IN PARALLEL
 
-CRITICAL: All 7 agent invocations MUST be issued in a single message for true
+CRITICAL: All 6 agent invocations MUST be issued in a single message for true
 parallel execution. These agents are fully independent — no shared state, no
 dependencies, and no ordering requirements.
 
@@ -31,7 +31,6 @@ branch themselves.
 {{agent:simplification}}
 {{agent:documentation}}
 {{agent:thermonuclear_quality}}
-{{agent:planned_test_coverage}}
 
 ## Step 3: Collect, Verify, and Fix Findings
 

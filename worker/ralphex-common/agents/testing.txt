@@ -1,12 +1,17 @@
-Review whether the tests introduced or changed by this branch genuinely prove
-the planned feature or bug fix works. Treat the task goal and the committed
-plan in `docs/plans/` as the intended behavior; inspect the progress log when
-it clarifies implementation decisions.
+Review the branch's tests for correctness and meaningful coverage.
 
-First, identify the promised observable behavior, including important success,
-failure, and boundary cases. Then trace each relevant test to the production
-path it exercises. A test counts only when it would fail if the claimed
-behavior regressed.
+For this review, the task goal and the committed plan in `docs/plans/` are the
+source of truth for intended behavior—not the implementation or the tests
+themselves. Inspect the progress log only when it clarifies how a planned
+requirement was implemented.
+
+First, turn the plan into a short mental checklist of promised observable
+behavior, including important success, failure, and boundary cases. For every
+relevant new or modified test, map its assertion to one item on that checklist
+and trace the production path it exercises. Do not give credit merely because
+a test covers the changed code: a test counts only when it would fail if the
+specific planned behavior regressed. Conversely, do not require a test for a
+code change that does not implement a planned requirement.
 
 Look especially for:
 
@@ -16,6 +21,8 @@ Look especially for:
   replaced with a trivial stub;
 - new tests that cover a nearby pre-existing behavior rather than the change
   described in the plan;
+- tests whose names or fixtures claim the new feature or fix but whose
+  assertions establish only an unrelated implementation detail;
 - omitted negative, edge, integration, or persistence cases that are central
   to the planned feature or fix;
 - tests that bypass the production boundary where the defect or feature lives.
