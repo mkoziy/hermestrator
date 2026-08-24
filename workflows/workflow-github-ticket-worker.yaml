@@ -109,7 +109,7 @@ jobs:
         dependsOn:
           - step: vault-pull
             condition:
-              type: succeeded
+              type: always
         weight: 0
         allowFailure: true
       - name: vault-commit

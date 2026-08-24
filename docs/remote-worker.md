@@ -67,6 +67,9 @@ The coding-worker entrypoint initializes the mount and assigns it to the
 unprivileged `worker` user before starting the worker process. A run's
 artifacts are removed only after its vault note is successfully pushed; if
 vault synchronization fails, they are retained for diagnosis and retry.
+The note writer runs even when its best-effort vault pull fails, preserving the
+note in the local checkout for a later commit and push rather than dropping the
+run's record before a transient Git failure recovers.
 
 ## Fully unattended Codex authentication
 
