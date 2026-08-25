@@ -101,6 +101,46 @@ lives under `.swamp/` (gitignored, host-local), so it isn't available
 wherever the orchestrator actually runs unless manually provisioned —
 plain env vars avoid that key-distribution problem entirely.
 
+## Repo setup script
+
+Every ticket run clones the target repo into a fresh, empty `/tmp` workspace
+(see `scripts/github-ticket-worker.sh`) — nothing is cached between runs, so
+dependencies never exist until installed there. `github-ticket-worker.sh`
+handles this generically for any language by running `scripts/agent-setup.sh`
+right after clone, before ralphex starts, if that file exists and is
+executable in the target repo. No file → no-op, so onboarding a repo that
+needs no setup requires nothing here.
+
+Onboarding a new repo that *does* need setup: add `scripts/agent-setup.sh` to
+that repo (not to hermestrator) with this prompt:
+
+> Create `scripts/agent-setup.sh` in this repo's root. This script is run by
+> an external ticket worker right after it clones the repo into a fresh,
+> empty workspace and before a coding agent starts work — its job is to make
+> the checkout ready for whatever validation gates the agent is expected to
+> run (lint, test, typecheck, build), across every part of this repo that
+> has one (e.g. a monorepo's separate workspaces/services).
+>
+> - `#!/usr/bin/env bash` with `set -Eeuo pipefail`, executable (`chmod +x`).
+> - Install this repo's dependencies using whatever this repo's own
+>   tooling/package manager already is — don't introduce a new one. Prefer a
+>   single top-level command (e.g. one workspace install) over per-directory
+>   installs if the repo's tooling supports it.
+> - After install, do a cheap sanity check that the validation commands this
+>   repo's CI/pre-commit hooks actually rely on resolve correctly (e.g. run
+>   `--version` on the lint/test binaries, or the repo's own `check`
+>   command), and exit non-zero if something didn't resolve — don't leave a
+>   half-set-up workspace to fail silently later, deeper into the agent's
+>   run.
+> - No unrelated build/toolchain steps (native mobile builds, docs builds,
+>   docker builds, etc.) — only what's needed for lint/test/typecheck/build
+>   commands the agent will actually invoke.
+> - Match what this repo's own CI or pre-commit hooks already run — don't
+>   invent new tooling or commands that don't already exist somewhere in the
+>   repo.
+> - No comments beyond one line if something is genuinely non-obvious; this
+>   is a small infra script, not documentation.
+
 ## Commits and PRs
 
 - Keep commits scoped to one logical change.
