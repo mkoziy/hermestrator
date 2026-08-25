@@ -214,6 +214,16 @@ case "${#plan_files[@]}" in
 esac
 readonly plan_file="${plan_files[0]}"
 
+# Each ticket run clones into a fresh /tmp workspace, so no dependencies
+# exist until installed here. Without this, ralphex silently skips lint/test
+# validation gates for the whole run. Repos own their setup knowledge (any
+# language, any package manager) via this convention script; the worker
+# stays generic and just runs it if present.
+if [[ -x scripts/agent-setup.sh ]]; then
+  printf 'Running repo setup: scripts/agent-setup.sh\n'
+  scripts/agent-setup.sh
+fi
+
 ralphex_args=(--config-dir "$ralphex_config_dir" "$plan_file" --base-ref "$BASE_BRANCH" --branch "$branch")
 if [[ "$review_only" == true ]]; then
   printf 'Plan %s already archived; resuming with review-only pass, config %s\n' "$plan_file" "$RALPHEX_CONFIG"
