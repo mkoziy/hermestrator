@@ -4,7 +4,7 @@ FROM node:22.20.0-bookworm-slim
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
-ARG SWAMP_VERSION=20260809.004828.0-sha.b61c9de2
+ARG SWAMP_VERSION=20260824.203415.0-sha.b1e95d5d
 ARG RALPHEX_VERSION=1.6.1
 ARG GH_VERSION=2.97.0
 ARG CODEX_VERSION=0.147.0
@@ -18,8 +18,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
-      amd64) swamp_arch=x86_64; swamp_sha=03c8133320ddd2082647958089f5c15c659aa409c4688fb6288f08ea53f35b68; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538; bun_arch=x64; bun_sha=60c39d92b8bd090627524c98b3012f0c08dc89024cfdaa7c9c98cb5fd4359376 ;; \
-      arm64) swamp_arch=aarch64; swamp_sha=825d3a2b337c248b6d1ac690ac670740b4e47dca4da0e4e05c69295a4705ff52; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c; bun_arch=aarch64; bun_sha=68b7dcd86a35e7d5e156b37e4cef4b4ab6d6b37fd2179570c0e815f13890febd ;; \
+      amd64) swamp_arch=x86_64; swamp_sha=18e946f3d19a11d793cd2f447ed1c84df003c7e0c7ee8a4cbd7dd105a14c56d9; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538; bun_arch=x64; bun_sha=60c39d92b8bd090627524c98b3012f0c08dc89024cfdaa7c9c98cb5fd4359376 ;; \
+      arm64) swamp_arch=aarch64; swamp_sha=52b077bd32e67ed7e1e0385be7274e8e6f951787f5b0ce574cd5c605848ea01f; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c; bun_arch=aarch64; bun_sha=68b7dcd86a35e7d5e156b37e4cef4b4ab6d6b37fd2179570c0e815f13890febd ;; \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --silent --show-error \
