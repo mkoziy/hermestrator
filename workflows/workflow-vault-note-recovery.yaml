@@ -52,7 +52,12 @@ jobs:
             condition:
               type: succeeded
         weight: 0
-        allowFailure: false
+        # write-notes is a no-op on the common tick (nothing to recover), so
+        # there's nothing staged to commit — git's "nothing to commit"
+        # (exit 1) is expected here, not a real failure. vault-push and
+        # cleanup-artifacts already gate on condition: succeeded, so they
+        # correctly no-op too when this step is skipped-via-failure.
+        allowFailure: true
       - name: vault-push
         task:
           type: model_method
