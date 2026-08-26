@@ -109,9 +109,18 @@ while IFS=$'\t' read -r n issue_labels; do
   fi
 
   printf 'Issue #%s: plan ready on %s, triggering github-ticket-worker with %s\n' "$n" "$branch" "$config"
-  swamp workflow run github-ticket-worker \
+  # `swamp workflow run` blocks until the triggered workflow completes (no
+  # async mode exists) — but this poller step's own timeout is far shorter
+  # than a real ralphex run, and the workflow it triggers executes
+  # server-side in the orchestrator regardless of whether this CLI call is
+  # still attached. Detach fully so this step returns immediately; the
+  # in-flight-run guard above already prevents duplicate triggers on the
+  # next tick.
+  setsid swamp workflow run github-ticket-worker \
     --input repo="$REPO" \
     --input issue_number="$n" \
     --input base_branch="$BASE_BRANCH" \
-    --input ralphex_config="$config"
+    --input ralphex_config="$config" \
+    >/dev/null 2>&1 &
+  disown
 done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")
