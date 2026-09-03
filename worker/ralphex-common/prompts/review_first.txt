@@ -1,4 +1,9 @@
 # Shared first-review prompt for both the Codex and Pi profiles.
+# Based on ralphex's stock review_first.txt, plus: a Step 2 that independently
+# re-runs this repo's own validation gate instead of trusting the progress
+# log's pass/fail claims, and the "signal marker is irreversible" rule
+# backported from ralphex master (e031c85, not yet in a tagged release) since
+# our RALPHEX_VERSION pin predates it.
 
 Code review of: {{GOAL}}
 
@@ -10,7 +15,19 @@ Run both commands to understand what was done:
 - `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
 - `git diff {{DEFAULT_BRANCH}}...HEAD`
 
-## Step 2: Launch ALL 6 Review Agents IN PARALLEL
+## Step 2: Independently Verify the Build
+
+Do not trust the progress log's claims that tests/lint/typecheck passed —
+task execution can commit code after a stale or partial check. Find this
+repo's own validation gate (the same commands CI or a pre-commit/pre-push
+hook would run — check for a Makefile `check`/`check-mobile` target, a
+`package.json` script, `scripts/agent-setup.sh`, or CI workflow files) and
+run it yourself against the current HEAD of this branch, for every workspace
+the diff touches. A failure here is an automatic critical finding, regardless
+of what the review agents below report — fix it in Step 4 before evaluating
+anything else.
+
+## Step 3: Launch ALL 6 Review Agents IN PARALLEL
 
 CRITICAL: All 6 agent invocations MUST be issued in a single message for true
 parallel execution. These agents are fully independent — no shared state, no
@@ -32,32 +49,39 @@ branch themselves.
 {{agent:documentation}}
 {{agent:thermonuclear_quality}}
 
-## Step 3: Collect, Verify, and Fix Findings
+## Step 4: Collect, Verify, and Fix Findings
 
-Merge duplicates. For each finding, read its context, verify it is real, and
-check for existing mitigations. Fix every confirmed issue, run the required
-tests and linters, then commit fixes with `fix: address code review findings`.
-Do not dismiss an issue merely because it predates this branch.
+Merge duplicates, including the build-verification result from Step 2. For
+each finding, read its context, verify it is real, and check for existing
+mitigations. Fix every confirmed issue, run the required tests and linters,
+then commit fixes with `fix: address code review findings`. Do not dismiss an
+issue merely because it predates this branch.
 
-## Step 4: Signal Completion
+## Step 5: Signal Completion
 
-SIGNAL LOGIC — read carefully, and decide only after Steps 1-3 are fully done:
+SIGNAL LOGIC — read carefully, and decide only after Steps 1-4 are fully done:
+
+A signal marker is irreversible. The moment you write one it takes effect,
+and you cannot retract it by explaining afterwards that you did not mean it.
+If you emit a marker it MUST be the final non-empty line of your output, with
+nothing after it. While you are still reasoning about which path applies,
+emit nothing — never quote or restate `<<<RALPHEX:TASK_FAILED>>>` or
+`<<<RALPHEX:REVIEW_DONE>>>` mid-reasoning, since ralphex scans the whole
+response for these tokens and cannot tell a quote from a signal.
 
 `REVIEW_DONE` means this iteration found zero confirmed issues, not that fixes
 were completed.
 
-- Path A — no confirmed issues found: output exactly `<<<RALPHEX:REVIEW_DONE>>>`.
-- Path B — issues found and fixed: stop with no signal at all. Do not output
-  `REVIEW_DONE`. The external loop runs another review iteration to verify
+- Path A — no confirmed issues found: end your output with
+  `<<<RALPHEX:REVIEW_DONE>>>`.
+- Path B — issues found and fixed: end your output with a plain-text summary
+  of what you fixed. Emit no marker at all — not `REVIEW_DONE`, not
+  `TASK_FAILED`. The external loop runs another review iteration to verify
   your fixes, since they might have introduced new issues.
-- Path C — confirmed issues found that cannot be fixed: output exactly
-  `<<<RALPHEX:TASK_FAILED>>>`.
-
-Do not write the literal signal tokens anywhere except as that one final,
-standalone line when a path calls for one. In particular, never quote or
-restate `<<<RALPHEX:TASK_FAILED>>>` or `<<<RALPHEX:REVIEW_DONE>>>` while
-reasoning about which path applies — ralphex scans the whole response for
-these tokens, so quoting one elsewhere is indistinguishable from signaling it
-and will be misread as that outcome even when you took a different path.
+- Path C — issues found that you were UNABLE to fix: end your output with
+  `<<<RALPHEX:TASK_FAILED>>>`. This path is only for issues nothing was fixed
+  for this iteration; if you fixed and committed anything at all, you are on
+  Path B even if other issues remain — describe those in plain text and let
+  the next iteration handle them.
 
 Output format: no Markdown formatting in the response text.
