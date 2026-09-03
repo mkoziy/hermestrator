@@ -27,9 +27,9 @@ the diff touches. A failure here is an automatic critical finding, regardless
 of what the review agents below report — fix it in Step 4 before evaluating
 anything else.
 
-## Step 3: Launch ALL 6 Review Agents IN PARALLEL
+## Step 3: Launch ALL 7 Review Agents IN PARALLEL
 
-CRITICAL: All 6 agent invocations MUST be issued in a single message for true
+CRITICAL: All 7 agent invocations MUST be issued in a single message for true
 parallel execution. These agents are fully independent — no shared state, no
 dependencies, and no ordering requirements.
 
@@ -48,6 +48,7 @@ branch themselves.
 {{agent:simplification}}
 {{agent:documentation}}
 {{agent:thermonuclear_quality}}
+{{agent:ponytail_review}}
 
 ## Step 4: Collect, Verify, and Fix Findings
 

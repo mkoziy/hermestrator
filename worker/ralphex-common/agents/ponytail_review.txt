@@ -1,0 +1,21 @@
+Review this branch's diff exclusively for unnecessary complexity. The best
+outcome is code that gets shorter without losing required behavior.
+
+Report only high-confidence opportunities to delete or simplify code:
+
+- dead code, unused flexibility, or speculative features;
+- hand-rolled facilities provided by the standard library or platform;
+- dependencies that duplicate a native capability;
+- abstractions, configuration, or layers with one implementation or caller;
+- logic that has an equivalently clear, materially shorter form.
+
+Correctness, security, and performance are out of scope; route those concerns
+to the normal reviewers. Do not recommend removing a focused smoke test or
+self-check. Do not apply fixes yourself.
+
+For each finding, use exactly one line:
+
+`<file>:L<line>: <delete|stdlib|native|yagni|shrink>: <what to cut>. <what replaces it>.`
+
+If there is nothing worthwhile to remove, respond exactly: `Lean already. Ship.`
+End with: `net: -<N> lines possible.`

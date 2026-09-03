@@ -10,11 +10,13 @@ and add its `{{agent:<name>}}` invocation. Add or override other ralphex phase
 prompts as `prompts/<phase>.txt`. A missing file uses the ralphex built-in
 default, so only intentional shared customizations need to be checked in.
 
-The shared first-review prompt adds `thermonuclear_quality` to ralphex's five
-built-in reviewers. `thermonuclear_quality` is a strict, diff-scoped
-maintainability review adapted from Cursor's thermo-nuclear code-quality-review
-skill. The `testing` reviewer is overridden here so it checks that introduced
-tests genuinely prove the planned feature or fix.
+The shared first-review prompt adds `thermonuclear_quality` and
+`ponytail_review` to ralphex's five built-in reviewers.
+`thermonuclear_quality` is a strict, diff-scoped maintainability review adapted
+from Cursor's thermo-nuclear code-quality-review skill. `ponytail_review` is
+adapted from Ponytail Review and reports only high-confidence opportunities to
+remove unnecessary complexity. The `testing` reviewer is overridden here so it
+checks that introduced tests genuinely prove the planned feature or fix.
 
 Both `review_first.txt` and `review_second.txt` are overridden here — not to
 change reviewer selection on the second pass, but because ralphex's stock
