@@ -10,25 +10,23 @@ ARG GH_VERSION=2.97.0
 ARG CODEX_VERSION=0.147.0
 ARG PI_VERSION=0.82.1
 ARG GREMLINS_VERSION=0.6.0
-ARG BUN_VERSION=1.3.0
+ARG MISE_VERSION=2026.9.2
 ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410f95a9925573d4a
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y bash build-essential ca-certificates curl git gosu jq openssh-client python3 unzip \
+    && apt-get install --no-install-recommends -y bash build-essential ca-certificates curl git gosu jq openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
-      amd64) swamp_arch=x86_64; swamp_sha=18e946f3d19a11d793cd2f447ed1c84df003c7e0c7ee8a4cbd7dd105a14c56d9; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538; bun_arch=x64; bun_sha=60c39d92b8bd090627524c98b3012f0c08dc89024cfdaa7c9c98cb5fd4359376 ;; \
-      arm64) swamp_arch=aarch64; swamp_sha=52b077bd32e67ed7e1e0385be7274e8e6f951787f5b0ce574cd5c605848ea01f; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c; bun_arch=aarch64; bun_sha=68b7dcd86a35e7d5e156b37e4cef4b4ab6d6b37fd2179570c0e815f13890febd ;; \
+      amd64) swamp_arch=x86_64; swamp_sha=18e946f3d19a11d793cd2f447ed1c84df003c7e0c7ee8a4cbd7dd105a14c56d9; ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gh_arch=amd64; gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538; mise_arch=x64; mise_sha=2950f8e1c59f3d9716bc3ee7d9242de94f9ab4054d97e65e12f2e67867c5f8fd ;; \
+      arm64) swamp_arch=aarch64; swamp_sha=52b077bd32e67ed7e1e0385be7274e8e6f951787f5b0ce574cd5c605848ea01f; ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gh_arch=arm64; gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c; mise_arch=arm64; mise_sha=2cea9423c16afa5e1f90646c35ebb3bc8d4647671a605d5856eb96dbbbf87e47 ;; \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --silent --show-error \
-      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bun_arch}.zip" \
-      --output /tmp/bun.zip \
-    && echo "${bun_sha}  /tmp/bun.zip" | sha256sum --check - \
-    && unzip -q /tmp/bun.zip -d /tmp/bun \
-    && install -m 0755 "/tmp/bun/bun-linux-${bun_arch}/bun" /usr/local/bin/bun \
-    && rm -rf /tmp/bun.zip /tmp/bun \
+      "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-${mise_arch}" \
+      --output /usr/local/bin/mise \
+    && echo "${mise_sha}  /usr/local/bin/mise" | sha256sum --check - \
+    && chmod 0755 /usr/local/bin/mise \
     && curl --fail --location --silent --show-error \
       "https://github.com/swamp-club/swamp/releases/download/v${SWAMP_VERSION}/swamp-linux-${swamp_arch}" \
       --output /usr/local/bin/swamp \
@@ -84,7 +82,15 @@ ENV HOME=/home/worker \
     GH_CONFIG_DIR=/home/worker/.config/gh \
     SWAMP_WORKER_CACHE_DIR=/home/worker/.swamp-worker \
     SWAMP_WORKER_CONCURRENCY=1 \
-    SWAMP_WORKER_LABELS=pool=coding
+    SWAMP_WORKER_LABELS=pool=coding \
+    PATH=/home/worker/.local/share/mise/shims:${PATH}
+
+# mise shims (above) resolve per-repo tool versions installed by that repo's
+# own scripts/agent-setup.sh via its mise.toml. Being first on PATH here
+# means every later process in the run — github-ticket-worker.sh, ralphex,
+# and every command the coding agent shells out to — picks them up without
+# needing agent-setup.sh to propagate PATH itself (it runs as a subprocess,
+# so an `export` there wouldn't reach its siblings/parent anyway).
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/ticket-worker-entrypoint"]

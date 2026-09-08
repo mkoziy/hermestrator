@@ -42,11 +42,18 @@ existing type before writing a custom extension (CLAUDE.md rule 1).
 ## Docker / worker image
 
 `worker/Dockerfile` pins exact versions and SHA-256 checksums for every
-downloaded binary (swamp, ralphex, gh, the Pi adapter script). If you bump a
-version, update its pinned checksum in the same change — don't drop
+downloaded binary (swamp, ralphex, gh, the Pi adapter script, mise). If you
+bump a version, update its pinned checksum in the same change — don't drop
 verification. Never bake credentials into the image; runtime secrets are
 injected via environment variables only (see the table in
 [docs/remote-worker.md](docs/remote-worker.md)).
+
+The image intentionally does **not** preinstall language runtimes/package
+managers (bun, node beyond the base image, etc.) — it only provides `mise`.
+Each onboarded repo pins its own tool versions via its own `mise.toml` and
+installs them from `scripts/agent-setup.sh` (see "Repo setup script" below).
+This keeps the shared worker image generic instead of hardcoding one repo's
+tool version for every repo the worker runs.
 
 ## CI
 
@@ -122,10 +129,21 @@ that repo (not to hermestrator) with this prompt:
 > has one (e.g. a monorepo's separate workspaces/services).
 >
 > - `#!/usr/bin/env bash` with `set -Eeuo pipefail`, executable (`chmod +x`).
+> - The worker image only provides `mise` (https://mise.jdx.dev) — no
+>   language runtimes. Add this repo's own `mise.toml`/`.mise.toml` pinning
+>   the exact tool versions its CI and local devs use (e.g. `bun = "x.y.z"`),
+>   run `mise install` before anything else, and make sure the rest of the
+>   script and everything the agent runs afterward resolves those exact
+>   binaries (not whatever happens to be on PATH already).
 > - Install this repo's dependencies using whatever this repo's own
 >   tooling/package manager already is — don't introduce a new one. Prefer a
 >   single top-level command (e.g. one workspace install) over per-directory
 >   installs if the repo's tooling supports it.
+> - If this repo has a client-side git hook (pre-commit, pre-push, etc.)
+>   that gates lint/typecheck/test, make it mandatory here: after install,
+>   verify the hook file actually exists and is executable, and exit
+>   non-zero if it doesn't. A coding agent silently committing past a
+>   missing gate is worse than the run failing loudly at setup time.
 > - After install, do a cheap sanity check that the validation commands this
 >   repo's CI/pre-commit hooks actually rely on resolve correctly (e.g. run
 >   `--version` on the lint/test binaries, or the repo's own `check`
