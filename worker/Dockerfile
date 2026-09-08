@@ -15,6 +15,7 @@ ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y bash build-essential ca-certificates curl git gosu jq openssh-client python3 \
+      gpg libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev libncurses-dev libpython3-dev libxml2-dev pkg-config uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
@@ -83,12 +84,14 @@ ENV HOME=/home/worker \
     SWAMP_WORKER_CACHE_DIR=/home/worker/.swamp-worker \
     SWAMP_WORKER_CONCURRENCY=1 \
     SWAMP_WORKER_LABELS=pool=coding \
-    PATH=/home/worker/.local/share/mise/shims:${PATH}
+    PATH=/home/worker/.local/share/mise/shims:/home/worker/.local/share/swiftly/bin:${PATH}
 
-# mise shims (above) resolve per-repo tool versions installed by that repo's
-# own scripts/agent-setup.sh via its mise.toml. Being first on PATH here
-# means every later process in the run — github-ticket-worker.sh, ralphex,
-# and every command the coding agent shells out to — picks them up without
+# mise shims and swiftly's proxy bin dir (above) resolve per-repo tool
+# versions installed by that repo's own scripts/agent-setup.sh (via its
+# mise.toml, or via swiftly for Swift on Linux where mise's swift plugin
+# lacks builds for most distros/arches). Being first on PATH here means
+# every later process in the run — github-ticket-worker.sh, ralphex, and
+# every command the coding agent shells out to — picks them up without
 # needing agent-setup.sh to propagate PATH itself (it runs as a subprocess,
 # so an `export` there wouldn't reach its siblings/parent anyway).
 
