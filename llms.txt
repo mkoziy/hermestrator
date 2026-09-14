@@ -1,0 +1,132 @@
+# hermestrator
+
+> Automated GitHub ticket implementation on top of [swamp](https://github.com/swamp-club/swamp)
+> and [ralphex](https://github.com/umputun/ralphex). A poller finds issues in
+> *other* repositories that are labeled `agent-ready` and already carry a
+> committed plan, then a worker runs a coding agent (Codex or Pi) against that
+> plan and opens a pull request — all inside a container hermestrator builds
+> and owns. This file is for an agent working in one of those *other*
+> repositories that wants to be picked up by hermestrator.
+
+This is not hermestrator's own contributor doc (see AGENTS.md/README.md for
+that). It's the contract a target repo must satisfy from the outside — no
+access to hermestrator's source required.
+
+## What hermestrator needs from your repo
+
+Nothing, by default — a repo with no `scripts/agent-setup.sh` and no special
+config still works, ralphex just runs against whatever's on the base image.
+Add the pieces below only if your repo needs them.
+
+1. **A plan on a specific branch.** hermestrator never invents work. Someone
+   (a human, or an agent using the `hermestrator-plan` skill) must:
+   - open or reuse issue `#N`,
+   - create branch `agent/issue-<N>` off your default branch,
+   - commit exactly one plan file under `docs/plans/*.md` on that branch
+     (ralphex's own working format — task list ralphex executes step by
+     step), push it,
+   - label issue `#N` with `agent-ready`.
+   The poller only triggers on `agent-ready` issues that have this branch
+   with this plan already pushed — it does not write plans itself.
+2. **Optional: an `agent-pi` or `agent-codex` label** on the issue to route
+   to a specific coding agent. No label uses hermestrator's configured
+   default (currently `ralphex-codex`).
+3. **Optional: `scripts/agent-setup.sh`** in your repo root — see below. Only
+   needed if your repo requires install/build steps before lint/test/build
+   commands work in a fresh checkout.
+4. **A GitHub owner hermestrator is already configured for.** hermestrator
+   authenticates per-owner with a fine-grained PAT (`GH_TOKEN_<OWNER>`); an
+   unmapped owner fails loudly rather than silently reusing another owner's
+   token. If your repo's owner isn't already onboarded, that's a
+   hermestrator-side change, not something your repo can do alone — ask
+   whoever operates the hermestrator instance.
+
+## The run, end to end
+
+```
+issue #N gets `agent-ready` + agent/issue-N branch with a plan
+        │
+        ▼
+poller (cron, ~15m): finds it, has no open PR yet, no run already in flight
+        │  triggers
+        ▼
+worker: clone target repo @ agent/issue-N into a fresh /tmp workspace
+        → run scripts/agent-setup.sh if present+executable
+        → ralphex <plan-file> --base-ref <default-branch> --branch agent/issue-N
+        → ralphex commits, archives the plan to docs/plans/completed/ or
+          docs/plans/archive/, and moves on
+        → push agent/issue-N, open or update the PR, remove agent-ready
+```
+
+A follow-up round on the same issue is just: push a new `docs/plans/*.md` to
+the same branch and re-add `agent-ready` — the worker pushes into the
+existing PR (or opens a new one if it was closed/merged) instead of starting
+over.
+
+Every run starts from an empty clone — nothing is cached, no state persists
+in your repo between runs except what you commit.
+
+## `scripts/agent-setup.sh` contract
+
+The worker image intentionally ships **no language runtimes** beyond
+`mise` (https://mise.jdx.dev) — it doesn't hardcode any repo's toolchain.
+If your repo needs anything installed before its lint/test/typecheck/build
+commands work, provide this script; if not, skip it entirely (no file = no-op,
+the worker doesn't fail or warn).
+
+Requirements:
+
+- `#!/usr/bin/env bash` + `set -Eeuo pipefail`, `chmod +x`.
+- Pin exact tool versions in this repo's own `mise.toml`/`.mise.toml`
+  (e.g. `bun = "x.y.z"`) and run `mise install` first. Everything the script
+  and the coding agent run afterward must resolve those exact binaries, not
+  whatever happens to already be on `PATH`.
+  `mise install` does **not** update the parent shell — a subprocess can't
+  push tools onto the PATH of the worker process that runs this script.
+  Two ways to make the resolved tools available beyond this script's own
+  process:
+  - run everything needing them through `mise exec -- <command>` inside this
+    script (each invocation re-resolves per-project tools), or
+  - `mise activate`/shim it so mise's own shims dir is what later processes
+    pick up (this is how hermestrator's own worker image handles its
+    Swift/mise toolchain — see its `worker/Dockerfile` for the pattern:
+    mise shims placed first on `PATH` in the image's own environment).
+  Either way, don't assume a plain `export PATH=...` inside this script
+  reaches ralphex or the coding agent afterward — this script runs as a
+  subprocess of the worker, its `export`s don't propagate to siblings/parent.
+- Install this repo's dependencies with whatever package manager/tooling this
+  repo already uses — don't introduce a new one. Prefer one top-level command
+  over per-directory installs if your tooling supports it (monorepos: cover
+  every workspace/service that has a validation gate).
+- If a client-side git hook (pre-commit, pre-push) gates lint/typecheck/test
+  in this repo, make it mandatory here: after install, verify the hook file
+  exists and is executable, exit non-zero if not. A coding agent silently
+  committing past a missing gate is worse than the setup script failing
+  loudly.
+- After install, cheaply sanity-check that the commands CI/pre-commit
+  actually rely on resolve (e.g. `--version` on the lint/test binaries, or
+  this repo's own `check` command); exit non-zero if something didn't
+  resolve. Don't leave a half-set-up workspace to fail silently deeper into
+  the agent's run.
+- Only what lint/test/typecheck/build actually need — no unrelated build
+  steps (native mobile builds, docs builds, container builds, etc.).
+- Match what this repo's own CI or pre-commit hooks already run. Don't invent
+  new tooling or commands that don't already exist somewhere in the repo.
+- Minimal comments — this is a small infra script, not documentation.
+
+## Producing the plan
+
+If you're an agent (not a human) preparing an issue for hermestrator, use the
+`hermestrator-plan` skill if it's available in your environment — it turns
+`gh issue view <N>` into the branch/plan/label sequence above, including
+running the plan through review before pushing. Otherwise, replicate Step 1-6
+of that skill by hand: branch `agent/issue-<N>` off default, one plan file
+in `docs/plans/`, push, label `agent-ready` (+ optional `agent-pi`/
+`agent-codex`).
+
+## Full source
+
+For contributors to hermestrator itself (not target repos): see
+[README.md](README.md), [AGENTS.md](AGENTS.md), and
+[docs/remote-worker.md](docs/remote-worker.md) in
+https://github.com/mkoziy/hermestrator.
