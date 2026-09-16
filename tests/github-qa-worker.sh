@@ -25,6 +25,8 @@ printf 'QA_VERDICT: FAIL: broken button\n' >"$log"
 printf 'no verdict line here\n' >"$log"
 [[ "$(parse_verdict 0 "$log")" == 'FAIL: no verdict emitted' ]]
 
+# 124 (idle or hard-cap kill, from run_qa_agent) always reads as timed out,
+# regardless of whatever partial final-message content happens to exist.
 [[ "$(parse_verdict 124 "$log")" == 'FAIL: QA run timed out' ]]
 
 body="$(build_comment_body PASS abc123)"
@@ -85,19 +87,89 @@ case "\$1 \$2" in
 esac
 EOF
 
-# Both fakes: pull the screenshots directory path out of the prompt
-# argument and drop one PNG in it (proving the worker's prompt actually
-# carries that path through), then emit the scripted verdict.
+# Both fakes speak the real CLIs' non-interactive flag shape (`codex exec
+# --json --output-last-message <file> <prompt>` / `pi --print --mode json
+# <prompt>`) since run_qa_agent dispatches on that exact shape. They pull
+# the screenshots dir out of the prompt and drop one PNG in it (proving the
+# worker's prompt actually carries that path through), then either emit
+# the scripted verdict straight away, or — under SIMULATE_MODE — behave
+# like a real long-running agent: "progress" writes one JSON event every
+# STEP_SECONDS (so it should survive an idle timeout shorter than its total
+# runtime) before finishing; "hang" writes one event and then goes silent
+# for HANG_SECONDS (so it should be killed once idle timeout elapses).
 cat >"$fake_bin/codex" <<'EOF'
 #!/usr/bin/env bash
-prompt="$2"
+# exec --json --output-last-message <file> <prompt>
+shift; shift; shift
+outfile="$1"; shift
+prompt="$1"
 dir="$(grep -o '/[^ ]*/screenshots' <<<"$prompt" | tail -n1)"
 [[ -n "$dir" && "${WRITE_SCREENSHOT:-true}" == true ]] && printf 'fake-png' >"$dir/step1.png"
-printf '%s\n' "$VERDICT_LINE"
+printf '{"type":"agent_start"}\n'
+case "${SIMULATE_MODE:-normal}" in
+  progress)
+    for _ in $(seq 1 "${STEP_COUNT:-3}"); do sleep "${STEP_SECONDS:-1}"; printf '{"type":"heartbeat"}\n'; done
+    ;;
+  hang)
+    sleep "${HANG_SECONDS:-5}"
+    ;;
+esac
+printf '%s\n' "$VERDICT_LINE" >"$outfile"
 EOF
-cp "$fake_bin/codex" "$fake_bin/pi"
+
+cat >"$fake_bin/pi" <<'EOF'
+#!/usr/bin/env bash
+# --print --mode json <prompt>
+shift; shift; shift
+prompt="$1"
+dir="$(grep -o '/[^ ]*/screenshots' <<<"$prompt" | tail -n1)"
+[[ -n "$dir" && "${WRITE_SCREENSHOT:-true}" == true ]] && printf 'fake-png' >"$dir/step1.png"
+printf '{"type":"agent_start"}\n'
+case "${SIMULATE_MODE:-normal}" in
+  progress)
+    for _ in $(seq 1 "${STEP_COUNT:-3}"); do sleep "${STEP_SECONDS:-1}"; printf '{"type":"heartbeat"}\n'; done
+    ;;
+  hang)
+    sleep "${HANG_SECONDS:-5}"
+    ;;
+esac
+jq -nc --arg v "$VERDICT_LINE" '{type:"message_end", message:{role:"assistant", content:[{type:"text", text:$v}]}}'
+EOF
 
 chmod +x "$fake_bin"/*
+
+# --- run_qa_agent: idle vs. hard-cap timeout behavior -------------------
+# The bug this covers: a fixed wall-clock timeout kills a run that's still
+# genuinely producing output. run_qa_agent must only kill on idle silence,
+# not on elapsed time alone.
+
+source <(sed -n '/^run_qa_agent() {/,/^}/p' "$worker")
+
+qa_dir="$test_root/qa-agent"
+mkdir -p "$qa_dir/screenshots"
+
+# Still working (writes every 1s): idle timeout of 2s must not fire even
+# though the run takes ~3s total, well past a naive short wall-clock cap.
+set +e
+SIMULATE_MODE=progress STEP_SECONDS=1 STEP_COUNT=3 VERDICT_LINE='QA_VERDICT: PASS' \
+PATH="$fake_bin:$PATH" \
+  run_qa_agent pi "screenshots at $qa_dir/screenshots" 2 30 \
+    "$qa_dir/out.log" "$qa_dir/err.log" "$qa_dir/final.txt"
+progress_rc=$?
+set -e
+[[ "$progress_rc" -eq 0 ]] || { echo "expected progress run to complete, got rc=$progress_rc" >&2; exit 1; }
+grep -qF 'QA_VERDICT: PASS' "$qa_dir/final.txt"
+
+# Genuinely stuck (writes once, then silent for 5s): idle timeout of 1s
+# must kill it well before the 5s hang or the 30s hard cap elapse.
+set +e
+SIMULATE_MODE=hang HANG_SECONDS=5 VERDICT_LINE='QA_VERDICT: PASS' \
+PATH="$fake_bin:$PATH" \
+  run_qa_agent codex "screenshots at $qa_dir/screenshots" 1 30 \
+    "$qa_dir/out2.log" "$qa_dir/err2.log" "$qa_dir/final2.txt"
+hang_rc=$?
+set -e
+[[ "$hang_rc" -eq 124 ]] || { echo "expected hung run to be killed with 124, got rc=$hang_rc" >&2; exit 1; }
 
 prompt_dir="$test_root/prompts"
 mkdir -p "$prompt_dir"
@@ -113,6 +185,7 @@ run_worker() {
   RUN_ARTIFACTS_DIR="$test_root/artifacts" \
   QA_PROMPT_DIR="$prompt_dir" \
   QA_TIMEOUT_SECONDS=30 \
+  QA_IDLE_TIMEOUT_SECONDS=30 \
   PR_EXISTS="${PR_EXISTS:-true}" \
   VERDICT_LINE="${VERDICT_LINE:-QA_VERDICT: PASS}" \
     "$worker" >"$test_root/stdout.log" 2>"$test_root/stderr.log"

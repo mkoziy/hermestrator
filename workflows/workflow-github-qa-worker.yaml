@@ -25,8 +25,18 @@ inputs:
       description: Coding agent to drive this QA run directly (no ralphex).
     qa_timeout_seconds:
       type: integer
-      default: 1800
-      description: Wall-clock timeout for the whole QA agent pass.
+      default: 3600
+      description: >-
+        Hard wall-clock cap for the QA agent pass — a safety net against a
+        genuinely runaway agent, not the normal stop condition (see
+        qa_idle_timeout_seconds).
+    qa_idle_timeout_seconds:
+      type: integer
+      default: 300
+      description: >-
+        The QA agent is killed once it has produced no new output for this
+        long — not on a flat wall-clock deadline, so a run that's still
+        actively working is left alone up to qa_timeout_seconds.
   required:
     - repo
     - issue_number
@@ -44,12 +54,13 @@ jobs:
           inputs:
             run: scripts/github-qa-worker.sh
             workingDir: .
-            timeout: 2400000
+            timeout: 4500000
             env:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               AGENT: ${{ inputs.agent }}
               QA_TIMEOUT_SECONDS: ${{ string(inputs.qa_timeout_seconds) }}
+              QA_IDLE_TIMEOUT_SECONDS: ${{ string(inputs.qa_idle_timeout_seconds) }}
               WORKFLOW_RUN_ID: ${{ run.id }}
               RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
         dependsOn: []

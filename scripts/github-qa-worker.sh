@@ -8,7 +8,12 @@ set -Eeuo pipefail
 : "${REPO:?REPO is required}"
 : "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
 : "${AGENT:=pi}"
-: "${QA_TIMEOUT_SECONDS:=1800}"
+# Hard wall-clock cap (safety net against a runaway agent) and an idle cap
+# (killed only once the agent has produced no new output for this long —
+# see run_qa_agent for why a fixed wall-clock timeout alone kills runs that
+# are still genuinely working).
+: "${QA_TIMEOUT_SECONDS:=3600}"
+: "${QA_IDLE_TIMEOUT_SECONDS:=300}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
 # The workflow supplies a named volume mounted at this path in both the QA
 # worker and orchestrator. It must not live in the read-only /workspace mount.
@@ -48,29 +53,68 @@ fail() {
   exit 1
 }
 
-# Runs the QA agent non-interactively and prints its combined stdout+stderr
-# log path via $1. codex/pi differ enough in flag shape that this is a
-# small dedicated dispatcher rather than one shared arg list.
+# Runs the QA agent non-interactively in its JSON event-stream mode (not
+# plain text: codex/pi buffer plain-text output entirely in memory and only
+# write it on exit, so a killed run leaves an empty log with no clue what
+# happened — the JSON stream writes one event per line as it happens).
+# Polls the combined log's size instead of a flat wall-clock timeout, so a
+# run that's still producing events only gets killed once it goes quiet for
+# idle_timeout seconds; max_timeout is a hard cap against a genuinely
+# runaway agent. On success, extracts the agent's final message (where the
+# verdict line lives) into final_msg. Returns 124 on either kill, matching
+# the old `timeout` exit code parse_verdict already expects.
 run_qa_agent() {
-  local agent_bin="$1" prompt="$2" timeout_seconds="$3" stdout_log="$4" stderr_log="$5"
+  local agent_bin="$1" prompt="$2" idle_timeout="$3" max_timeout="$4" stdout_log="$5" stderr_log="$6" final_msg="$7"
   case "$agent_bin" in
-    codex) timeout --kill-after=10s "${timeout_seconds}s" codex exec "$prompt" >"$stdout_log" 2>"$stderr_log" ;;
-    pi) timeout --kill-after=10s "${timeout_seconds}s" pi --print "$prompt" >"$stdout_log" 2>"$stderr_log" ;;
+    codex) codex exec --json --output-last-message "$final_msg" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
+    pi) pi --print --mode json "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     *) return 1 ;;
   esac
+  local pid=$! start last_change last_size now size
+  start="$(date +%s)"; last_change="$start"; last_size=-1
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    now="$(date +%s)"
+    size="$(wc -c <"$stdout_log" 2>/dev/null || echo 0)"
+    if [[ "$size" != "$last_size" ]]; then
+      last_size="$size"; last_change="$now"
+    elif (( now - last_change >= idle_timeout )); then
+      printf 'No output for %ss, treating QA agent as stuck\n' "$idle_timeout" >&2
+      kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    if (( now - start >= max_timeout )); then
+      printf 'Hit hard cap of %ss, killing QA agent\n' "$max_timeout" >&2
+      kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+  done
+  local rc=0
+  wait "$pid" || rc=$?
+  # codex writes final_msg itself via --output-last-message; pi's JSON mode
+  # has no equivalent flag, so pull the last assistant message's text out
+  # of the event stream by hand.
+  if [[ "$agent_bin" == pi && "$rc" -eq 0 ]]; then
+    jq -rs '[.[] | select(.type=="message_end" and .message.role=="assistant")]
+      | last | (.message.content // [])[] | select(.type=="text") | .text' \
+      "$stdout_log" >"$final_msg" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 # Reads the agent's fixed-format last line (see "Verdict line contract" in
-# the QA agent flow plan). $1 is the agent's exit status (124 = timeout,
-# from `timeout --kill-after`), $2 the stdout log to scan. Missing/garbage
-# output is always a fail — never a silent pass.
+# the QA agent flow plan) out of its final message text. $1 is the agent's
+# exit status (124 = timeout/stuck, from run_qa_agent), $2 the final-message
+# file. Missing/garbage output is always a fail — never a silent pass.
 parse_verdict() {
-  local agent_status="$1" stdout_log="$2" line
+  local agent_status="$1" final_msg="$2" line
   if [[ "$agent_status" -eq 124 ]]; then
     printf 'FAIL: QA run timed out\n'
     return
   fi
-  line="$(grep '^QA_VERDICT: ' "$stdout_log" 2>/dev/null | tail -n1 || true)"
+  line="$(grep '^QA_VERDICT: ' "$final_msg" 2>/dev/null | tail -n1 || true)"
   case "$line" in
     'QA_VERDICT: PASS') printf 'PASS\n' ;;
     'QA_VERDICT: FAIL: '*) printf '%s\n' "${line#QA_VERDICT: }" ;;
@@ -157,12 +201,14 @@ emit_vault_note() {
     --arg branch "$branch" \
     --arg verdict "$verdict" \
     --arg screenshots "$screenshots_block" \
+    --arg qa_final "$( [[ -f "$artifact_dir/qa-agent.final-message.txt" ]] && cat "$artifact_dir/qa-agent.final-message.txt" || true )" \
     --arg qa_stdout "$( [[ -f "$artifact_dir/qa-agent.stdout.log" ]] && cat "$artifact_dir/qa-agent.stdout.log" || true )" \
     --arg qa_stderr "$( [[ -f "$artifact_dir/qa-agent.stderr.log" ]] && cat "$artifact_dir/qa-agent.stderr.log" || true )" \
     '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch,
       progress_log:("QA verdict: " + $verdict + "\n" +
         (if $screenshots == "" then "" else "\nScreenshots:\n" + $screenshots end) +
-        "\n--- qa-agent.stdout.log ---\n" + $qa_stdout +
+        "\n--- qa-agent.final-message.txt ---\n" + $qa_final +
+        "\n--- qa-agent.stdout.log (json events) ---\n" + $qa_stdout +
         "\n--- qa-agent.stderr.log ---\n" + $qa_stderr)}' \
     >"$artifact_dir/note.json"
   printf 'VAULT_NOTE_JSON:'
@@ -175,6 +221,7 @@ emit_vault_note() {
 case "$AGENT" in codex|pi) ;; *) fail "agent must be codex or pi" ;; esac
 agent_bin="$AGENT"
 [[ "$QA_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "qa_timeout_seconds must be a positive integer"
+[[ "$QA_IDLE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "qa_idle_timeout_seconds must be a positive integer"
 [[ "$WORKFLOW_RUN_ID" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || fail "workflow_run_id contains unsupported characters"
 [[ "$RUN_ARTIFACTS_DIR" == /* ]] || fail "run_artifacts_dir must be an absolute path"
 
@@ -227,14 +274,14 @@ $(jq -r '.body' "$issue_json")
 Write any screenshots as PNG files under: ${screenshots_dir}"
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf 'Running QA agent (%s), timeout %ss\n' "$agent_bin" "$QA_TIMEOUT_SECONDS"
+printf 'Running QA agent (%s), idle timeout %ss, max %ss\n' "$agent_bin" "$QA_IDLE_TIMEOUT_SECONDS" "$QA_TIMEOUT_SECONDS"
 set +e
-run_qa_agent "$agent_bin" "$prompt" "$QA_TIMEOUT_SECONDS" \
-  "$artifact_dir/qa-agent.stdout.log" "$artifact_dir/qa-agent.stderr.log"
+run_qa_agent "$agent_bin" "$prompt" "$QA_IDLE_TIMEOUT_SECONDS" "$QA_TIMEOUT_SECONDS" \
+  "$artifact_dir/qa-agent.stdout.log" "$artifact_dir/qa-agent.stderr.log" "$artifact_dir/qa-agent.final-message.txt"
 agent_status=$?
 set -e
 
-verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.stdout.log")"
+verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.final-message.txt")"
 printf 'QA verdict: %s\n' "$verdict"
 
 mapfile -t image_urls < <(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")
