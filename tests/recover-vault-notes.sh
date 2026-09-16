@@ -12,19 +12,26 @@ cat >"$test_root/artifacts/run-123/note.json" <<'JSON'
 {"repo":"owner/repo","issue_number":7,"issue":{"title":"Test issue","body":"body","state":"OPEN","labels":[],"url":"https://example.test/issues/7","comments":[]},"pr_url":"https://example.test/pull/9","ralphex_config":"ralphex-codex","status":"success","started_at":"2026-08-16T13:34:56Z","completed_at":"2026-08-16T13:35:57Z","branch":"agent/issue-7","progress_log":"implemented all tasks"}
 JSON
 
+# A corrupt/incomplete note.json (e.g. a process killed mid-write) must not
+# block recovery of the other valid note above.
+mkdir -p "$test_root/artifacts/run-corrupt"
+: >"$test_root/artifacts/run-corrupt/note.json"
+
 cat >"$test_root/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' '{"number":7,"title":"Test issue","body":"body","state":"OPEN","labels":[],"url":"https://example.test/issues/7","comments":[]}'
 EOF
 chmod +x "$test_root/bin/gh"
 
+rc=0
 (
   cd "$test_root"
   PATH="$test_root/bin:$PATH" \
   RUN_ARTIFACTS_DIR="$test_root/artifacts" \
   VAULT_DIR=vault \
     "$repo_root/scripts/recover-vault-notes.sh"
-)
+) || rc=$?
+[[ "$rc" == 1 ]]
 
 run_note="$test_root/vault/owner/repo/issue-7/runs/20260816133456.md"
 [[ -f "$run_note" ]]
