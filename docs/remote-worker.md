@@ -9,9 +9,11 @@ mutable checkout for each run.
 `worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
 Codex CLI, Pi coding agent, the `worker` user), then `dev` (this section —
 adds ralphex/gremlins, builds `orchestrator`/`coding-worker`) and `qa`
-(browser-driven QA worker, see "QA ticket worker" below). Build with
-`docker build --target dev` or `--target qa`; `docker-compose.yml` sets
-`build.target` per service.
+(built `FROM dev`, not `base` — adds chromium/agent-browser on top, so it
+carries both ralphex and the browser-driven QA tooling; see "QA ticket
+worker" below and "Ephemeral all-in-one worker" further down, which relies
+on `qa` having everything). Build with `docker build --target dev` or
+`--target qa`; `docker-compose.yml` sets `build.target` per service.
 
 ## Image contents
 
@@ -180,6 +182,72 @@ spec:
                   valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-mkoziy } }
                 - name: CODEX_ACCESS_TOKEN
                   valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: codex-access-token } }
+```
+
+### Ephemeral all-in-one worker (orchestrator + coding + qa in one pod)
+
+The pattern above still needs a standing `orchestrator` (`swamp serve`)
+Deployment for `qa-worker` to dial into, plus a Service so a separate
+CronJob pod can reach it — a persistent process just to host a WebSocket
+port. `worker/ephemeral-entrypoint.sh` (image entrypoint
+`/usr/local/bin/ephemeral-entrypoint`, built into the `qa` target since
+that's the stage with both ralphex and the QA tooling) collapses
+orchestrator + coding-worker + qa-worker into a single container that:
+
+1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background;
+2. fires every `workflows/*.yaml` file that declares `trigger.schedule`
+   exactly once, passing its `trigger.inputs` as `--input` — `swamp
+   serve`'s own scheduler only ticks while the process stays up, which a
+   pod that lives for a couple of minutes every 15 defeats;
+3. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
+   concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set, so each drains
+   whatever it was just handed and exits;
+4. once both have exited, stops `swamp serve` and exits — `0` if neither
+   worker failed.
+
+No Service, no Ingress, no TLS: the orchestrator only ever listens on
+`127.0.0.1` inside its own pod, same as `coding-worker` does in the
+always-on Deployment today. This trades the always-on orchestrator's low
+idle footprint for zero resident containers at all — the tradeoff only
+makes sense once nothing else needs to reach the orchestrator between runs
+(nothing does today; see `AGENTS.md`).
+
+Needs both a coding and a QA worker token (`swamp worker token create
+coding`/`... create qa`), plus `VAULT_GH_TOKEN` for the orchestrator's own
+moontechs-vault auth:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hermestrator-ephemeral
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: hermestrator
+              image: <your-registry>/hermestrator-worker:qa-<tag>
+              command: ["/usr/local/bin/ephemeral-entrypoint"]
+              env:
+                - name: SWAMP_WORKER_IDLE_TIMEOUT
+                  value: 2m
+                - name: VAULT_GH_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: vault-gh-token } }
+                - name: SWAMP_WORKER_TOKEN_CODING
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-coding } }
+                - name: SWAMP_WORKER_TOKEN_QA
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-qa } }
+                - name: GH_TOKEN_MOONTECHS
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-moontechs } }
+                - name: GH_TOKEN_MKOZIY
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-mkoziy } }
+                - name: CODEX_ACCESS_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: codex-access-token } }
 ```
 
 ## Local Docker development

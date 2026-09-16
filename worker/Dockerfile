@@ -52,6 +52,7 @@ RUN useradd --create-home --shell /bin/bash worker \
     && chown --recursive worker:worker /workspace /home/worker
 
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
+COPY --chmod=0755 worker/ephemeral-entrypoint.sh /usr/local/bin/ephemeral-entrypoint
 
 ENV HOME=/home/worker \
     CODEX_HOME=/home/worker/.codex \
@@ -122,8 +123,11 @@ RUN curl --fail --location --silent --show-error \
 
 ENV SWAMP_WORKER_LABELS=pool=coding
 
-# --- qa: browser-driven QA worker, invokes codex/pi directly (no ralphex) ---
-FROM base AS qa
+# --- qa: browser-driven QA worker, invokes codex/pi directly (no ralphex).
+# Built FROM dev (not base) so this image also carries ralphex/gremlins —
+# it's the one used by the all-in-one ephemeral entrypoint, which runs
+# orchestrator + coding-worker + qa-worker in a single container. ---
+FROM dev AS qa
 
 ARG AGENT_BROWSER_VERSION=0.37.1
 
@@ -143,7 +147,6 @@ RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION
     && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
-COPY --chown=worker:worker . /workspace
 
 RUN mkdir -p /home/worker/.config/agent-browser \
     && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
