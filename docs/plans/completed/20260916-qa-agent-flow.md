@@ -182,9 +182,8 @@ check (QA doesn't care about `docs/plans/`, it cares about a PR existing):
 7. Parse the agent's verdict from a fixed-format last line (see Task 5 for
    the exact contract) + collect screenshot paths.
 8. Build one issue comment (`gh issue comment`) stating the verdict and the
-   checked-out SHA, with screenshots attached — upload mechanism resolved
-   in Task 4 (`gh issue comment` has no native image-upload flag; needs the
-   GitHub API's issue-comment image path or equivalent).
+   checked-out SHA, with screenshots embedded as markdown images — see
+   "Screenshot attachment mechanism" below for how they get a stable URL.
 9. Swap `agent-qa-ready` → `agent-qa-passed`/`agent-qa-failed` via
    `gh issue edit --add-label --remove-label`.
 
@@ -202,39 +201,111 @@ don't drift:
 - A missing/unparseable verdict line is itself a fail
   (`QA_VERDICT: FAIL: no verdict emitted`), never silently treated as pass.
 
+### QA agent invocation: direct, not through ralphex
+
+The `ralphex_config`/`RALPHEX_CONFIG` name is kept as-is through the QA
+poller/worker/labels (`agent-pi`/`agent-codex` routing, `ralphex-codex`/
+`ralphex-pi` enum values) purely to reuse the same shared vocabulary as the
+dev flow — for QA it's read only as "codex vs pi," not as a ralphex config
+directory selector. Not worth a rename for one flow when it'd fork the
+label/enum convention from the other.
+
+ralphex is a diff-oriented, plan/implement/review tool: its task phase
+expects to produce commits, and even `--review` requires committed changes
+on a branch to `git diff` against (confirmed against its own docs — no
+mode fits "observe runtime behavior, make no code changes, emit a
+verdict"). QA does not use ralphex at all. Instead the worker invokes the
+selected agent directly, non-interactively, with the QA prompt as its
+initial instruction:
+
+- codex: `codex exec "$(cat "$prompt_file")"`
+- pi: `pi --print "$(cat "$prompt_file")"` (`--print`/`-p` = non-interactive,
+  process prompt and exit)
+
+Both give the agent shell/bash tool access in the checkout, which is enough
+to start the app, run e2e tests, and drive `agent-browser` via its CLI —
+no MCP wiring beyond what `agent-browser`'s own skill/CLI already needs.
+
+QA does not reuse the `ralphex-codex`/`ralphex-pi` config directories
+(those hold ralphex-specific executor/model settings for a tool QA doesn't
+run) or `worker/ralphex-common/prompts/` (those are implement/review-phase
+prompts for a build workflow). It gets its own minimal config: model
+choice per agent (picked in Task 5/6, no strong reason to differ from the
+dev-flow's own choices, but not literally parsed from the ralphex config
+format), and the same runtime auth env vars already provisioned for the
+dev flow (`CODEX_ACCESS_TOKEN`/`OPENAI_API_KEY` for codex,
+`OPENCODE_API_KEY` for pi — see `docs/remote-worker.md`'s existing table).
+
 ### QA agent prompts
 
-New prompt directory, `worker/qa/prompts/` (parallel to
-`worker/ralphex-common/prompts/`), not reusing the dev-flow's
-implementation-phase prompts — QA has a different job (verify, not build)
-and a different tool (`agent-browser`, not a coding-agent's own edit tools).
-Exact routing (codex vs pi invocation mechanics) still goes through the same
-`ralphex-codex`/`ralphex-pi` config split so both agents can run
-`agent-browser` and shell commands identically.
+New prompt directory, `worker/qa/prompts/` — one prompt per agent or one
+shared prompt text passed to both (decide in Task 5 based on how much the
+codex/pi invocations actually need to differ) — not reusing the dev-flow's
+`worker/ralphex-common/prompts/`, which are ralphex phase prompts for a
+tool QA doesn't run.
 
-### `worker/qa/Dockerfile`
+### `worker/Dockerfile`: multi-stage, `qa` target instead of a second file
 
-New image, not a `worker/Dockerfile` FROM: base = `worker/Dockerfile`'s
-FROM (`node:22.20.0-bookworm-slim`) plus:
+Not a separate `worker/qa/Dockerfile` — Docker can't `FROM` a stage defined
+in a *different* Dockerfile without first building and publishing it as its
+own image (extra build step, extra thing to keep in sync for local
+Compose builds). Simpler and just as effective: turn `worker/Dockerfile`
+into one multi-stage file with a shared `base` stage and two final
+targets, `dev` (today's `coding-worker`/`orchestrator` image, unchanged
+behavior) and `qa`. `docker-compose.yml` picks the target per service via
+`build.target`; both still build from the same `dockerfile:
+worker/Dockerfile`.
 
-- Everything `worker/Dockerfile` installs (swamp, ralphex, codex, pi, gh,
-  mise) — QA still needs the same agent tooling to run the coding agent
-  that drives `agent-browser`.
-- Chrome/Chromium (whatever `agent-browser`'s own setup docs require — check
-  the `agent-browser` skill for its documented install path rather than
-  guessing a package name).
-- `agent-browser` itself.
-- `worker/qa/prompts/` copied in instead of `worker/ralphex-common/prompts/`.
+Since QA invokes codex/pi directly (previous section) rather than through
+ralphex, the `qa` target needs a smaller slice of tooling than a first pass
+would assume:
+
+- **`base` stage** (shared): `swamp` (worker connect), `gh`, `jq`, `git`,
+  `mise` (still needed for `scripts/agent-setup.sh` to resolve the target
+  repo's own toolchain), `codex`, `pi`, the `worker` user/home dirs, the
+  entrypoint script.
+- **`dev` target only**: `ralphex`, `gremlins`, and the
+  `ralphex-codex`/`ralphex-pi`/`ralphex-common` config/prompt directories —
+  all ralphex-specific, unused by `qa`.
+- **`qa` target only**: Debian's `chromium` apt package (not
+  `agent-browser install`'s Chrome for Testing download — that ships
+  amd64-only and hard-fails on arm64; verified by actually building both
+  archs), `agent-browser` npm package with its platform binary chmodded by
+  hand (`--ignore-scripts`, like codex/pi, skips its postinstall),
+  `worker/qa/prompts/`, and an `agent-browser.json` config
+  (`AGENT_BROWSER_CONFIG`) pointing `executablePath` at
+  `/usr/bin/chromium` — confirmed working by running `agent-browser open`
+  + `screenshot` inside the built image, not just inferred from docs.
 
 `AGENTS.md` requires every version bump in `worker/Dockerfile` to update
-its pinned SHA-256 checksum in the same change — duplicating that whole
-pinned-checksum tool-install block into a second Dockerfile means every
-future bump needs the identical edit made twice, with nothing to catch a
-missed copy. Default to a shared base stage (multi-stage build, QA image
-`FROM` the tooling stage and layers on Chrome/`agent-browser`/its own
-prompts) instead of duplication; only fall back to duplication in Task 6 if
-a concrete blocker turns up (e.g. Chrome's install genuinely needs a
-different base image).
+its pinned SHA-256 checksum in the same change — putting the tools both
+targets actually share in `base` means a shared-tool bump happens once,
+not twice with nothing to catch a missed copy.
+
+### Screenshot attachment mechanism
+
+No `agent-browser` skill convention exists for this (checked: the
+`dogfood`/QA skill writes screenshots to local disk only, no GitHub
+integration). GitHub has no public, stable API for the drag-and-drop
+image upload the web UI uses — that's an internal, session-authenticated
+endpoint, not usable from a PAT-authenticated `gh`/API call. Avoid it and
+any new external image host (matches the "no new external image host"
+constraint already in Technical Details).
+
+Mechanism: commit each run's screenshots to a dedicated, long-lived branch
+in the *same* repo (`qa-screenshots`, created if it doesn't exist) under
+`<issue_number>/<workflow_run_id>/<file>.png`, push, then embed each image
+in the verdict comment as a standard markdown image referencing
+`https://raw.githubusercontent.com/<owner>/<repo>/<commit-sha>/<path>` —
+pinned to the commit SHA (not the branch name) so the link can't go stale
+if a later run's commit moves the branch tip. This needs no new
+infrastructure: git/gh access the worker already has, GitHub already
+renders `raw.githubusercontent.com` image URLs inline in comments.
+
+Accepted trade-off, not solved here: `qa-screenshots` grows forever (every
+run adds blobs, nothing prunes it). Fine for v1; add a retention job only
+if branch/repo size actually becomes a problem (`ponytail:` — no premature
+cleanup logic).
 
 ### Worker lifecycle: ephemeral, not persistent
 
@@ -294,20 +365,24 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
 - Modify: `scripts/github-ticket-worker.sh`
 - Create: `tests/github-ticket-worker-labels.sh`
 
-- [ ] confirm with user before implementing (flagged in Solution Overview —
+- [x] confirm with user before implementing (flagged in Solution Overview —
       this is the one task touching an existing dev-flow file)
-- [ ] factor the three existing `gh issue edit --remove-label agent-ready`
+- [x] factor the three existing `gh issue edit --remove-label agent-ready`
       call sites (reuse-existing-PR, reuse-concurrent-PR, new-PR — lines
       280, 292, 299 in the current file) into one helper function
-- [ ] extend that helper to also `--add-label agent-qa-ready`, and to
+      (`mark_ready_for_qa`)
+- [x] extend that helper to also `--add-label agent-qa-ready`, and to
       `--remove-label agent-qa-failed` if present (closes the stale-verdict
       window noted in Technical Details)
-- [ ] handle the case where `agent-qa-ready` is already present (re-run
+- [x] handle the case where `agent-qa-ready` is already present (re-run
       after a QA fail/re-fix cycle) — `gh issue edit --add-label` is
       idempotent, no extra guard needed
-- [ ] write a test asserting the helper is called from all three call
+- [x] write a test asserting the helper is called from all three call
       sites and performs all label operations together
-- [ ] run tests — must pass before task 2
+      (`tests/github-ticket-worker-labels.sh`)
+- [x] run tests — must pass before task 2 (pre-existing, unrelated failure
+      in `tests/vault-write-note-artifacts.sh` confirmed present before
+      this change too, via `git stash`)
 
 ### Task 2: `scripts/github-qa-poller.sh`
 
@@ -315,17 +390,18 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
 - Create: `scripts/github-qa-poller.sh`
 - Create: `tests/github-qa-poller.sh`
 
-- [ ] implement per Technical Details above, matching
-      `scripts/github-ticket-poller.sh` style (`fail()`, `cleanup()` trap,
-      env var declarations, `REPO` regex validation)
-- [ ] `agent-pi`/`agent-codex` → `ralphex_config` routing, copied logic
-- [ ] open-PR-on-`agent/issue-<N>` lookup and skip-if-none handling
-- [ ] in-flight-run guard scoped to `workflowName == "github-qa-worker"`
-- [ ] detached `swamp workflow run github-qa-worker` trigger
-- [ ] write tests: no issues, issue with no PR (skip), issue with PR and no
+- [x] implement per Technical Details above, matching
+      `scripts/github-ticket-poller.sh` style exactly (that script itself
+      has no `fail()`/`cleanup()` trap — those are `github-ticket-worker.sh`
+      conventions; the poller uses inline `{ printf ...; exit 1; }`)
+- [x] `agent-pi`/`agent-codex` → `ralphex_config` routing, copied logic
+- [x] open-PR-on-`agent/issue-<N>` lookup and skip-if-none handling
+- [x] in-flight-run guard scoped to `workflowName == "github-qa-worker"`
+- [x] detached `swamp workflow run github-qa-worker` trigger
+- [x] write tests: no issues, issue with no PR (skip), issue with PR and no
       active run (triggers), issue with an active non-stale run (skip),
       label routing (agent-pi/agent-codex/neither)
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: `scripts/github-qa-worker.sh`
 
@@ -333,24 +409,28 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
 - Create: `scripts/github-qa-worker.sh`
 - Create: `tests/github-qa-worker.sh`
 
-- [ ] implement per Technical Details above: validate inputs, resolve
+- [x] implement per Technical Details above: validate inputs, resolve
       owner token, find PR head ref, pin its head SHA, clone+checkout that
       SHA, run `scripts/agent-setup.sh` if present
-- [ ] invoke the QA agent (codex/pi per `RALPHEX_CONFIG`) with the QA
-      prompt profile from Task 5 and the issue body/comments as context,
-      under one overall wall-clock timeout; kill the process tree and
-      report `QA_VERDICT: FAIL: QA run timed out` on expiry
-- [ ] parse the agent's verdict per the Verdict line contract (Technical
+- [x] invoke the QA agent directly per `RALPHEX_CONFIG`
+      (`codex exec`/`pi --print`, not ralphex — see Technical Details) with
+      the QA prompt profile from Task 5 and the issue body/comments as
+      context, under one overall wall-clock timeout (`timeout
+      --kill-after=10s`); report `QA_VERDICT: FAIL: QA run timed out` on
+      expiry
+- [x] parse the agent's verdict per the Verdict line contract (Technical
       Details) — unparseable/missing output is a fail, never a silent pass
       — and glob the fixed screenshots directory
-- [ ] post the issue comment (verdict + pinned SHA + screenshots) —
+- [x] post the issue comment (verdict + pinned SHA + screenshots) —
       resolve the screenshot-attachment mechanism (see Technical Details,
-      finalized in Task 4)
-- [ ] swap `agent-qa-ready` → `agent-qa-passed`/`agent-qa-failed`
-- [ ] write tests: missing PR (fails loudly), label swap on pass, label
-      swap on fail, missing `agent-setup.sh` is a no-op not a failure,
-      missing/garbage verdict line is treated as fail
-- [ ] run tests — must pass before task 4
+      finalized together with Task 4 since they're the same code path)
+- [x] swap `agent-qa-ready` → `agent-qa-passed`/`agent-qa-failed`
+- [x] write tests: missing PR (fails loudly), label swap on pass, label
+      swap on fail, missing `agent-setup.sh` is a no-op not a failure
+      (implicit: fixture repo has none, both scenarios still succeed),
+      missing/garbage verdict line is treated as fail (unit-tested via
+      `parse_verdict` directly)
+- [x] run tests — must pass before task 4
 
 ### Task 4: Resolve screenshot-attachment mechanism
 
@@ -358,23 +438,23 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
 - Modify: `scripts/github-qa-worker.sh` (finalize the placeholder from
   Task 3)
 
-- [ ] check how `agent-browser`'s own skill docs recommend surfacing
-      screenshots to a GitHub issue/PR (it may already have a convention);
-      if not, use the GitHub API's issue-comment image upload path (upload
-      to the repo's assets via `gh api` or a `gh gist`-free path — no new
-      external image host)
-- [ ] implement the chosen mechanism in `github-qa-worker.sh`
-- [ ] write a test asserting the comment body contains resolvable image
-      references, not just local file paths
-- [ ] run tests — must pass before task 5
+- [x] implement the `qa-screenshots` branch push + SHA-pinned
+      `raw.githubusercontent.com` markdown image embedding per Technical
+      Details' "Screenshot attachment mechanism" (`publish_screenshots`
+      in `github-qa-worker.sh`, done as part of Task 3 — same code path)
+- [x] handle the branch-doesn't-exist-yet case (first-ever QA run on a
+      repo): create it as an empty/orphan branch rather than failing
+- [x] write a test asserting the comment body contains
+      `raw.githubusercontent.com` URLs pinned to a commit SHA, not local
+      file paths or the mutable branch name
+- [x] run tests — must pass before task 5
 
 ### Task 5: QA prompt profile (`worker/qa/prompts/`)
 
 **Files:**
-- Create: `worker/qa/prompts/` (files depend on what the codex/pi + ralphex
-  config split needs — mirror the shape of `worker/ralphex-common/prompts/`)
+- Create: `worker/qa/prompts/task.txt`
 
-- [ ] write the QA task prompt: read issue instructions, start the app
+- [x] write the QA task prompt: read issue instructions, start the app
       (agent decides npm dev vs a built binary vs whatever the repo's
       `agent-setup.sh`/README documents, including how it decides the app
       is ready — no port-polling helper from the worker script, this is
@@ -382,35 +462,52 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
       `agent-browser` to exercise the golden path + edges, screenshots
       mandatory for web targets — written to the fixed screenshots
       directory from the Verdict line contract
-- [ ] instruct the agent to emit the exact `QA_VERDICT: PASS` /
+- [x] instruct the agent to emit the exact `QA_VERDICT: PASS` /
       `QA_VERDICT: FAIL: <reason>` line per the Verdict line contract,
       including treating "app wouldn't start" as a normal fail reason, not
       a crash
-- [ ] no unrelated reviewer/multi-phase machinery from the dev-flow
+- [x] no unrelated reviewer/multi-phase machinery from the dev-flow
       prompts — QA is a single pass, not a plan/implement/review loop
+- ➕ dropped the planned per-agent model-choice config file: `codex
+      exec`/`pi --print` both pick up model/auth from the same runtime env
+      vars already provisioned for the dev flow (Technical Details), so
+      there's nothing left for a separate config file to override — add
+      one only if a real need for a QA-specific model choice shows up
 - [ ] smoke-test the prompt manually against one real ticket once Task 6's
       image exists (tracked in Post-Completion, not a checkbox here)
 
-### Task 6: `worker/qa/Dockerfile`
+### Task 6: `worker/Dockerfile` multi-stage `qa` target
 
 **Files:**
-- Create: `worker/qa/Dockerfile`
+- Modify: `worker/Dockerfile` (split into `base`/`dev`/`qa` stages —
+  existing `dev` behavior must not change)
+- Create: `worker/qa/prompts/` copied in by the `qa` stage (already
+  written in Task 5)
 - Modify: `docker-compose.yml`
 - Modify: `docs/remote-worker.md`
 
-- [ ] split `worker/Dockerfile`'s tool-install stage (swamp, ralphex,
-      codex, pi, gh, mise — everything pinned+checksummed) into a shared
-      base stage both `worker/Dockerfile` and `worker/qa/Dockerfile` build
-      `FROM`, so a version/checksum bump happens in one place
-- [ ] build `worker/qa/Dockerfile` off that base stage, adding Chrome +
-      `agent-browser` + `worker/qa/prompts/` (instead of
-      `worker/ralphex-common/prompts/`)
-- [ ] add `qa-worker` service to `docker-compose.yml`: `pool=qa`, own
-      volumes, same GH token env vars as `coding-worker`,
-      `SWAMP_WORKER_IDLE_TIMEOUT: 2m`, no `restart:` (see "Worker
-      lifecycle: ephemeral, not persistent" in Technical Details — this
-      service is run via `docker compose run --rm`, not left `up -d`)
-- [ ] document the new image/service in `docs/remote-worker.md`: a "QA
+- [x] restructure `worker/Dockerfile` into `FROM ... AS base` (apt
+      packages, mise, swamp, gh, codex, pi, worker user/home dirs,
+      entrypoint) → `FROM base AS dev` (today's ralphex/gremlins/
+      ralphex-config installs, unchanged) → `FROM base AS qa` (chromium +
+      `agent-browser` + `worker/qa/prompts/`)
+- [x] verify `docker build --target dev .` still produces a working image
+      equivalent to today's (built it; confirmed codex/pi/gh/swamp/mise/
+      ralphex/gremlins all present and ralphex-codex/ralphex-pi config
+      dirs intact)
+- [x] add `qa-worker` service to `docker-compose.yml`: `dockerfile:
+      worker/Dockerfile`, `target: qa`, own volumes, same GH token env vars
+      as `coding-worker`, `SWAMP_WORKER_IDLE_TIMEOUT: 2m`, no `restart:`
+      (pool label comes from the image's own `ENV SWAMP_WORKER_LABELS`
+      now, not repeated in compose — see "Worker lifecycle: ephemeral, not
+      persistent"; this service is run via `docker compose run --rm`, not
+      left `up -d`); `docker compose config` validated clean
+- [x] set `target: dev` explicitly on the existing `orchestrator`/
+      `coding-worker` services (was implicit/only target before); also
+      dropped the now-redundant `SWAMP_WORKER_LABELS: pool=coding` from
+      `coding-worker`'s environment since the `dev` stage's own `ENV` sets
+      it
+- [x] document the new target/service in `docs/remote-worker.md`: a "QA
       ticket worker" section (same detail level as "Image contents"/
       "Runtime configuration") plus an "Ephemeral QA worker scheduling"
       subsection with the Compose `run --rm` + host-cron example and an
@@ -418,67 +515,108 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
       `concurrencyPolicy: Forbid`, `SWAMP_WORKER_IDLE_TIMEOUT` set) as a
       reference the user adapts to their own cluster — this repo doesn't
       apply it
-- [ ] `docker build -f worker/qa/Dockerfile .` succeeds locally — this is
-      the task's runnable check (no bash-assertion test makes sense for a
-      Dockerfile; a successful build is the check)
+- [x] `docker build --target qa -f worker/Dockerfile .` succeeds locally
+      (both `linux/arm64`, tested directly, and via the amd64 code path
+      reviewed — same package, no per-arch chromium special-casing needed)
+      — went further than "build succeeds": ran `agent-browser open` +
+      `screenshot` as the `worker` user inside the built image and got a
+      real PNG back, confirming the config-file `executablePath` approach
+      actually works, not just that it plausibly should
+- ➕ found and fixed two regressions the "just build it" check wouldn't
+      have caught on its own: (1) `SHELL` doesn't carry across a new
+      `FROM` even within the same multi-stage file — `dev`'s two `RUN ...
+      | sha256sum --check -` steps silently lost `pipefail` until
+      `SHELL [...]` was redeclared in the `dev` stage (hadolint caught it,
+      `DL4006`); (2) `.github/workflows/build-and-push.yml` built `file:
+      worker/Dockerfile` with no `--target`, which now defaults to the
+      *last* stage (`qa`) instead of the intended `dev` — turned the whole
+      job into a matrix over `[dev, qa]`, each with its own tag prefix
+      (`""`/`qa-`) and validate step; confirmed both builds and both
+      validate commands actually pass locally, not just that the YAML
+      parses
 
-### Task 7: Workflows — `workflow-github-qa-poller.yaml` template + per-repo copies, `workflow-github-qa-worker.yaml`
+### Task 7: Workflows and models — `workflow-github-qa-poller.yaml`, `workflow-github-qa-worker.yaml`
+
+**Deviation from the dev-flow's per-repo pattern, by explicit request**: the
+dev flow copies a whole near-identical workflow file per polled repo
+(`workflow-github-ticket-poller-<repo>.yaml` × 3 — files-nest, streamberg,
+weird-reader). For QA, the user asked for one common settings place instead
+of three more near-duplicate files. `scripts/github-qa-poller.sh` takes a
+`REPOS` list (comma/whitespace-separated `owner/name` entries) and loops
+the existing per-repo logic; `workflow-github-qa-poller.yaml` is one
+workflow with its own `trigger.schedule`, defaulting `repos` to today's
+three dev-flow repos — no per-repo file copies for QA.
 
 **Files:**
-- Create: `workflows/workflow-github-qa-poller.yaml` (template, no cron —
-  mirrors `workflow-github-ticket-poller.yaml`)
-- Create: `workflows/workflow-github-qa-poller-<repo>.yaml` for whichever
-  repos already have a `-<repo>.yaml` dev poller today (check
-  `workflows/workflow-github-ticket-poller-*.yaml` for the current list —
-  files-nest, streamberg, weird-reader — and confirm with user whether all
-  three get QA polling or a subset)
-- Create: `workflows/workflow-github-qa-worker.yaml`
+- Modify: `scripts/github-qa-poller.sh` (Task 2's `REPO` → `REPOS`, loop
+  per repo, continue past one repo's failure rather than aborting the tick)
+- Modify: `tests/github-qa-poller.sh` (multi-repo coverage)
+- Create: `workflows/workflow-github-qa-poller.yaml` (already scaffolded
+  via `swamp workflow create`; single workflow, own `trigger.schedule`,
+  `repos` input defaulting to `moontechs/files-nest,moontechs/weird-reader,
+  mkoziy/streamberg`)
+- Create: `workflows/workflow-github-qa-worker.yaml` (already scaffolded
+  and filled in — done)
 - Create two new `command/shell` models (`github_qa_poller_shell`,
   `github_qa_worker_shell`) via `swamp model create` — kept separate from
   each other and from the dev-flow models for the same lock-contention
-  reason `AGENTS.md` documents for the existing pair
+  reason `AGENTS.md` documents for the existing pair — done
 
-- [ ] `swamp workflow create` for `workflow-github-qa-worker.yaml`: single
-      `main` job running `scripts/github-qa-worker.sh` with `pool: qa`
-      placement (no vault-sync job — QA doesn't write to the notes vault;
-      confirm this scope call with user if vault notes turn out to be
-      wanted for QA runs too)
-- [ ] `swamp workflow create` for `workflow-github-qa-poller.yaml` template:
-      unlabeled `main` job running `scripts/github-qa-poller.sh`, inputs
-      mirroring the dev poller template (`repo`, `label` default
-      `agent-qa-ready`, `ralphex_config`, `server_url`)
-- [ ] copy per-repo poller files with `trigger.schedule` cron entries,
-      confirmed repo list from the checklist above
-- [ ] run `swamp workflow validate` (or repo's documented equivalent) on
-      all new/changed workflow files
-- [ ] no automated test for workflow YAML itself (matches existing repo
-      convention — dev-flow workflows have none either); Task 8 covers
-      manual verification
+- [x] `swamp model create command/shell github_qa_poller_shell` and
+      `github_qa_worker_shell`
+- [x] `swamp workflow create` + fill in `workflow-github-qa-worker.yaml`:
+      single `main` job running `scripts/github-qa-worker.sh` with
+      `pool: qa` placement (no vault-sync job — QA doesn't write to the
+      notes vault, matches the scope call already flagged in the plan);
+      `swamp workflow validate` passed
+- [x] rework `scripts/github-qa-poller.sh` to accept `REPOS` (list) instead
+      of `REPO` (single), looping today's per-repo body (`poll_repo`
+      function); one repo's `gh`/`swamp` failure logs and continues to the
+      next repo rather than aborting the whole tick (`overall_status`)
+- [x] update `tests/github-qa-poller.sh` for the `REPOS` list — added a
+      two-repo scenario where each repo independently triggers/skips per
+      its own fixture state, on top of the existing single-repo scenarios
+- [x] `swamp workflow create` + fill in `workflow-github-qa-poller.yaml`:
+      one `main` job running `scripts/github-qa-poller.sh`, `repos` input
+      (`trigger.inputs.repos` = today's three dev-flow repos), own
+      `trigger.schedule` (`*/15 * * * *`, matching the dev flow's cadence),
+      `label` default `agent-qa-ready`, `ralphex_config`, `server_url` —
+      `swamp workflow validate` passed
+- [x] run tests — must pass before task 8
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify every item in Overview is implemented: label-driven trigger,
-      PR checkout, agent-setup, agent decides run mechanism, e2e run,
-      log watching, agent-browser driving + mandatory web screenshots,
-      issue comment with verdict, label swap, cron-scheduled, separate
-      heavy image, codex/pi split reusing existing label routing
-- [ ] run every new `tests/*.sh` script, confirm all pass
-- [ ] run this repo's existing full check command (see README's own
-      lint/test/build gate) to confirm nothing in the dev flow regressed
+- [x] verify every item in Overview is implemented: label-driven trigger
+      (Task 1/2), PR checkout at a pinned SHA (Task 3), agent-setup.sh
+      (Task 3), agent decides run mechanism (Task 5 prompt), e2e run
+      (Task 5), log watching (Task 5), agent-browser driving + mandatory
+      web screenshots (Task 5), issue comment with verdict (Task 3/4),
+      label swap (Task 3), cron-scheduled (Task 7), separate heavy image
+      (Task 6), codex/pi split reusing existing label routing (Task 2/3)
+      — all present
+- [x] run every new `tests/*.sh` script, confirm all pass — all pass;
+      `tests/vault-write-note-artifacts.sh` fails, confirmed pre-existing
+      and unrelated via `git stash` in Task 1
+- [x] no repo-wide lint/test/build gate exists for this infra repo (no
+      such command documented in README) — closest equivalent is
+      `.github/workflows/build-and-push.yml`'s hadolint + Docker build;
+      ran both locally (hadolint clean, `--target dev` and `--target qa`
+      both build and their validate commands both pass) to confirm nothing
+      in the dev flow regressed
 
 ### Task 9: Update documentation
 
-- [ ] update `AGENTS.md` with a "QA flow" section parallel to the existing
+- [x] update `AGENTS.md` with a "QA flow" section parallel to the existing
       poller/worker section — label lifecycle, the `agent-qa-ready` trigger
       point in the dev worker, the separate `pool:qa` image rationale
-- [ ] update `AGENTS.md`'s "GitHub tokens" owner-onboarding checklist: a
+- [x] update `AGENTS.md`'s "GitHub tokens" owner-onboarding checklist: a
       new owner now needs a `case` arm added to four scripts
       (`github-ticket-poller.sh`, `github-ticket-worker.sh`,
       `github-qa-poller.sh`, `github-qa-worker.sh`), not two
-- [ ] update `README.md` if it documents the dev flow end-to-end today
-      (check before assuming — keep this task a no-op if README doesn't
-      cover that level of detail)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `README.md` does document the dev flow end-to-end (an ASCII diagram
+      in "How it works") — added a matching QA-flow diagram and a
+      `worker/` layout-table update
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
@@ -505,6 +643,12 @@ GitHub labels/tokens, real target repo) to verify end-to-end.
   push-progress/retry model — not solved by a lock here, just noted).
 
 **External system updates:**
+- Create the `agent-qa-ready`/`agent-qa-passed`/`agent-qa-failed` GitHub
+  labels in each target repo before enabling this flow — `gh issue edit
+  --add-label`/`--remove-label` require the label to already exist
+  repo-wide, same unstated precondition `agent-ready`/`agent-pi`/
+  `agent-codex` already have today (nothing in this repo creates any of
+  them).
 - Each target repo may need its own QA-facing conventions documented
   (e.g. how `agent-setup.sh` should expose "how to start the app" if that
   isn't already obvious from the repo, same spirit as the existing

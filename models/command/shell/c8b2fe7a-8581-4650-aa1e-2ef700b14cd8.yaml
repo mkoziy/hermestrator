@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: c8b2fe7a-8581-4650-aa1e-2ef700b14cd8
+name: github_qa_worker_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

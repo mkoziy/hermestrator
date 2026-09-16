@@ -1,0 +1,65 @@
+id: e9b46523-7dba-4375-acc4-b0def9df8f5b
+name: github-qa-poller
+description: >-
+  Scans every repo in `repos` for open issues labeled agent-qa-ready that
+  have an open pull request on agent/issue-<N>, and triggers
+  github-qa-worker for each. One workflow covers all polled repos (unlike
+  the dev flow's one-file-per-repo pattern) so repo list/schedule/label
+  live in one place — see docs/plans/20260916-qa-agent-flow.md Task 7.
+  Runs on a cron trigger via swamp serve.
+trigger:
+  schedule: "*/15 * * * *"
+  inputs:
+    repos: moontechs/files-nest,moontechs/weird-reader,mkoziy/streamberg
+inputs:
+  type: object
+  properties:
+    repos:
+      type: string
+      description: Comma/whitespace-separated list of owner/name repos to poll.
+    label:
+      type: string
+      default: agent-qa-ready
+      description: Issue label that marks a ticket as eligible for QA polling.
+    ralphex_config:
+      type: string
+      default: ralphex-codex
+      enum:
+        - ralphex-codex
+        - ralphex-pi
+      description: ralphex profile passed through to triggered github-qa-worker runs.
+    server_url:
+      type: string
+      default: ws://127.0.0.1:9090
+      description: >-
+        Loopback URL of the swamp serve instance this poller runs under. Required so the
+        triggered github-qa-worker run dispatches to enrolled pool:qa workers instead
+        of running as a disconnected local process with no worker dispatcher.
+  required:
+    - repos
+tags: {}
+jobs:
+  - name: main
+    description: Trigger github-qa-worker for every issue with a PR ready for QA.
+    steps:
+      - name: poll-and-trigger
+        description: List agent-qa-ready issues with an open PR and run the QA worker for each repo.
+        task:
+          type: model_method
+          modelIdOrName: github_qa_poller_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-qa-poller.sh
+            workingDir: .
+            timeout: 300000
+            env:
+              REPOS: ${{ inputs.repos }}
+              LABEL: ${{ inputs.label }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              SWAMP_SERVE_URL: ${{ inputs.server_url }}
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

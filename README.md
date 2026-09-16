@@ -25,6 +25,28 @@ they execute on a remote worker built from [worker/Dockerfile](worker/Dockerfile
 see [docs/remote-worker.md](docs/remote-worker.md) for image contents, required
 runtime credentials, and local Docker Compose setup.
 
+A second, independent flow QAs the PR the flow above opened — checks it out,
+starts the app, runs any e2e tests, drives it with a browser, and posts a
+pass/fail verdict with screenshots back to the issue:
+
+```
+workflow-github-qa-poller  (cron, every 15m, covers every polled repo)
+  → scripts/github-qa-poller.sh
+      finds open `agent-qa-ready` issues with an open PR on agent/issue-<N>
+  → triggers workflow-github-qa-worker for each match
+
+workflow-github-qa-worker  (manual or triggered)
+  → scripts/github-qa-worker.sh
+      checks out the PR at its pinned head commit, runs a coding agent
+      directly (no ralphex — QA makes no code changes) to QA it, posts a
+      verdict comment, swaps agent-qa-ready for agent-qa-passed/-failed
+```
+
+Labeled `pool: qa`; runs on a separate, heavier worker image (Chrome +
+`agent-browser`) built from the same `worker/Dockerfile`'s `qa` target, and
+is meant to be started on a schedule rather than run as a persistent daemon
+— see `docs/remote-worker.md`'s "QA ticket worker" section.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -32,7 +54,7 @@ runtime credentials, and local Docker Compose setup.
 | `workflows/` | swamp workflow definitions (poller + worker) |
 | `scripts/` | shell implementations invoked by the workflows |
 | `models/` | swamp model definitions |
-| `worker/` | Dockerfile and entrypoint for the remote coding worker, plus per-agent ralphex profiles |
+| `worker/` | Multi-stage Dockerfile (`base`/`dev`/`qa`) and entrypoint for the remote workers, plus per-agent ralphex profiles and QA prompts |
 | `docs/` | operational docs (remote worker setup, research notes) |
 | `.github/workflows/` | CI: builds and publishes the worker image on tag push |
 

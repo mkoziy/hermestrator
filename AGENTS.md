@@ -18,6 +18,10 @@ triggers `workflows/workflow-github-ticket-worker.yaml` to implement each one
 via ralphex and open a PR. See [README.md](README.md) for the full flow and
 [docs/remote-worker.md](docs/remote-worker.md) for the worker image.
 
+A second, independent flow QAs the PR the dev flow opened —
+`workflows/workflow-github-qa-poller.yaml` / `-worker.yaml`. See "QA flow"
+below and [docs/plans/20260916-qa-agent-flow.md](docs/plans/completed/20260916-qa-agent-flow.md).
+
 ## Shell scripts (`scripts/`)
 
 New or edited scripts should match the existing style in
@@ -41,11 +45,22 @@ existing type before writing a custom extension (CLAUDE.md rule 1).
 
 ## Docker / worker image
 
-`worker/Dockerfile` pins exact versions and SHA-256 checksums for every
-downloaded binary (swamp, ralphex, gh, the Pi adapter script, mise). If you
-bump a version, update its pinned checksum in the same change — don't drop
-verification. Never bake credentials into the image; runtime secrets are
-injected via environment variables only (see the table in
+`worker/Dockerfile` is multi-stage: a shared `base` stage (swamp, gh, mise,
+codex, pi — everything both `dev` and `qa` need), then `dev` (today's
+ralphex-based coding-worker/orchestrator, adds ralphex/gremlins) and `qa`
+(browser-driven QA worker, adds chromium/agent-browser — see "QA flow"
+below). Put a tool in `base` only if both targets actually use it; a
+version/checksum bump on a shared tool then happens once, not once per
+target. `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` does not carry across
+a new `FROM` even within the same file — any stage with a `RUN ... | cmd`
+pipe needs its own `SHELL` redeclaration, or hadolint's `DL4006` will catch
+the missing one.
+
+It pins exact versions and SHA-256 checksums for every downloaded binary
+(swamp, ralphex, gh, the Pi adapter script, mise). If you bump a version,
+update its pinned checksum in the same change — don't drop verification.
+Never bake credentials into the image; runtime secrets are injected via
+environment variables only (see the table in
 [docs/remote-worker.md](docs/remote-worker.md)).
 
 The image intentionally does **not** preinstall language runtimes/package
@@ -57,10 +72,14 @@ tool version for every repo the worker runs.
 
 ## CI
 
-`.github/workflows/build-and-push.yml` lints the Dockerfile with hadolint,
-builds the image, runs a smoke check (`swamp version`, `ralphex --version`,
-etc. inside the container), then pushes to GHCR on tag push. Keep the image
-buildable and the smoke check passing for any Dockerfile change.
+`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa]`: each
+lints the shared Dockerfile with hadolint, builds its own `--target`, runs a
+target-specific smoke check inside the container (`dev`: `swamp version`,
+`ralphex --version`, etc.; `qa`: `swamp version`, `agent-browser --version`,
+`chromium --version`, etc. — no `ralphex --version`, it isn't installed
+there), then pushes to GHCR with a `qa-`-prefixed tag for `qa` and the
+existing untouched tag scheme for `dev`. Keep both targets buildable and
+both smoke checks passing for any Dockerfile change.
 
 ## GitHub tokens
 
@@ -82,19 +101,23 @@ Onboarding a new owner:
    **Issues** (read — `gh issue list`), **Pull requests** (read/write —
    `gh pr list`/`gh pr create`). Skip `Administration` and `Actions` — this
    pipeline never uses them.
-2. Add a `case "$REPO" in ... esac` arm for the new owner in both
-   `scripts/github-ticket-poller.sh` and `scripts/github-ticket-worker.sh`,
-   exporting `GH_TOKEN` from a distinctly-named `GH_TOKEN_<OWNER>` env var.
-   The `*)` fallback arm fails loudly on an unmapped owner — never silently
-   fall through to some other owner's token.
+2. Add a `case "$REPO" in ... esac` arm for the new owner in all four
+   ticket scripts — `scripts/github-ticket-poller.sh`,
+   `scripts/github-ticket-worker.sh`, `scripts/github-qa-poller.sh`,
+   `scripts/github-qa-worker.sh` — exporting `GH_TOKEN` from a
+   distinctly-named `GH_TOKEN_<OWNER>` env var. The `*)` fallback arm fails
+   loudly on an unmapped owner — never silently fall through to some other
+   owner's token.
 3. Set that `GH_TOKEN_<OWNER>` var wherever the pod's other secrets already
-   live — `docker-compose.yml`'s `orchestrator` *and* `coding-worker`
-   services for local dev (the poller job runs unlabeled, i.e. on the
-   orchestrator; the worker job runs on `pool: coding`), the equivalent k3s
-   Secret/env for a cluster deployment. Both need it: the poller reads
-   issues with it, the coding worker pushes commits and opens the PR with
-   it. If both roles happen to run in the same container, set it once there
-   — the scripts don't care how many containers are involved.
+   live — `docker-compose.yml`'s `orchestrator`, `coding-worker`, *and*
+   `qa-worker` services for local dev (both poller jobs run unlabeled, i.e.
+   on the orchestrator; the dev worker runs on `pool: coding`, the QA
+   worker on `pool: qa`), the equivalent k3s Secret/env for a cluster
+   deployment. All three need it: the pollers read issues with it, the dev
+   worker pushes commits and opens the PR with it, the QA worker reads the
+   PR and comments the verdict with it. If multiple roles happen to run in
+   the same container, set it once there — the scripts don't care how many
+   containers are involved.
 
 The orchestrator additionally needs `VAULT_GH_TOKEN` for `vault-repo`; it is
 not used by either ticket script and must be injected separately from the
@@ -158,6 +181,61 @@ that repo (not to hermestrator) with this prompt:
 >   repo.
 > - No comments beyond one line if something is genuinely non-obvious; this
 >   is a small infra script, not documentation.
+
+## QA flow
+
+Independent of the dev flow above (implement → PR), a second poller/worker
+pair QAs the PR the dev flow opened:
+
+- **Trigger**: `scripts/github-ticket-worker.sh`'s `mark_ready_for_qa`
+  helper (called from all three of its PR-ready exit paths — reuse an
+  existing open PR, reuse a concurrently-created PR, a newly created PR —
+  don't add a fourth call site that bypasses it) removes `agent-ready` and
+  any stale `agent-qa-failed`, and adds `agent-qa-ready`.
+- **`workflows/workflow-github-qa-poller.yaml`** is one workflow covering
+  every polled repo (`repos` input, comma-separated) — deliberately *not*
+  one file per repo like the dev flow's `-files-nest.yaml`/etc., so the
+  repo list/schedule/label live in one place. It scans `agent-qa-ready`
+  issues with an open PR on `agent/issue-<N>` and triggers
+  `workflow-github-qa-worker.yaml`. Same `agent-pi`/`agent-codex` label
+  routing, in-flight-run guard, and detached-trigger pattern as the dev
+  poller — see `scripts/github-qa-poller.sh`.
+- **`workflows/workflow-github-qa-worker.yaml`** pins the PR's head SHA
+  before checkout (so a push landing between label-add and checkout can't
+  silently QA a stale commit), runs `scripts/agent-setup.sh` if present,
+  then invokes the agent **directly** — `codex exec` / `pi --print`, not
+  ralphex. ralphex is a diff-oriented plan/implement/review tool; even its
+  `--review` mode requires committed changes to `git diff` against, and QA
+  makes no code changes at all. `RALPHEX_CONFIG`/`ralphex-codex`/
+  `ralphex-pi` naming is kept only to share the poller/label vocabulary
+  with the dev flow — it selects codex vs pi, nothing ralphex-specific.
+- The QA agent runs under one overall wall-clock timeout
+  (`QA_TIMEOUT_SECONDS`, `timeout --kill-after=10s`) and must end its
+  output with an exact `QA_VERDICT: PASS` or `QA_VERDICT: FAIL: <reason>`
+  line (`worker/qa/prompts/task.txt`) — a missing/garbage line is always
+  parsed as a fail, never a silent pass.
+- Screenshots have no GitHub-native upload path from a PAT-authenticated
+  `gh`/API call, so `github-qa-worker.sh` pushes them to a dedicated,
+  long-lived `qa-screenshots` branch (created on first use) under
+  `<issue>/<run-id>/`, then embeds `raw.githubusercontent.com` URLs pinned
+  to that push's commit SHA in the verdict comment. That branch grows
+  forever by design (v1); add a retention job only if repo size actually
+  becomes a problem.
+- Verdict comment posted, then `agent-qa-ready` → `agent-qa-passed` or
+  `agent-qa-failed` (whichever verdict label isn't being added is removed
+  first, so a re-run can't leave both present). `qa_failed → agent_ready`
+  is a **manual** step — a human reviews the failure comment and re-adds
+  `agent-ready` by hand; nothing here automates that transition.
+- All three QA labels (`agent-qa-ready`/`-passed`/`-failed`) must be
+  created in each target repo before enabling this flow — same unstated
+  precondition `agent-ready`/`agent-pi`/`agent-codex` already have; `gh
+  issue edit` requires a label to exist repo-wide before it can be
+  added/removed.
+- The `qa` worker image is heavy (Chrome/agent-browser) and deliberately
+  not a persistent daemon like `coding-worker`: `SWAMP_WORKER_IDLE_TIMEOUT`
+  makes it drain whatever `pool:qa` work is queued and exit, meant to be
+  started on a schedule (host cron + `docker compose run --rm qa-worker`,
+  or a k3s `CronJob` — see `docs/remote-worker.md`), not left running.
 
 ## Commits and PRs
 

@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
+      target: dev
     entrypoint: ["swamp"]
     command: ["serve", "--host", "0.0.0.0", "--port", "9090", "--trusted-hosts", "orchestrator,localhost"]
     ports:
@@ -21,12 +22,12 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
+      target: dev
     depends_on:
       - orchestrator
     environment:
       SWAMP_ORCHESTRATOR_URL: ws://orchestrator:9090
       SWAMP_WORKER_TOKEN: ${SWAMP_WORKER_TOKEN:-}
-      SWAMP_WORKER_LABELS: pool=coding
       SWAMP_WORKER_CONCURRENCY: "1"
       GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
       GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
@@ -42,8 +43,38 @@ services:
     stop_grace_period: 5m
     restart: on-failure
 
+  # Heavy (Chrome + agent tooling) and deliberately not a persistent daemon
+  # like coding-worker — it's meant to be started on a schedule, drain
+  # whatever pool:qa work is queued, and exit. See "Worker lifecycle:
+  # ephemeral, not persistent" in docs/plans/20260916-qa-agent-flow.md and
+  # docs/remote-worker.md. Run it with `docker compose run --rm qa-worker`
+  # (e.g. from a host cron entry), not `docker compose up -d`.
+  qa-worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+      target: qa
+    depends_on:
+      - orchestrator
+    environment:
+      SWAMP_ORCHESTRATOR_URL: ws://orchestrator:9090
+      SWAMP_WORKER_TOKEN: ${SWAMP_WORKER_TOKEN:-}
+      SWAMP_WORKER_CONCURRENCY: "1"
+      SWAMP_WORKER_IDLE_TIMEOUT: 2m
+      GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
+      GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
+      CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+    volumes:
+      - .:/workspace:ro
+      - swamp_worker_qa_cache:/home/worker/.swamp-worker
+      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
+    stop_grace_period: 5m
+
 volumes:
   swamp_worker_cache:
+  swamp_worker_qa_cache:
   swamp_worker_artifacts:
   codex_home:
   pi_agent_home:

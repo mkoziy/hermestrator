@@ -6,6 +6,13 @@ advertises `SWAMP_WORKER_LABELS=pool=coding`. The image defaults to one dispatch
 slot (`SWAMP_WORKER_CONCURRENCY=1`); do not increase it while ralphex owns a
 mutable checkout for each run.
 
+`worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
+Codex CLI, Pi coding agent, the `worker` user), then `dev` (this section —
+adds ralphex/gremlins, builds `orchestrator`/`coding-worker`) and `qa`
+(browser-driven QA worker, see "QA ticket worker" below). Build with
+`docker build --target dev` or `--target qa`; `docker-compose.yml` sets
+`build.target` per service.
+
 ## Image contents
 
 Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
@@ -92,6 +99,88 @@ provider. The supplied `ralphex-pi` profile selects OpenCode Go, whose documente
 headless credential is `OPENCODE_API_KEY`. If a future Pi provider offers an
 interactive subscription login, seed the dedicated `pi_agent_home` volume once
 with that provider's login; do not assume it is compatible with OpenCode Go.
+
+## QA ticket worker
+
+The `qa` target (`docker build --target qa -f worker/Dockerfile .`) builds a
+separate image for `github-qa-worker` (see
+[docs/plans/20260916-qa-agent-flow.md](plans/20260916-qa-agent-flow.md)):
+it QAs the PR a `github-ticket-worker` run already opened, driving the app
+with a browser and posting a pass/fail verdict — it does not run ralphex.
+
+Image contents specific to `qa` (shares `base`'s Swamp/gh/mise/Codex/Pi with
+`dev`, but not ralphex/gremlins/ralphex-configs, which are `dev`-only):
+
+- Debian's `chromium` apt package — not `agent-browser install`'s Chrome for
+  Testing download, which ships amd64-only and hard-fails under `arm64`
+  (this image builds both, via `TARGETARCH`).
+- The `agent-browser` CLI, pointed at that Chromium via
+  `AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json`
+  (`{"executablePath":"/usr/bin/chromium"}`) — confirmed working by
+  actually running `agent-browser open`/`screenshot` inside the built
+  image, not just inferred from its docs.
+- `worker/qa/prompts/task.txt`, copied to `QA_PROMPT_DIR`
+  (`/home/worker/.config/qa`).
+
+QA invokes `codex exec`/`pi --print` directly (no ralphex plan/review
+cycle fits a "don't edit code, just observe and verdict" task), so it reuses
+the same Codex/Pi runtime auth as `dev` — `CODEX_ACCESS_TOKEN`/
+`OPENAI_API_KEY`/`OPENCODE_API_KEY` from the table above, nothing QA-specific.
+
+### Ephemeral QA worker scheduling
+
+Unlike `coding-worker` (always-on daemon), `qa-worker` is heavy (Chrome +
+agent tooling) and only needs to run while QA work is queued. `swamp worker
+connect` supports draining and exiting instead of running forever:
+`SWAMP_WORKER_IDLE_TIMEOUT` (drain and exit after being idle for a
+duration) or `SWAMP_WORKER_MAX_DISPATCHES` (exit after N dispatches). The
+`github-qa-poller` workflow still triggers `github-qa-worker` on its own
+schedule regardless of whether a `pool:qa` worker happens to be connected —
+if none is, the run just queues at the orchestrator until one connects.
+
+**Local/Compose**: `docker-compose.yml`'s `qa-worker` service sets
+`SWAMP_WORKER_IDLE_TIMEOUT: 2m` and has no `restart:` policy — run it from a
+host cron entry, not `docker compose up -d`:
+
+```bash
+# e.g. */15 * * * * in host crontab
+docker compose run --rm qa-worker
+```
+
+**k3s**: this repo doesn't manage or apply Kubernetes manifests — the
+orchestrator's own k3s deployment already lives outside it. The following
+is a reference `CronJob` to adapt, not something this repo applies:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hermestrator-qa-worker
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid # one drain-and-exit run at a time is enough
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: qa-worker
+              image: <your-registry>/hermestrator-worker:qa-<tag>
+              env:
+                - name: SWAMP_ORCHESTRATOR_URL
+                  value: ws://<orchestrator-service>:9090
+                - name: SWAMP_WORKER_IDLE_TIMEOUT
+                  value: 2m
+                - name: SWAMP_WORKER_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: token } }
+                - name: GH_TOKEN_MOONTECHS
+                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-moontechs } }
+                - name: GH_TOKEN_MKOZIY
+                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-mkoziy } }
+                - name: CODEX_ACCESS_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: codex-access-token } }
+```
 
 ## Local Docker development
 

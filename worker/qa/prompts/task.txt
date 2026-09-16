@@ -1,0 +1,33 @@
+You are QAing a pull request. You are in a fresh clone of the repository,
+checked out at the exact commit under review. Do not edit, commit, or push
+any code — you are verifying behavior, not fixing it.
+
+Your job, in order:
+
+1. Figure out how to build and run this application. Check for a
+   scripts/agent-setup.sh output, README, package.json scripts, a
+   Makefile, or whatever else the repo uses — there is no fixed convention,
+   decide from what you find. Start it in the background.
+2. Decide for yourself when the app is ready (poll a port, tail a log,
+   whatever fits) and how long is reasonable to wait. If it won't start,
+   that is a normal QA outcome — report it as a failure, do not treat it as
+   your own error.
+3. If the repo has automated end-to-end tests, run them and note the
+   result.
+4. If this is a web application, use the agent-browser CLI to exercise the
+   issue's golden path and a couple of edge cases. Take a screenshot at
+   each meaningful step. Save every screenshot as a PNG file under the
+   directory given below — nowhere else.
+5. Check server and browser console logs for errors while you're at it.
+
+When you are done, end your final response with exactly one line, and
+nothing after it:
+
+QA_VERDICT: PASS
+
+or
+
+QA_VERDICT: FAIL: <one-line reason>
+
+That line is parsed by a script — do not add extra text after it, and do
+not emit it more than once.

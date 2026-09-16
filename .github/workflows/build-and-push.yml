@@ -12,6 +12,16 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # dev: today's ralphex-based coding-worker/orchestrator image.
+          - target: dev
+            tag_prefix: ""
+          # qa: browser-driven QA worker (invokes codex/pi directly, no
+          # ralphex) — see docs/plans/20260916-qa-agent-flow.md.
+          - target: qa
+            tag_prefix: "qa-"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,8 +45,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=tag
-            type=raw,value=latest
+            type=ref,event=tag,prefix=${{ matrix.tag_prefix }}
+            type=raw,value=${{ matrix.tag_prefix }}latest
 
       # Build locally first so the worker runtime is validated before anything
       # reaches the registry.
@@ -45,17 +55,26 @@ jobs:
         with:
           context: .
           file: worker/Dockerfile
+          target: ${{ matrix.target }}
           load: true
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
-      - name: Validate image
+      - name: Validate image (dev)
+        if: matrix.target == 'dev'
         run: |
           set -euo pipefail
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
           docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; ralphex --version; codex --version; pi --version; gremlins --version; gh --version; git --version; jq --version; node --version; mise --version'
+
+      - name: Validate image (qa)
+        if: matrix.target == 'qa'
+        run: |
+          set -euo pipefail
+          image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
+          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; codex --version; pi --version; agent-browser --version; chromium --version; gh --version; git --version; jq --version; node --version; mise --version'
 
       - name: Push image
         run: |

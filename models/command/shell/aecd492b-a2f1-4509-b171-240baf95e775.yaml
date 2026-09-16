@@ -1,0 +1,8 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: aecd492b-a2f1-4509-b171-240baf95e775
+name: github_qa_poller_shell
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

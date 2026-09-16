@@ -125,6 +125,17 @@ fail() {
   exit 1
 }
 
+# Called from every path that leaves this issue with a PR ready for review:
+# an implementation branch is done with dev-flow work, so hand it to the QA
+# flow. Removes any stale agent-qa-failed from a prior QA cycle so a re-run
+# doesn't carry a misleading "still failing" label while re-queued.
+mark_ready_for_qa() {
+  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+    --remove-label agent-ready \
+    --remove-label agent-qa-failed \
+    --add-label agent-qa-ready
+}
+
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || fail "repo must be owner/name"
 [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "issue_number must be a positive integer"
 [[ "$BASE_BRANCH" =~ ^[[:alnum:]_./-]+$ ]] || fail "base_branch contains unsupported characters"
@@ -277,7 +288,7 @@ git push --set-upstream origin "$branch"
 open_pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json url --jq '.[0].url // empty')"
 if [[ -n "$open_pr" ]]; then
   printf 'Updated existing pull request: %s\n' "$open_pr"
-  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready
+  mark_ready_for_qa
   exit 0
 fi
 
@@ -289,11 +300,11 @@ if ! open_pr="$(gh pr create --repo "$REPO" --base "$BASE_BRANCH" --head "$branc
   open_pr="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json url --jq '.[0].url // empty')"
   [[ -n "$open_pr" ]] && {
     printf 'Reusing existing pull request created concurrently: %s\n' "$open_pr"
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready
+    mark_ready_for_qa
     exit 0
   }
   fail "pull request creation failed"
 fi
 
 printf 'Created pull request for issue #%s from %s\n' "$ISSUE_NUMBER" "$branch"
-gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label agent-ready
+mark_ready_for_qa

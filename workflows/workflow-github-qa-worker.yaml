@@ -1,0 +1,65 @@
+id: b26d0c91-bcc1-40ad-a315-e0920c11b547
+name: github-qa-worker
+description: >-
+  QAs the pull request a github-ticket-worker run already opened for an
+  agent-qa-ready issue: checks out the PR at its pinned head commit, runs a
+  coding agent directly (codex exec / pi --print, no ralphex) to start the
+  app, run e2e tests if present, and drive it with agent-browser, then
+  posts a pass/fail verdict with screenshots back to the issue and swaps
+  the QA label.
+inputs:
+  type: object
+  properties:
+    repo:
+      type: string
+      description: GitHub repository in owner/name form.
+    issue_number:
+      type: integer
+      description: Open GitHub issue number, labeled agent-qa-ready, to QA.
+    ralphex_config:
+      type: string
+      default: ralphex-codex
+      enum:
+        - ralphex-codex
+        - ralphex-pi
+      description: >-
+        Selects codex vs pi for this QA run. Kept as ralphex-codex/ralphex-pi
+        purely to share the dev flow's label/enum vocabulary — QA never runs
+        ralphex itself.
+    qa_timeout_seconds:
+      type: integer
+      default: 1800
+      description: Wall-clock timeout for the whole QA agent pass.
+  required:
+    - repo
+    - issue_number
+tags: {}
+jobs:
+  - name: main
+    description: Check out the PR, run the QA agent, and post a verdict.
+    steps:
+      - name: run-qa
+        description: Runs the isolated QA worker slice.
+        task:
+          type: model_method
+          modelIdOrName: github_qa_worker_shell
+          methodName: execute
+          inputs:
+            run: scripts/github-qa-worker.sh
+            workingDir: .
+            timeout: 2400000
+            env:
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              QA_TIMEOUT_SECONDS: ${{ string(inputs.qa_timeout_seconds) }}
+              WORKFLOW_RUN_ID: ${{ run.id }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+        labels:
+          pool: qa
+    dependsOn: []
+    weight: 0
+version: 1
