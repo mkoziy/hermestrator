@@ -75,6 +75,17 @@ run_scheduled_workflows() {
 # Everything below actually runs the pod; skip it when sourced for tests.
 [[ "${EPHEMERAL_ENTRYPOINT_SOURCED_FOR_TEST:-}" == 1 ]] && return 0 2>/dev/null || true
 
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+command -v gosu >/dev/null || fail "gosu is required"
+command -v swamp >/dev/null || fail "swamp is required"
+command -v gh >/dev/null || fail "gh is required"
+command -v codex >/dev/null || fail "codex is required"
+command -v pi >/dev/null || fail "pi is required"
+
 : "${VAULT_GH_TOKEN:?VAULT_GH_TOKEN is required for the moontechs vault}"
 : "${SWAMP_WORKER_TOKEN_CODING:?SWAMP_WORKER_TOKEN_CODING is required}"
 : "${SWAMP_WORKER_TOKEN_QA:?SWAMP_WORKER_TOKEN_QA is required}"
@@ -125,7 +136,7 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-[[ "$ready" == 1 ]] || { printf 'ERROR: orchestrator did not come up in time\n' >&2; exit 1; }
+[[ "$ready" == 1 ]] || fail "orchestrator did not come up in time"
 
 # Bootstrap the vault checkout if this is the first run on a fresh volume —
 # vault-pull/-commit/-push (used by workflow-github-ticket-worker.yaml and

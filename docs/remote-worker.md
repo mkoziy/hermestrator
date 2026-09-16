@@ -206,16 +206,23 @@ qa-worker into a single container that:
 2. bootstraps the vault Git checkout (`$VAULT_DIR`, default
    `.swamp/vault-clone`) via `swamp model method run vault-repo clone` if
    it isn't already there — a no-op once the volume holding it has one;
-3. fires every `workflows/*.yaml` file that declares `trigger.schedule`
-   exactly once, passing its `trigger.inputs` as `--input` — `swamp
-   serve`'s own scheduler only ticks while the process stays up, which a
-   pod that lives for a couple of minutes every 15 defeats;
+3. fires every schedule-triggered workflow exactly once
+   (`run_scheduled_workflows` — an explicit list, not auto-discovered:
+   `swamp workflow run <name>` doesn't apply a workflow's own
+   `trigger.inputs`, so there's nothing to introspect that would actually
+   run correctly; `swamp serve`'s own scheduler only ticks while the
+   process stays up, which a pod that lives for a couple of minutes every
+   15 defeats). `tests/ephemeral-entrypoint.sh` cross-checks this list
+   against `workflows/*.yaml` so an onboarded poller can't silently go
+   unrun, or run with a stale/missing required input;
 4. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
    concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set and each logging
    to its own `$RUN_ARTIFACTS_DIR/logs/<tick>/*-worker.log`, so each drains
    whatever it was just handed and exits;
-5. once both have exited, stops `swamp serve` and exits — `0` if neither
-   worker failed.
+5. once both have exited, stops `swamp serve` and exits non-zero if either
+   worker failed *or* any scheduled workflow from step 3 failed — a failed
+   run stays visible as a failed Job instead of looking identical to a
+   clean tick.
 
 No Service, no Ingress, no TLS: the orchestrator only ever listens on
 `127.0.0.1` inside its own pod, same as `coding-worker` does in the
