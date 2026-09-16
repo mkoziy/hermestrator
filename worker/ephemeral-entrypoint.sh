@@ -34,34 +34,42 @@ export VAULT_REPO_URL="${VAULT_REPO_URL:-https://github.com/moontechs/notes.git}
 export HERMESTRATOR_LOG_DIR="${HERMESTRATOR_LOG_DIR:-$RUN_ARTIFACTS_DIR/logs}"
 
 # run_scheduled_workflow: fire one workflow once against the local
-# orchestrator, tolerating failure (a bad run shouldn't block the others or
-# the pod's own exit). $2+ are passed through as `swamp workflow run` args.
+# orchestrator. Does not abort the pod on failure — one broken poller
+# shouldn't stop the others from running or stop coding-worker/qa-worker
+# from draining their queues — but does propagate into $scheduled_failed,
+# which the final `exit` status folds in, so a failed tick still shows up
+# as a failed Job instead of silently exiting 0. $2+ are passed through as
+# `swamp workflow run` args.
 #
 # There's no supported swamp mechanism to "fire every due trigger.schedule
 # once" from outside swamp serve's own --schedule loop (verified: `swamp
 # workflow run <name>` does NOT fall back to a workflow's trigger.inputs —
 # every schema-required input must be passed explicitly, the same as any
 # other manual run). So this is an explicit list, not auto-discovered from
-# workflows/*.yaml — tests/ephemeral-entrypoint.sh cross-checks it against
-# every workflow file that actually declares a trigger.schedule, so an
-# onboarded poller with nothing wired in here fails that test instead of
-# silently never running.
+# workflows/*.yaml — tests/ephemeral-entrypoint.sh cross-checks both that
+# every workflow file with a trigger.schedule is called here, and that
+# every input its schema requires is actually passed.
+scheduled_failed=0
 run_scheduled_workflow() {
   local name="$1"
   shift
   printf 'running scheduled workflow once: %s %s\n' "$name" "$*" >&2
-  gosu worker swamp workflow run "$name" --server ws://127.0.0.1:9090 "$@" \
-    || printf 'WARN: %s failed, continuing\n' "$name" >&2
+  if gosu worker swamp workflow run "$name" --server ws://127.0.0.1:9090 "$@"; then
+    return 0
+  fi
+  printf 'WARN: %s failed\n' "$name" >&2
+  scheduled_failed=1
+  return 1
 }
 
 # Update this alongside workflows/*.yaml: a new one-file-per-repo ticket
 # poller, or a new input a poller's trigger.inputs starts requiring.
 run_scheduled_workflows() {
-  run_scheduled_workflow github-ticket-poller-weird-reader --input repo=moontechs/weird-reader
-  run_scheduled_workflow github-ticket-poller-files-nest --input repo=moontechs/files-nest
-  run_scheduled_workflow github-ticket-poller-streamberg --input repo=mkoziy/streamberg
-  run_scheduled_workflow github-qa-poller --input repos=moontechs/files-nest,moontechs/weird-reader,mkoziy/streamberg
-  run_scheduled_workflow vault-note-recovery
+  run_scheduled_workflow github-ticket-poller-weird-reader --input repo=moontechs/weird-reader || true
+  run_scheduled_workflow github-ticket-poller-files-nest --input repo=moontechs/files-nest || true
+  run_scheduled_workflow github-ticket-poller-streamberg --input repo=mkoziy/streamberg || true
+  run_scheduled_workflow github-qa-poller --input repos=moontechs/files-nest,moontechs/weird-reader,mkoziy/streamberg || true
+  run_scheduled_workflow vault-note-recovery || true
 }
 
 # Everything below actually runs the pod; skip it when sourced for tests.
@@ -149,4 +157,5 @@ pids+=("$qa_pid")
 status=0
 wait "$coding_pid" || status=$?
 wait "$qa_pid" || status=$?
+[[ "$scheduled_failed" == 0 ]] || status=1
 exit "$status"
