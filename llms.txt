@@ -55,13 +55,27 @@ worker: clone target repo @ agent/issue-N into a fresh /tmp workspace
         → ralphex <plan-file> --base-ref <default-branch> --branch agent/issue-N
         → ralphex commits, archives the plan to docs/plans/completed/ or
           docs/plans/archive/, and moves on
-        → push agent/issue-N, open or update the PR, remove agent-ready
+        → push agent/issue-N, open or update the PR, remove agent-ready,
+          add agent-qa-ready
+        │
+        ▼
+qa poller (cron, ~15m): finds agent-qa-ready issues with an open PR
+        │  triggers
+        ▼
+qa worker: clone target repo @ the PR's head commit
+        → run scripts/agent-setup.sh if present+executable, build/run the app,
+          run e2e tests if present, exercise it with a browser if it's a web
+          app (golden path + edge cases from the issue, screenshots, visual
+          regression/performance/accessibility/console checks)
+        → post a pass/fail comment on the issue with any screenshots,
+          remove agent-qa-ready, add agent-qa-passed or agent-qa-failed
 ```
 
 A follow-up round on the same issue is just: push a new `docs/plans/*.md` to
 the same branch and re-add `agent-ready` — the worker pushes into the
 existing PR (or opens a new one if it was closed/merged) instead of starting
-over.
+over. This also clears any stale `agent-qa-failed` from a prior QA cycle, so
+the new push goes through dev then QA again from a clean label state.
 
 Every run starts from an empty clone — nothing is cached, no state persists
 in your repo between runs except what you commit.
