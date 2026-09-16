@@ -80,14 +80,16 @@ tool version for every repo the worker runs.
 
 ## CI
 
-`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa]`: each
-lints the shared Dockerfile with hadolint, builds its own `--target`, runs a
-target-specific smoke check inside the container (`dev`: `swamp version`,
-`ralphex --version`, etc.; `qa`: `swamp version`, `agent-browser --version`,
-`chromium --version`, etc. — no `ralphex --version`, it isn't installed
-there), then pushes to GHCR with a `qa-`-prefixed tag for `qa` and the
-existing untouched tag scheme for `dev`. Keep both targets buildable and
-both smoke checks passing for any Dockerfile change.
+`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa,
+ephemeral]`: each lints the shared Dockerfile with hadolint, builds its own
+`--target`, runs a target-specific smoke check inside the container (`dev`:
+`swamp version`, `ralphex --version`, etc.; `qa`: `swamp version`,
+`agent-browser --version`, `chromium --version`, etc. — no `ralphex
+--version`, it isn't installed there; `ephemeral`: everything `dev` and `qa`
+each check, plus `bash -n /usr/local/bin/ephemeral-entrypoint`), then pushes
+to GHCR with a `qa-`/`ephemeral-`-prefixed tag for `qa`/`ephemeral` and the
+existing untouched tag scheme for `dev`. Keep all three targets buildable
+and all three smoke checks passing for any Dockerfile change.
 
 ## GitHub tokens
 
