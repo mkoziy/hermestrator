@@ -194,15 +194,20 @@ port. `worker/ephemeral-entrypoint.sh` (image entrypoint
 that's the stage with both ralphex and the QA tooling) collapses
 orchestrator + coding-worker + qa-worker into a single container that:
 
-1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background;
-2. fires every `workflows/*.yaml` file that declares `trigger.schedule`
+1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background,
+   logging to `$RUN_ARTIFACTS_DIR/logs/<tick>/serve.log`;
+2. bootstraps the vault Git checkout (`$VAULT_DIR`, default
+   `.swamp/vault-clone`) via `swamp model method run vault-repo clone` if
+   it isn't already there — a no-op once the volume holding it has one;
+3. fires every `workflows/*.yaml` file that declares `trigger.schedule`
    exactly once, passing its `trigger.inputs` as `--input` — `swamp
    serve`'s own scheduler only ticks while the process stays up, which a
    pod that lives for a couple of minutes every 15 defeats;
-3. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
-   concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set, so each drains
+4. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
+   concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set and each logging
+   to its own `$RUN_ARTIFACTS_DIR/logs/<tick>/*-worker.log`, so each drains
    whatever it was just handed and exits;
-4. once both have exited, stops `swamp serve` and exits — `0` if neither
+5. once both have exited, stops `swamp serve` and exits — `0` if neither
    worker failed.
 
 No Service, no Ingress, no TLS: the orchestrator only ever listens on
@@ -211,6 +216,19 @@ always-on Deployment today. This trades the always-on orchestrator's low
 idle footprint for zero resident containers at all — the tradeoff only
 makes sense once nothing else needs to reach the orchestrator between runs
 (nothing does today; see `AGENTS.md`).
+
+**State that must survive the pod exiting, and therefore live on a volume,
+not the container filesystem**: `/workspace/.swamp` (workflow/run history
+*and* the vault Git checkout at `.swamp/vault-clone` — without this
+persisting, every tick re-clones the vault and starts run history from
+empty) and `$RUN_ARTIFACTS_DIR` (retained ticket/QA notes pending a vault
+write, plus the `logs/` tree above). Mount the same two volumes the
+always-on Deployment already uses for `hermestrator-orchestrator-state`
+(→ `/workspace/.swamp`) and `hermestrator-worker-artifacts`
+(→ `/var/lib/swamp-worker-artifacts`) — a `ReadWriteOnce` local-path PVC
+only binds to one node/pod at a time, so stop the Deployment before the
+CronJob starts using them, or give the CronJob its own PVCs seeded from a
+one-time `swamp model method run vault-repo clone`.
 
 Needs both a coding and a QA worker token (`swamp worker token create
 coding`/`... create qa`), plus `VAULT_GH_TOKEN` for the orchestrator's own
@@ -248,6 +266,16 @@ spec:
                   valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-mkoziy } }
                 - name: CODEX_ACCESS_TOKEN
                   valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: codex-access-token } }
+              volumeMounts:
+                - name: orchestrator-state
+                  mountPath: /workspace/.swamp
+                - name: worker-artifacts
+                  mountPath: /var/lib/swamp-worker-artifacts
+          volumes:
+            - name: orchestrator-state
+              persistentVolumeClaim: { claimName: hermestrator-orchestrator-state }
+            - name: worker-artifacts
+              persistentVolumeClaim: { claimName: hermestrator-worker-artifacts }
 ```
 
 ## Local Docker development

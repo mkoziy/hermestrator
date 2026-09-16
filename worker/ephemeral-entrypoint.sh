@@ -18,6 +18,21 @@ export GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/worker/.config/gh}"
 export RUN_ARTIFACTS_DIR="${RUN_ARTIFACTS_DIR:-/var/lib/swamp-worker-artifacts}"
 export SWAMP_WORKER_IDLE_TIMEOUT="${SWAMP_WORKER_IDLE_TIMEOUT:-2m}"
 
+# vault-repo (models/@swamp/git/...) reads/writes this Git checkout — see
+# scripts/recover-vault-notes.sh / vault-write-note.sh, both default to the
+# same path. It must persist across pod runs (mount the same volume as
+# /workspace/.swamp) and, if that volume is ever empty (first run, or a
+# wiped PVC), gets bootstrapped below before any workflow that touches it.
+export VAULT_DIR="${VAULT_DIR:-.swamp/vault-clone}"
+export VAULT_REPO_URL="${VAULT_REPO_URL:-https://github.com/moontechs/notes.git}"
+
+# swamp serve's own process log and each worker's `connect` log are not
+# captured anywhere per-run (unlike ralphex/QA output, which swamp already
+# writes under RUN_ARTIFACTS_DIR) — without this they'd only exist in the
+# pod's own stdout, gone once its k8s Job/Pod history rotates out. Persist
+# them on the same volume as RUN_ARTIFACTS_DIR, one subdirectory per tick.
+export HERMESTRATOR_LOG_DIR="${HERMESTRATOR_LOG_DIR:-$RUN_ARTIFACTS_DIR/logs}"
+
 # workflow_name: print the `name:` declared by a workflow file.
 workflow_name() {
   sed -n 's/^name: //p' "$1" | head -1
@@ -55,14 +70,17 @@ trigger_input_args() {
 : "${SWAMP_WORKER_TOKEN_CODING:?SWAMP_WORKER_TOKEN_CODING is required}"
 : "${SWAMP_WORKER_TOKEN_QA:?SWAMP_WORKER_TOKEN_QA is required}"
 
+tick_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+tick_log_dir="$HERMESTRATOR_LOG_DIR/$tick_id"
+
 mkdir --parents \
   "$SWAMP_WORKER_CACHE_DIR_CODING" "$SWAMP_WORKER_CACHE_DIR_QA" \
   "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$GH_CONFIG_DIR" "$RUN_ARTIFACTS_DIR" \
-  /workspace/.swamp
+  "$tick_log_dir" /workspace/.swamp
 chown --recursive worker:worker \
   "$SWAMP_WORKER_CACHE_DIR_CODING" "$SWAMP_WORKER_CACHE_DIR_QA" \
   "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$GH_CONFIG_DIR" "$RUN_ARTIFACTS_DIR" \
-  /workspace/.swamp
+  "$HERMESTRATOR_LOG_DIR" /workspace/.swamp
 
 if [[ -n "${OPENAI_API_KEY:-}" && -z "${CODEX_ACCESS_TOKEN:-}" ]]; then
   printf '%s' "$OPENAI_API_KEY" | gosu worker codex login --with-api-key
@@ -85,7 +103,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-gosu worker swamp serve --host 127.0.0.1 --port 9090 --trusted-hosts localhost &
+gosu worker swamp serve --host 127.0.0.1 --port 9090 --trusted-hosts localhost \
+  >>"$tick_log_dir/serve.log" 2>&1 &
 pids+=("$!")
 
 printf 'waiting for orchestrator to come up...\n' >&2
@@ -98,6 +117,15 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [[ "$ready" == 1 ]] || { printf 'ERROR: orchestrator did not come up in time\n' >&2; exit 1; }
+
+# Bootstrap the vault checkout if this is the first run on a fresh volume —
+# vault-pull/-commit/-push (used by workflow-github-ticket-worker.yaml and
+# workflow-vault-note-recovery.yaml) all assume $VAULT_DIR already exists.
+if [[ ! -d "/workspace/$VAULT_DIR/.git" ]]; then
+  printf 'bootstrapping vault checkout at %s\n' "$VAULT_DIR" >&2
+  gosu worker swamp model method run vault-repo clone --server ws://127.0.0.1:9090 \
+    --input "url=$VAULT_REPO_URL"
+fi
 
 shopt -s nullglob
 for wf in workflows/*.yaml; do
@@ -114,7 +142,7 @@ SWAMP_ORCHESTRATOR_URL=ws://127.0.0.1:9090 \
   SWAMP_WORKER_TOKEN="$SWAMP_WORKER_TOKEN_CODING" \
   SWAMP_WORKER_LABELS=pool=coding \
   SWAMP_WORKER_CACHE_DIR="$SWAMP_WORKER_CACHE_DIR_CODING" \
-  gosu worker swamp worker connect &
+  gosu worker swamp worker connect >>"$tick_log_dir/coding-worker.log" 2>&1 &
 coding_pid=$!
 pids+=("$coding_pid")
 
@@ -122,7 +150,7 @@ SWAMP_ORCHESTRATOR_URL=ws://127.0.0.1:9090 \
   SWAMP_WORKER_TOKEN="$SWAMP_WORKER_TOKEN_QA" \
   SWAMP_WORKER_LABELS=pool=qa \
   SWAMP_WORKER_CACHE_DIR="$SWAMP_WORKER_CACHE_DIR_QA" \
-  gosu worker swamp worker connect &
+  gosu worker swamp worker connect >>"$tick_log_dir/qa-worker.log" 2>&1 &
 qa_pid=$!
 pids+=("$qa_pid")
 
