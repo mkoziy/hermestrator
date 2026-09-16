@@ -16,16 +16,13 @@ inputs:
     issue_number:
       type: integer
       description: Open GitHub issue number, labeled agent-qa-ready, to QA.
-    ralphex_config:
+    agent:
       type: string
-      default: ralphex-codex
+      default: pi
       enum:
-        - ralphex-codex
-        - ralphex-pi
-      description: >-
-        Selects codex vs pi for this QA run. Kept as ralphex-codex/ralphex-pi
-        purely to share the dev flow's label/enum vocabulary — QA never runs
-        ralphex itself.
+        - codex
+        - pi
+      description: Coding agent to drive this QA run directly (no ralphex).
     qa_timeout_seconds:
       type: integer
       default: 1800
@@ -51,7 +48,7 @@ jobs:
             env:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
-              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              AGENT: ${{ inputs.agent }}
               QA_TIMEOUT_SECONDS: ${{ string(inputs.qa_timeout_seconds) }}
               WORKFLOW_RUN_ID: ${{ run.id }}
               RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
@@ -104,7 +101,7 @@ jobs:
                 "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout : "" }}
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
-              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              RALPHEX_CONFIG: ${{ inputs.agent }}
               WORKFLOW_RUN_ID: ${{ run.id }}
               RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
               VAULT_DIR: .swamp/vault-clone

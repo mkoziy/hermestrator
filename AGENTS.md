@@ -216,9 +216,13 @@ pair QAs the PR the dev flow opened:
   then invokes the agent **directly** — `codex exec` / `pi --print`, not
   ralphex. ralphex is a diff-oriented plan/implement/review tool; even its
   `--review` mode requires committed changes to `git diff` against, and QA
-  makes no code changes at all. `RALPHEX_CONFIG`/`ralphex-codex`/
-  `ralphex-pi` naming is kept only to share the poller/label vocabulary
-  with the dev flow — it selects codex vs pi, nothing ralphex-specific.
+  makes no code changes at all. Its own `agent` input/`AGENT` env var
+  (`codex`/`pi`, default `pi`) is deliberately ralphex-free naming — see
+  `agent-pi`/`agent-codex` label routing in `scripts/github-qa-poller.sh`.
+  The one exception is `scripts/vault-write-note.sh`'s shared note schema,
+  which still stores the value under the dev flow's `ralphex_config` JSON
+  key/`RALPHEX_CONFIG` env var — that writer is shared verbatim with the
+  dev flow and isn't QA-specific to rename.
 - The QA agent runs under one overall wall-clock timeout
   (`QA_TIMEOUT_SECONDS`, `timeout --kill-after=10s`) and must end its
   output with an exact `QA_VERDICT: PASS` or `QA_VERDICT: FAIL: <reason>`

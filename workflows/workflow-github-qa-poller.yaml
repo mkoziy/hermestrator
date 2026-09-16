@@ -21,13 +21,13 @@ inputs:
       type: string
       default: agent-qa-ready
       description: Issue label that marks a ticket as eligible for QA polling.
-    ralphex_config:
+    agent:
       type: string
-      default: ralphex-codex
+      default: pi
       enum:
-        - ralphex-codex
-        - ralphex-pi
-      description: ralphex profile passed through to triggered github-qa-worker runs.
+        - codex
+        - pi
+      description: Coding agent passed through to triggered github-qa-worker runs.
     server_url:
       type: string
       default: ws://127.0.0.1:9090
@@ -55,7 +55,7 @@ jobs:
             env:
               REPOS: ${{ inputs.repos }}
               LABEL: ${{ inputs.label }}
-              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              AGENT: ${{ inputs.agent }}
               SWAMP_SERVE_URL: ${{ inputs.server_url }}
         dependsOn: []
         weight: 0

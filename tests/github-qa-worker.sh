@@ -12,13 +12,8 @@ trap cleanup EXIT
 
 # --- unit tests for the extracted pure functions -----------------------
 
-source <(sed -n '/^agent_binary_for_config() {/,/^}/p' "$worker")
 source <(sed -n '/^parse_verdict() {/,/^}/p' "$worker")
 source <(sed -n '/^build_comment_body() {/,/^}/p' "$worker")
-
-[[ "$(agent_binary_for_config ralphex-codex)" == codex ]]
-[[ "$(agent_binary_for_config ralphex-pi)" == pi ]]
-! agent_binary_for_config bogus >/dev/null 2>&1
 
 log="$test_root/agent.log"
 printf 'some chatter\nQA_VERDICT: PASS\n' >"$log"

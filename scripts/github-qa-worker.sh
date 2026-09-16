@@ -7,7 +7,7 @@ set -Eeuo pipefail
 
 : "${REPO:?REPO is required}"
 : "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
-: "${RALPHEX_CONFIG:=ralphex-codex}"
+: "${AGENT:=pi}"
 : "${QA_TIMEOUT_SECONDS:=1800}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
 # The workflow supplies a named volume mounted at this path in both the QA
@@ -46,17 +46,6 @@ fail() {
   cleanup_workspace=false
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
-}
-
-# Maps RALPHEX_CONFIG to the agent binary this worker invokes directly.
-# Kept as ralphex-codex/ralphex-pi purely to share the poller/label
-# vocabulary with the dev flow — QA never runs ralphex itself.
-agent_binary_for_config() {
-  case "$1" in
-    ralphex-codex) printf 'codex\n' ;;
-    ralphex-pi) printf 'pi\n' ;;
-    *) return 1 ;;
-  esac
 }
 
 # Runs the QA agent non-interactively and prints its combined stdout+stderr
@@ -161,7 +150,7 @@ emit_vault_note() {
     --argjson issue_number "$ISSUE_NUMBER" \
     --slurpfile issue "$issue_json" \
     --arg pr_url "$pr_url" \
-    --arg ralphex_config "$RALPHEX_CONFIG" \
+    --arg ralphex_config "$AGENT" \
     --arg status "$status" \
     --arg started_at "$started_at" \
     --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -183,7 +172,8 @@ emit_vault_note() {
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || fail "repo must be owner/name"
 [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "issue_number must be a positive integer"
-agent_bin="$(agent_binary_for_config "$RALPHEX_CONFIG")" || fail "ralphex_config must be ralphex-codex or ralphex-pi"
+case "$AGENT" in codex|pi) ;; *) fail "agent must be codex or pi" ;; esac
+agent_bin="$AGENT"
 [[ "$QA_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "qa_timeout_seconds must be a positive integer"
 [[ "$WORKFLOW_RUN_ID" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || fail "workflow_run_id contains unsupported characters"
 [[ "$RUN_ARTIFACTS_DIR" == /* ]] || fail "run_artifacts_dir must be an absolute path"

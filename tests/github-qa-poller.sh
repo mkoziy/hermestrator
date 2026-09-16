@@ -107,14 +107,14 @@ printf '[{"number":1,"labels":[]}]\n' >"$issues_json"
 pr_count="$test_root/pr-count-1.txt"; printf '1\n' >"$pr_count"
 run_poller "$trigger_log"
 grep -qF -- 'issue_number=1' "$trigger_log"
-grep -qF -- 'ralphex_config=ralphex-codex' "$trigger_log"
+grep -qF -- 'agent=pi' "$trigger_log"
 
-# Issue with agent-pi label: routes to ralphex-pi.
-issues_json="$test_root/issues-pi.json"
-printf '[{"number":2,"labels":[{"name":"agent-pi"}]}]\n' >"$issues_json"
+# Issue with agent-codex label: routes to codex.
+issues_json="$test_root/issues-codex.json"
+printf '[{"number":2,"labels":[{"name":"agent-codex"}]}]\n' >"$issues_json"
 run_poller "$trigger_log"
 grep -qF -- 'issue_number=2' "$trigger_log"
-grep -qF -- 'ralphex_config=ralphex-pi' "$trigger_log"
+grep -qF -- 'agent=codex' "$trigger_log"
 
 # Issue with no open PR: skipped, no trigger.
 issues_json="$test_root/issues-nopr.json"

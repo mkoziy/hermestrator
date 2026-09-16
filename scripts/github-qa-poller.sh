@@ -8,7 +8,7 @@ set -Eeuo pipefail
 
 : "${REPOS:?REPOS is required (comma/whitespace-separated owner/name list)}"
 : "${LABEL:=agent-qa-ready}"
-: "${RALPHEX_CONFIG:=ralphex-codex}"
+: "${AGENT:=pi}"
 : "${STALE_RUN_MINUTES:=45}"
 
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
@@ -49,10 +49,10 @@ poll_repo() {
 
     # Per-issue agent routing: agent-pi / agent-codex labels override the
     # project default; agent-pi wins if an issue carries both by mistake.
-    config="$RALPHEX_CONFIG"
+    config="$AGENT"
     case ",$issue_labels," in
-      *,agent-pi,*) config="ralphex-pi" ;;
-      *,agent-codex,*) config="ralphex-codex" ;;
+      *,agent-pi,*) config="pi" ;;
+      *,agent-codex,*) config="codex" ;;
     esac
 
     pr_count="$(gh pr list --repo "$repo" --head "$branch" --state open --limit 1 --json number --jq 'length' 2>/dev/null)" || pr_count=0
@@ -91,7 +91,7 @@ poll_repo() {
     setsid swamp workflow run github-qa-worker \
       --input repo="$repo" \
       --input issue_number="$n" \
-      --input ralphex_config="$config" \
+      --input agent="$config" \
       >/dev/null 2>&1 &
     disown
   done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")
