@@ -40,24 +40,28 @@ jobs:
         weight: 0
         allowFailure: false
       - name: vault-commit
+        description: >-
+          write-notes is a no-op on the common tick (nothing to recover) —
+          @swamp/git's own commit method fails on an empty diff, so this
+          runs scripts/vault-commit-if-changed.sh instead, which treats
+          "nothing staged" as a successful no-op rather than a failure.
         task:
           type: model_method
-          modelIdOrName: vault-repo
-          methodName: commit
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
           inputs:
-            message: "chore: recover ralphex run notes"
-            addAll: true
+            run: scripts/vault-commit-if-changed.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              VAULT_DIR: .swamp/vault-clone
+              VAULT_COMMIT_MESSAGE: "chore: recover ralphex run notes"
         dependsOn:
           - step: write-notes
             condition:
               type: succeeded
         weight: 0
-        # write-notes is a no-op on the common tick (nothing to recover), so
-        # there's nothing staged to commit — git's "nothing to commit"
-        # (exit 1) is expected here, not a real failure. vault-push and
-        # cleanup-artifacts already gate on condition: succeeded, so they
-        # correctly no-op too when this step is skipped-via-failure.
-        allowFailure: true
+        allowFailure: false
       - name: vault-push
         task:
           type: model_method
