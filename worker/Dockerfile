@@ -123,11 +123,8 @@ RUN curl --fail --location --silent --show-error \
 
 ENV SWAMP_WORKER_LABELS=pool=coding
 
-# --- qa: browser-driven QA worker, invokes codex/pi directly (no ralphex).
-# Built FROM dev (not base) so this image also carries ralphex/gremlins —
-# it's the one used by the all-in-one ephemeral entrypoint, which runs
-# orchestrator + coding-worker + qa-worker in a single container. ---
-FROM dev AS qa
+# --- qa: browser-driven QA worker, invokes codex/pi directly (no ralphex) ---
+FROM base AS qa
 
 ARG AGENT_BROWSER_VERSION=0.37.1
 
@@ -147,6 +144,7 @@ RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION
     && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
+COPY --chown=worker:worker . /workspace
 
 RUN mkdir -p /home/worker/.config/agent-browser \
     && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
@@ -154,4 +152,33 @@ RUN mkdir -p /home/worker/.config/agent-browser \
 
 ENV SWAMP_WORKER_LABELS=pool=qa \
     QA_PROMPT_DIR=/home/worker/.config/qa \
+    AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json
+
+# --- ephemeral: all-in-one orchestrator+coding-worker+qa-worker used by
+# worker/ephemeral-entrypoint.sh (see docs/remote-worker.md "Ephemeral
+# all-in-one worker"). Built FROM dev (not base, unlike qa) so it carries
+# both ralphex/gremlins and the browser QA tooling — duplicates qa's
+# chromium/agent-browser install rather than building qa FROM dev, so the
+# standalone qa-worker image (used by the always-on Deployment pattern)
+# stays lean and matches "adds ralphex/gremlins" vs "adds chromium/
+# agent-browser" as genuinely separate, non-overlapping target additions. ---
+FROM dev AS ephemeral
+
+ARG AGENT_BROWSER_VERSION=0.37.1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && npm cache clean --force \
+    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
+
+COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
+
+RUN mkdir -p /home/worker/.config/agent-browser \
+    && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
+    && chown --recursive worker:worker /home/worker/.config
+
+ENV QA_PROMPT_DIR=/home/worker/.config/qa \
     AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json

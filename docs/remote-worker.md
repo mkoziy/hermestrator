@@ -7,13 +7,19 @@ slot (`SWAMP_WORKER_CONCURRENCY=1`); do not increase it while ralphex owns a
 mutable checkout for each run.
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
-Codex CLI, Pi coding agent, the `worker` user), then `dev` (this section —
-adds ralphex/gremlins, builds `orchestrator`/`coding-worker`) and `qa`
-(built `FROM dev`, not `base` — adds chromium/agent-browser on top, so it
-carries both ralphex and the browser-driven QA tooling; see "QA ticket
-worker" below and "Ephemeral all-in-one worker" further down, which relies
-on `qa` having everything). Build with `docker build --target dev` or
-`--target qa`; `docker-compose.yml` sets `build.target` per service.
+Codex CLI, Pi coding agent, the `worker` user), then three targets built on
+top of it — `dev` (this section — adds ralphex/gremlins, builds
+`orchestrator`/`coding-worker`), `qa` (built `FROM base`, adds
+chromium/agent-browser; see "QA ticket worker" below — deliberately does
+*not* carry ralphex, so the standalone QA image stays lean), and
+`ephemeral` (built `FROM dev`, so it carries both ralphex/gremlins and
+chromium/agent-browser — see "Ephemeral all-in-one worker" further down,
+which needs everything in one image). `qa` and `ephemeral` each install
+chromium/agent-browser independently rather than one building `FROM` the
+other, so a version bump there is the only place with two RUN blocks to
+touch, but `qa` never drags in ralphex it doesn't use. Build with `docker
+build --target dev`, `--target qa`, or `--target ephemeral`;
+`docker-compose.yml` sets `build.target` per service.
 
 ## Image contents
 
@@ -190,9 +196,10 @@ The pattern above still needs a standing `orchestrator` (`swamp serve`)
 Deployment for `qa-worker` to dial into, plus a Service so a separate
 CronJob pod can reach it — a persistent process just to host a WebSocket
 port. `worker/ephemeral-entrypoint.sh` (image entrypoint
-`/usr/local/bin/ephemeral-entrypoint`, built into the `qa` target since
-that's the stage with both ralphex and the QA tooling) collapses
-orchestrator + coding-worker + qa-worker into a single container that:
+`/usr/local/bin/ephemeral-entrypoint`, copied into every target but only
+meant to be run from the `ephemeral` target — the one image that carries
+both ralphex and the QA tooling) collapses orchestrator + coding-worker +
+qa-worker into a single container that:
 
 1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background,
    logging to `$RUN_ARTIFACTS_DIR/logs/<tick>/serve.log`;
@@ -249,7 +256,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: hermestrator
-              image: <your-registry>/hermestrator-worker:qa-<tag>
+              image: <your-registry>/hermestrator-worker:ephemeral-<tag>
               command: ["/usr/local/bin/ephemeral-entrypoint"]
               env:
                 - name: SWAMP_WORKER_IDLE_TIMEOUT

@@ -33,34 +33,35 @@ export VAULT_REPO_URL="${VAULT_REPO_URL:-https://github.com/moontechs/notes.git}
 # them on the same volume as RUN_ARTIFACTS_DIR, one subdirectory per tick.
 export HERMESTRATOR_LOG_DIR="${HERMESTRATOR_LOG_DIR:-$RUN_ARTIFACTS_DIR/logs}"
 
-# workflow_name: print the `name:` declared by a workflow file.
-workflow_name() {
-  sed -n 's/^name: //p' "$1" | head -1
+# run_scheduled_workflow: fire one workflow once against the local
+# orchestrator, tolerating failure (a bad run shouldn't block the others or
+# the pod's own exit). $2+ are passed through as `swamp workflow run` args.
+#
+# There's no supported swamp mechanism to "fire every due trigger.schedule
+# once" from outside swamp serve's own --schedule loop (verified: `swamp
+# workflow run <name>` does NOT fall back to a workflow's trigger.inputs —
+# every schema-required input must be passed explicitly, the same as any
+# other manual run). So this is an explicit list, not auto-discovered from
+# workflows/*.yaml — tests/ephemeral-entrypoint.sh cross-checks it against
+# every workflow file that actually declares a trigger.schedule, so an
+# onboarded poller with nothing wired in here fails that test instead of
+# silently never running.
+run_scheduled_workflow() {
+  local name="$1"
+  shift
+  printf 'running scheduled workflow once: %s %s\n' "$name" "$*" >&2
+  gosu worker swamp workflow run "$name" --server ws://127.0.0.1:9090 "$@" \
+    || printf 'WARN: %s failed, continuing\n' "$name" >&2
 }
 
-# has_schedule_trigger: succeed if the workflow declares `trigger.schedule`.
-has_schedule_trigger() {
-  awk '
-    /^trigger:/ { t=1; next }
-    t && /^[^ ]/ { exit }
-    t && /^  schedule:/ { found=1; exit }
-    END { exit(found ? 0 : 1) }
-  ' "$1"
-}
-
-# trigger_input_args: print `--input\nkey=value\n` pairs (one pair per
-# line, for `mapfile`) from a workflow's flat `trigger.inputs` map — the
-# values swamp's own scheduler would pass when it fires this workflow.
-trigger_input_args() {
-  awk '
-    /^trigger:/ { t=1; next }
-    t && /^[^ ]/ { t=0 }
-    t && /^  inputs:/ { i=1; next }
-    t && i && /^  [^ ]/ { i=0 }
-    t && i && /^    [a-zA-Z_][a-zA-Z0-9_]*:/ { sub(/^    /, ""); print }
-  ' "$1" | while IFS= read -r line; do
-    printf -- '--input\n%s=%s\n' "${line%%:*}" "${line#*: }"
-  done
+# Update this alongside workflows/*.yaml: a new one-file-per-repo ticket
+# poller, or a new input a poller's trigger.inputs starts requiring.
+run_scheduled_workflows() {
+  run_scheduled_workflow github-ticket-poller-weird-reader --input repo=moontechs/weird-reader
+  run_scheduled_workflow github-ticket-poller-files-nest --input repo=moontechs/files-nest
+  run_scheduled_workflow github-ticket-poller-streamberg --input repo=mkoziy/streamberg
+  run_scheduled_workflow github-qa-poller --input repos=moontechs/files-nest,moontechs/weird-reader,mkoziy/streamberg
+  run_scheduled_workflow vault-note-recovery
 }
 
 # Everything below actually runs the pod; skip it when sourced for tests.
@@ -127,16 +128,7 @@ if [[ ! -d "/workspace/$VAULT_DIR/.git" ]]; then
     --input "url=$VAULT_REPO_URL"
 fi
 
-shopt -s nullglob
-for wf in workflows/*.yaml; do
-  has_schedule_trigger "$wf" || continue
-  name="$(workflow_name "$wf")"
-  [[ -n "$name" ]] || { printf 'WARN: %s has no name:, skipping\n' "$wf" >&2; continue; }
-  mapfile -t args < <(trigger_input_args "$wf")
-  printf 'running scheduled workflow once: %s %s\n' "$name" "${args[*]:-}" >&2
-  gosu worker swamp workflow run "$name" --server ws://127.0.0.1:9090 "${args[@]}" \
-    || printf 'WARN: %s failed, continuing\n' "$name" >&2
-done
+run_scheduled_workflows
 
 SWAMP_ORCHESTRATOR_URL=ws://127.0.0.1:9090 \
   SWAMP_WORKER_TOKEN="$SWAMP_WORKER_TOKEN_CODING" \

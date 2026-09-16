@@ -22,6 +22,11 @@ jobs:
           # ralphex) — see docs/plans/20260916-qa-agent-flow.md.
           - target: qa
             tag_prefix: "qa-"
+          # ephemeral: all-in-one orchestrator+coding-worker+qa-worker for
+          # worker/ephemeral-entrypoint.sh — see docs/remote-worker.md
+          # "Ephemeral all-in-one worker".
+          - target: ephemeral
+            tag_prefix: "ephemeral-"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +80,13 @@ jobs:
           set -euo pipefail
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
           docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; codex --version; pi --version; agent-browser --version; chromium --version; gh --version; git --version; jq --version; node --version; mise --version'
+
+      - name: Validate image (ephemeral)
+        if: matrix.target == 'ephemeral'
+        run: |
+          set -euo pipefail
+          image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
+          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; ralphex --version; codex --version; pi --version; gremlins --version; agent-browser --version; chromium --version; gh --version; git --version; jq --version; node --version; mise --version; bash -n /usr/local/bin/ephemeral-entrypoint'
 
       - name: Push image
         run: |
