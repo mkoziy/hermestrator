@@ -78,7 +78,7 @@ case "\$1 \$2" in
   "pr list")
     if [[ "\${PR_EXISTS:-true}" == true ]]; then
       sha="\$(git -C "$origin_git" rev-parse agent/issue-$ISSUE_NUMBER)"
-      printf '[{"number":9,"headRefOid":"%s"}]\n' "\$sha"
+      printf '[{"number":9,"headRefOid":"%s","url":"https://github.com/mkoziy/example/pull/9"}]\n' "\$sha"
     else
       printf '[]\n'
     fi
@@ -133,7 +133,9 @@ fi
 [[ ! -s "$edit_log" ]]
 PR_EXISTS=true
 
-# Pass verdict: comment posted, screenshot published, qa-passed label swap.
+# Pass verdict: comment posted, screenshot published, qa-passed label swap,
+# note.json written for the vault-sync job (same schema github-ticket-worker
+# writes — see scripts/vault-write-note.sh).
 VERDICT_LINE="QA_VERDICT: PASS"
 run_worker
 grep -qF 'QA passed' "$comment_log"
@@ -142,11 +144,23 @@ grep -qF -- '--remove-label agent-qa-ready' "$edit_log"
 grep -qF -- '--remove-label agent-qa-failed' "$edit_log"
 grep -qF -- '--add-label agent-qa-passed' "$edit_log"
 
-# Fail verdict: comment posted with reason, qa-failed label swap.
+note_json="$test_root/artifacts/run-1/note.json"
+[[ -f "$note_json" ]]
+[[ "$(jq -r .status "$note_json")" == success ]]
+[[ "$(jq -r .repo "$note_json")" == mkoziy/example ]]
+[[ "$(jq -r .issue_number "$note_json")" == 42 ]]
+[[ "$(jq -r .pr_url "$note_json")" == 'https://github.com/mkoziy/example/pull/9' ]]
+grep -qF 'QA verdict: PASS' <(jq -r .progress_log "$note_json")
+grep -qF 'raw.githubusercontent.com' <(jq -r .progress_log "$note_json")
+
+# Fail verdict: comment posted with reason, qa-failed label swap, note.json
+# status flips to failed.
 VERDICT_LINE='QA_VERDICT: FAIL: button is broken'
 run_worker
 grep -qF 'QA failed: button is broken' "$comment_log"
 grep -qF -- '--remove-label agent-qa-passed' "$edit_log"
 grep -qF -- '--add-label agent-qa-failed' "$edit_log"
+[[ "$(jq -r .status "$note_json")" == failed ]]
+grep -qF 'QA verdict: FAIL: button is broken' <(jq -r .progress_log "$note_json")
 
 echo "all github-qa-worker.sh checks passed"
