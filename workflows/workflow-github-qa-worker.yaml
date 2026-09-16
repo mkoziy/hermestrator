@@ -62,4 +62,105 @@ jobs:
           pool: qa
     dependsOn: []
     weight: 0
+  - name: vault-sync
+    description: >-
+      Best-effort mirror of the QA run (verdict, screenshots, PR link) into
+      the Obsidian vault, on the same per-issue timeline github-ticket-worker
+      writes to. Runs whether main succeeded or failed, and never fails the
+      overall workflow run.
+    dependsOn:
+      - job: main
+        condition:
+          type: always
+    weight: 0
+    steps:
+      - name: vault-pull
+        description: Bring the local vault checkout up to date before writing.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: pull
+        dependsOn: []
+        weight: 0
+        allowFailure: true
+      - name: write-note
+        description: >-
+          Append this QA run to runs/<timestamp>.md and regenerate ticket.md,
+          using scripts/vault-write-note.sh — same schema/writer as the dev
+          flow, see its note.json in RUN_ARTIFACTS_DIR.
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/vault-write-note.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              NOTE_JSON_RAW: >-
+                ${{ size(data.query('modelName == "github_qa_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')) > 0
+                ? data.query('modelName == "github_qa_worker_shell" && name ==
+                "result" && workflowRunId == "' + run.id + '"')[0].attributes.stdout : "" }}
+              REPO: ${{ inputs.repo }}
+              ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
+              RALPHEX_CONFIG: ${{ inputs.ralphex_config }}
+              WORKFLOW_RUN_ID: ${{ run.id }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+              VAULT_DIR: .swamp/vault-clone
+        dependsOn:
+          - step: vault-pull
+            condition:
+              type: always
+        weight: 0
+        allowFailure: true
+      - name: vault-commit
+        description: Commit the note rendered by the preceding successful write step.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: commit
+          inputs:
+            message: "chore: sync QA run notes"
+            addAll: true
+        dependsOn:
+          - step: write-note
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: vault-push
+        description: Push the synced notes to the vault remote.
+        task:
+          type: model_method
+          modelIdOrName: vault-repo
+          methodName: push
+          inputs:
+            branch: main
+            setUpstream: true
+        dependsOn:
+          - step: vault-commit
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
+      - name: cleanup-artifacts
+        description: Remove this run's artifacts only after its vault note has been pushed.
+        task:
+          type: model_method
+          modelIdOrName: vault_note_writer_shell
+          methodName: execute
+          inputs:
+            run: scripts/cleanup-run-artifacts.sh
+            workingDir: .
+            timeout: 60000
+            env:
+              WORKFLOW_RUN_ID: ${{ run.id }}
+              RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts
+        dependsOn:
+          - step: vault-push
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: true
 version: 1

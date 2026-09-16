@@ -7,11 +7,19 @@ slot (`SWAMP_WORKER_CONCURRENCY=1`); do not increase it while ralphex owns a
 mutable checkout for each run.
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
-Codex CLI, Pi coding agent, the `worker` user), then `dev` (this section —
-adds ralphex/gremlins, builds `orchestrator`/`coding-worker`) and `qa`
-(browser-driven QA worker, see "QA ticket worker" below). Build with
-`docker build --target dev` or `--target qa`; `docker-compose.yml` sets
-`build.target` per service.
+Codex CLI, Pi coding agent, the `worker` user), then three targets built on
+top of it — `dev` (this section — adds ralphex/gremlins, builds
+`orchestrator`/`coding-worker`), `qa` (built `FROM base`, adds
+chromium/agent-browser; see "QA ticket worker" below — deliberately does
+*not* carry ralphex, so the standalone QA image stays lean), and
+`ephemeral` (built `FROM dev`, so it carries both ralphex/gremlins and
+chromium/agent-browser — see "Ephemeral all-in-one worker" further down,
+which needs everything in one image). `qa` and `ephemeral` each install
+chromium/agent-browser independently rather than one building `FROM` the
+other, so a version bump there is the only place with two RUN blocks to
+touch, but `qa` never drags in ralphex it doesn't use. Build with `docker
+build --target dev`, `--target qa`, or `--target ephemeral`;
+`docker-compose.yml` sets `build.target` per service.
 
 ## Image contents
 
@@ -180,6 +188,108 @@ spec:
                   valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-mkoziy } }
                 - name: CODEX_ACCESS_TOKEN
                   valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: codex-access-token } }
+```
+
+### Ephemeral all-in-one worker (orchestrator + coding + qa in one pod)
+
+The pattern above still needs a standing `orchestrator` (`swamp serve`)
+Deployment for `qa-worker` to dial into, plus a Service so a separate
+CronJob pod can reach it — a persistent process just to host a WebSocket
+port. `worker/ephemeral-entrypoint.sh` (image entrypoint
+`/usr/local/bin/ephemeral-entrypoint`, copied into every target but only
+meant to be run from the `ephemeral` target — the one image that carries
+both ralphex and the QA tooling) collapses orchestrator + coding-worker +
+qa-worker into a single container that:
+
+1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background,
+   logging to `$RUN_ARTIFACTS_DIR/logs/<tick>/serve.log`;
+2. bootstraps the vault Git checkout (`$VAULT_DIR`, default
+   `.swamp/vault-clone`) via `swamp model method run vault-repo clone` if
+   it isn't already there — a no-op once the volume holding it has one;
+3. fires every schedule-triggered workflow exactly once
+   (`run_scheduled_workflows` — an explicit list, not auto-discovered:
+   `swamp workflow run <name>` doesn't apply a workflow's own
+   `trigger.inputs`, so there's nothing to introspect that would actually
+   run correctly; `swamp serve`'s own scheduler only ticks while the
+   process stays up, which a pod that lives for a couple of minutes every
+   15 defeats). `tests/ephemeral-entrypoint.sh` cross-checks this list
+   against `workflows/*.yaml` so an onboarded poller can't silently go
+   unrun, or run with a stale/missing required input;
+4. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
+   concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set and each logging
+   to its own `$RUN_ARTIFACTS_DIR/logs/<tick>/*-worker.log`, so each drains
+   whatever it was just handed and exits;
+5. once both have exited, stops `swamp serve` and exits non-zero if either
+   worker failed *or* any scheduled workflow from step 3 failed — a failed
+   run stays visible as a failed Job instead of looking identical to a
+   clean tick.
+
+No Service, no Ingress, no TLS: the orchestrator only ever listens on
+`127.0.0.1` inside its own pod, same as `coding-worker` does in the
+always-on Deployment today. This trades the always-on orchestrator's low
+idle footprint for zero resident containers at all — the tradeoff only
+makes sense once nothing else needs to reach the orchestrator between runs
+(nothing does today; see `AGENTS.md`).
+
+**State that must survive the pod exiting, and therefore live on a volume,
+not the container filesystem**: `/workspace/.swamp` (workflow/run history
+*and* the vault Git checkout at `.swamp/vault-clone` — without this
+persisting, every tick re-clones the vault and starts run history from
+empty) and `$RUN_ARTIFACTS_DIR` (retained ticket/QA notes pending a vault
+write, plus the `logs/` tree above). Mount the same two volumes the
+always-on Deployment already uses for `hermestrator-orchestrator-state`
+(→ `/workspace/.swamp`) and `hermestrator-worker-artifacts`
+(→ `/var/lib/swamp-worker-artifacts`) — a `ReadWriteOnce` local-path PVC
+only binds to one node/pod at a time, so stop the Deployment before the
+CronJob starts using them, or give the CronJob its own PVCs seeded from a
+one-time `swamp model method run vault-repo clone`.
+
+Needs both a coding and a QA worker token (`swamp worker token create
+coding`/`... create qa`), plus `VAULT_GH_TOKEN` for the orchestrator's own
+moontechs-vault auth:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hermestrator-ephemeral
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: hermestrator
+              image: <your-registry>/hermestrator-worker:ephemeral-<tag>
+              command: ["/usr/local/bin/ephemeral-entrypoint"]
+              env:
+                - name: SWAMP_WORKER_IDLE_TIMEOUT
+                  value: 2m
+                - name: VAULT_GH_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: vault-gh-token } }
+                - name: SWAMP_WORKER_TOKEN_CODING
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-coding } }
+                - name: SWAMP_WORKER_TOKEN_QA
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-qa } }
+                - name: GH_TOKEN_MOONTECHS
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-moontechs } }
+                - name: GH_TOKEN_MKOZIY
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-mkoziy } }
+                - name: CODEX_ACCESS_TOKEN
+                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: codex-access-token } }
+              volumeMounts:
+                - name: orchestrator-state
+                  mountPath: /workspace/.swamp
+                - name: worker-artifacts
+                  mountPath: /var/lib/swamp-worker-artifacts
+          volumes:
+            - name: orchestrator-state
+              persistentVolumeClaim: { claimName: hermestrator-orchestrator-state }
+            - name: worker-artifacts
+              persistentVolumeClaim: { claimName: hermestrator-worker-artifacts }
 ```
 
 ## Local Docker development

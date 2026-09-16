@@ -27,6 +27,7 @@ esac
 readonly branch="agent/issue-${ISSUE_NUMBER}"
 run_root=""
 cleanup_workspace=true
+started_at=""
 
 cleanup() {
   local status=$?
@@ -141,6 +142,45 @@ build_comment_body() {
   fi
 }
 
+# Writes note.json in the same schema scripts/github-ticket-worker.sh emits
+# (see its emit_vault_note) so scripts/vault-write-note.sh — and the vault's
+# per-issue runs/ timeline — need no QA-specific branch: a QA run just shows
+# up as another run entry on the same issue.md. $3+ are screenshot URLs.
+emit_vault_note() {
+  local verdict="$1" pr_url="$2"
+  shift 2
+  local status
+  [[ "$verdict" == PASS ]] && status=success || status=failed
+  local screenshots_block=""
+  local url
+  for url in "$@"; do
+    screenshots_block+="${url}"$'\n'
+  done
+  jq -nc \
+    --arg repo "$REPO" \
+    --argjson issue_number "$ISSUE_NUMBER" \
+    --slurpfile issue "$issue_json" \
+    --arg pr_url "$pr_url" \
+    --arg ralphex_config "$RALPHEX_CONFIG" \
+    --arg status "$status" \
+    --arg started_at "$started_at" \
+    --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg branch "$branch" \
+    --arg verdict "$verdict" \
+    --arg screenshots "$screenshots_block" \
+    --arg qa_stdout "$( [[ -f "$artifact_dir/qa-agent.stdout.log" ]] && cat "$artifact_dir/qa-agent.stdout.log" || true )" \
+    --arg qa_stderr "$( [[ -f "$artifact_dir/qa-agent.stderr.log" ]] && cat "$artifact_dir/qa-agent.stderr.log" || true )" \
+    '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch,
+      progress_log:("QA verdict: " + $verdict + "\n" +
+        (if $screenshots == "" then "" else "\nScreenshots:\n" + $screenshots end) +
+        "\n--- qa-agent.stdout.log ---\n" + $qa_stdout +
+        "\n--- qa-agent.stderr.log ---\n" + $qa_stderr)}' \
+    >"$artifact_dir/note.json"
+  printf 'VAULT_NOTE_JSON:'
+  cat "$artifact_dir/note.json"
+  printf '\n'
+}
+
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || fail "repo must be owner/name"
 [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "issue_number must be a positive integer"
 agent_bin="$(agent_binary_for_config "$RALPHEX_CONFIG")" || fail "ralphex_config must be ralphex-codex or ralphex-pi"
@@ -173,9 +213,10 @@ gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
   --json number,title,body,state,labels,url,comments >"$issue_json" || fail "issue does not exist or is inaccessible"
 [[ "$(jq -r '.state' "$issue_json")" == "OPEN" ]] || fail "issue #$ISSUE_NUMBER is not open"
 
-pr_json="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json number,headRefOid)"
+pr_json="$(gh pr list --repo "$REPO" --head "$branch" --state open --limit 1 --json number,headRefOid,url)"
 [[ "$(jq 'length' <<<"$pr_json")" -gt 0 ]] || fail "no open pull request on $branch"
 readonly head_sha="$(jq -r '.[0].headRefOid' <<<"$pr_json")"
+readonly pr_url="$(jq -r '.[0].url' <<<"$pr_json")"
 
 printf 'Cloning %s and pinning to commit %s\n' "$REPO" "$head_sha"
 gh repo clone "$REPO" "$checkout" -- --branch "$branch" --single-branch
@@ -195,6 +236,7 @@ $(jq -r '.body' "$issue_json")
 
 Write any screenshots as PNG files under: ${screenshots_dir}"
 
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf 'Running QA agent (%s), timeout %ss\n' "$agent_bin" "$QA_TIMEOUT_SECONDS"
 set +e
 run_qa_agent "$agent_bin" "$prompt" "$QA_TIMEOUT_SECONDS" \
@@ -206,6 +248,8 @@ verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.stdout.log")"
 printf 'QA verdict: %s\n' "$verdict"
 
 mapfile -t image_urls < <(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")
+
+emit_vault_note "$verdict" "$pr_url" "${image_urls[@]}" || true
 
 comment_body="$(build_comment_body "$verdict" "$head_sha" "${image_urls[@]}")"
 gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment_body"

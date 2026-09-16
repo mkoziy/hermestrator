@@ -46,15 +46,23 @@ existing type before writing a custom extension (CLAUDE.md rule 1).
 ## Docker / worker image
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (swamp, gh, mise,
-codex, pi — everything both `dev` and `qa` need), then `dev` (today's
-ralphex-based coding-worker/orchestrator, adds ralphex/gremlins) and `qa`
-(browser-driven QA worker, adds chromium/agent-browser — see "QA flow"
-below). Put a tool in `base` only if both targets actually use it; a
-version/checksum bump on a shared tool then happens once, not once per
-target. `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` does not carry across
-a new `FROM` even within the same file — any stage with a `RUN ... | cmd`
-pipe needs its own `SHELL` redeclaration, or hadolint's `DL4006` will catch
-the missing one.
+codex, pi — everything every target needs), then three targets built on
+top of it: `dev` (today's ralphex-based coding-worker/orchestrator, adds
+ralphex/gremlins), `qa` (browser-driven QA worker, built `FROM base` —
+adds chromium/agent-browser, deliberately not ralphex — see "QA flow"
+below), and `ephemeral` (built `FROM dev`, so it carries both ralphex and
+the browser QA tooling — the one image
+`worker/ephemeral-entrypoint.sh`/`docs/remote-worker.md`'s "Ephemeral
+all-in-one worker" needs). `qa` and `ephemeral` each install
+chromium/agent-browser independently rather than one building `FROM` the
+other — keeps `qa` lean (no ralphex dragged in) at the cost of a
+version/checksum bump needing two RUN blocks updated instead of one. Put a
+tool in `base` only if every target actually uses it; a version/checksum
+bump on a shared tool then happens once, not once per target. `SHELL
+["/bin/bash", "-o", "pipefail", "-c"]` does not carry across a new `FROM`
+even within the same file — any stage with a `RUN ... | cmd` pipe needs
+its own `SHELL` redeclaration, or hadolint's `DL4006` will catch the
+missing one.
 
 It pins exact versions and SHA-256 checksums for every downloaded binary
 (swamp, ralphex, gh, the Pi adapter script, mise). If you bump a version,
@@ -72,14 +80,16 @@ tool version for every repo the worker runs.
 
 ## CI
 
-`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa]`: each
-lints the shared Dockerfile with hadolint, builds its own `--target`, runs a
-target-specific smoke check inside the container (`dev`: `swamp version`,
-`ralphex --version`, etc.; `qa`: `swamp version`, `agent-browser --version`,
-`chromium --version`, etc. — no `ralphex --version`, it isn't installed
-there), then pushes to GHCR with a `qa-`-prefixed tag for `qa` and the
-existing untouched tag scheme for `dev`. Keep both targets buildable and
-both smoke checks passing for any Dockerfile change.
+`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa,
+ephemeral]`: each lints the shared Dockerfile with hadolint, builds its own
+`--target`, runs a target-specific smoke check inside the container (`dev`:
+`swamp version`, `ralphex --version`, etc.; `qa`: `swamp version`,
+`agent-browser --version`, `chromium --version`, etc. — no `ralphex
+--version`, it isn't installed there; `ephemeral`: everything `dev` and `qa`
+each check, plus `bash -n /usr/local/bin/ephemeral-entrypoint`), then pushes
+to GHCR with a `qa-`/`ephemeral-`-prefixed tag for `qa`/`ephemeral` and the
+existing untouched tag scheme for `dev`. Keep all three targets buildable
+and all three smoke checks passing for any Dockerfile change.
 
 ## GitHub tokens
 

@@ -52,6 +52,7 @@ RUN useradd --create-home --shell /bin/bash worker \
     && chown --recursive worker:worker /workspace /home/worker
 
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
+COPY --chmod=0755 worker/ephemeral-entrypoint.sh /usr/local/bin/ephemeral-entrypoint
 
 ENV HOME=/home/worker \
     CODEX_HOME=/home/worker/.codex \
@@ -151,4 +152,33 @@ RUN mkdir -p /home/worker/.config/agent-browser \
 
 ENV SWAMP_WORKER_LABELS=pool=qa \
     QA_PROMPT_DIR=/home/worker/.config/qa \
+    AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json
+
+# --- ephemeral: all-in-one orchestrator+coding-worker+qa-worker used by
+# worker/ephemeral-entrypoint.sh (see docs/remote-worker.md "Ephemeral
+# all-in-one worker"). Built FROM dev (not base, unlike qa) so it carries
+# both ralphex/gremlins and the browser QA tooling — duplicates qa's
+# chromium/agent-browser install rather than building qa FROM dev, so the
+# standalone qa-worker image (used by the always-on Deployment pattern)
+# stays lean and matches "adds ralphex/gremlins" vs "adds chromium/
+# agent-browser" as genuinely separate, non-overlapping target additions. ---
+FROM dev AS ephemeral
+
+ARG AGENT_BROWSER_VERSION=0.37.1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && npm cache clean --force \
+    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
+
+COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
+
+RUN mkdir -p /home/worker/.config/agent-browser \
+    && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
+    && chown --recursive worker:worker /home/worker/.config
+
+ENV QA_PROMPT_DIR=/home/worker/.config/qa \
     AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json
