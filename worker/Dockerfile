@@ -141,7 +141,8 @@ RUN apt-get update \
 # postinstall, which normally chmods its platform binary — do that by hand.
 RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
     && npm cache clean --force \
-    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
+    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-* \
+    && chown --recursive worker:worker /home/worker/.npm
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
 COPY --chown=worker:worker worker/qa/skills/ /home/worker/.config/qa/skills/
@@ -173,7 +174,8 @@ RUN apt-get update \
 
 RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
     && npm cache clean --force \
-    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
+    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-* \
+    && chown --recursive worker:worker /home/worker/.npm
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
 COPY --chown=worker:worker worker/qa/skills/ /home/worker/.config/qa/skills/
