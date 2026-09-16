@@ -144,6 +144,7 @@ RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION
     && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
+COPY --chown=worker:worker worker/qa/skills/ /home/worker/.config/qa/skills/
 COPY --chown=worker:worker . /workspace
 
 RUN mkdir -p /home/worker/.config/agent-browser \
@@ -175,6 +176,7 @@ RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION
     && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-*
 
 COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
+COPY --chown=worker:worker worker/qa/skills/ /home/worker/.config/qa/skills/
 
 RUN mkdir -p /home/worker/.config/agent-browser \
     && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
