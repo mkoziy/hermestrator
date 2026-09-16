@@ -227,10 +227,12 @@ pair QAs the PR the dev flow opened:
   `pi --print --mode json`) rather than plain text, because both CLIs
   buffer plain-text output entirely in memory and only write it on exit —
   a killed run would leave an empty log with no clue what happened. It is
-  killed on idle (`QA_IDLE_TIMEOUT_SECONDS`, default 300s of no new
-  events — see `run_qa_agent` in `scripts/github-qa-worker.sh`), not on a
-  flat wall-clock deadline; `QA_TIMEOUT_SECONDS` (default 3600s) is a hard
-  cap against a genuinely runaway agent. It must end its output with an
+  killed on idle (`QA_IDLE_TIMEOUT_SECONDS`, default 900s of no new
+  events — a single tool call, e.g. a test suite or lighthouse audit, can
+  go quiet for minutes with zero events; see `run_qa_agent` in
+  `scripts/github-qa-worker.sh`), not on a flat wall-clock deadline;
+  `QA_TIMEOUT_SECONDS` (default 5400s) is a hard cap against a genuinely
+  runaway agent. It must end its output with an
   exact `QA_VERDICT: PASS` or `QA_VERDICT: FAIL: <reason>` line
   (`worker/qa/prompts/task.txt`) — a missing/garbage line is always
   parsed as a fail, never a silent pass.

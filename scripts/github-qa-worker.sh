@@ -12,8 +12,13 @@ set -Eeuo pipefail
 # (killed only once the agent has produced no new output for this long —
 # see run_qa_agent for why a fixed wall-clock timeout alone kills runs that
 # are still genuinely working).
-: "${QA_TIMEOUT_SECONDS:=3600}"
-: "${QA_IDLE_TIMEOUT_SECONDS:=300}"
+: "${QA_TIMEOUT_SECONDS:=5400}"
+# A single tool call (a test suite, a lighthouse audit, a slow page load)
+# produces zero JSON events for its whole duration — verified this against
+# the real pi CLI: a 15s `sleep` tool call left the event log completely
+# silent for all 15s. A QA pass driving 20+ e2e cases through one tool call
+# can go quiet for minutes without being stuck, so this needs real headroom.
+: "${QA_IDLE_TIMEOUT_SECONDS:=900}"
 : "${WORKFLOW_RUN_ID:?WORKFLOW_RUN_ID is required}"
 # The workflow supplies a named volume mounted at this path in both the QA
 # worker and orchestrator. It must not live in the read-only /workspace mount.
