@@ -43,8 +43,13 @@ Your job, in order:
 6. Check server and browser console logs for errors while you're at it
    (agent-browser's `console` and `errors` commands).
 
-When you are done, end your final response with exactly one line, and
-nothing after it:
+Your final response is posted as-is to the GitHub issue as the QA report —
+write it for a human (and for whoever picks up this issue next) to skim:
+a short markdown list of what you tested and the outcome of each
+(checked/passed, checked/failed with why, or skipped and why). Don't pad it
+with narration of what you did to test — just the checks and results.
+
+End that final response with exactly one line, and nothing after it:
 
 QA_VERDICT: PASS
 

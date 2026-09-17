@@ -128,11 +128,24 @@ parse_verdict() {
   esac
 }
 
+# The agent's report for humans (and future QA/planning iterations) is
+# everything in its final message except the trailing QA_VERDICT line,
+# which parse_verdict already extracts separately. Empty on timeout (no
+# final message was ever produced) or if the agent emitted nothing else.
+strip_verdict_line() {
+  local final_msg="$1"
+  [[ -f "$final_msg" ]] || return 0
+  grep -v '^QA_VERDICT: ' "$final_msg" || true
+}
+
 # Pushes every file in $screenshots_dir to the qa-screenshots branch under
 # <issue_number>/<workflow_run_id>/, creating the branch if this is the
-# repo's first QA run. Prints one raw.githubusercontent.com URL per file,
-# pinned to the commit SHA so a later run's push can't invalidate it. No-op
-# (prints nothing) when there are no screenshots.
+# repo's first QA run. Prints one blob-view URL per file, pinned to the
+# commit SHA so a later run's push can't invalidate it. Blob view (not
+# raw.githubusercontent.com) because the target repo is private and raw URLs
+# 404 without auth; blob view works for anyone with repo read access via
+# their normal browser session, at the cost of click-through instead of
+# inline rendering. No-op (prints nothing) when there are no screenshots.
 publish_screenshots() {
   local src_dir="$1" repo="$2" issue_number="$3" run_id="$4"
   local -a files=()
@@ -156,15 +169,20 @@ publish_screenshots() {
   local sha; sha="$(git rev-parse HEAD)"
   local f
   for f in "${files[@]}"; do
-    printf 'https://raw.githubusercontent.com/%s/%s/%s/%s\n' \
+    printf 'https://github.com/%s/blob/%s/%s/%s\n' \
       "$repo" "$sha" "$dest_prefix" "$(basename "$f")"
   done
 }
 
-# Builds the verdict comment body. $3+ are image URLs (may be none).
+# Builds the verdict comment body. $3 is the agent's report text (its final
+# message with the trailing QA_VERDICT line already stripped — may be
+# empty), $4+ are screenshot blob-view URLs (may be none). The report is
+# what future iterations (re-planning, re-review) actually have to work
+# from — the verdict line alone only says pass/fail, not what was tested or
+# why it failed.
 build_comment_body() {
-  local verdict="$1" commit_sha="$2"
-  shift 2
+  local verdict="$1" commit_sha="$2" report="$3"
+  shift 3
   local status_line
   if [[ "$verdict" == PASS ]]; then
     status_line='QA passed'
@@ -172,11 +190,14 @@ build_comment_body() {
     status_line="QA failed: ${verdict#FAIL: }"
   fi
   printf '## %s\n\nChecked out at commit `%s`.\n' "$status_line" "$commit_sha"
+  if [[ -n "$report" ]]; then
+    printf '\n%s\n' "$report"
+  fi
   if [[ "$#" -gt 0 ]]; then
-    printf '\n'
+    printf '\n**Screenshots:**\n\n'
     local url
     for url in "$@"; do
-      printf '![screenshot](%s)\n' "$url"
+      printf -- '- [%s](%s)\n' "$(basename "$url")" "$url"
     done
   fi
 }
@@ -184,6 +205,23 @@ build_comment_body() {
 # Writes note.json in the same schema scripts/github-ticket-worker.sh emits
 # (see its emit_vault_note) so scripts/vault-write-note.sh — and the vault's
 # per-issue runs/ timeline — need no QA-specific branch: a QA run just shows
+# A real QA pass's JSON event stream can run into hundreds of MB — embedding
+# it whole in the vault note blows past what the workflow's stdout-capture
+# can carry (NOTE_JSON_RAW ends up empty and downstream write-note silently
+# emits a 0-byte note.json). qa-agent.final-message.txt already carries the
+# human-readable summary and verdict; this is only a diagnostic tail for
+# runs that errored before producing one.
+tail_capped() {
+  local file="$1" cap=100000
+  [[ -f "$file" ]] || return 0
+  if [[ "$(wc -c <"$file")" -gt "$cap" ]]; then
+    printf '[... truncated, showing last %d bytes ...]\n' "$cap"
+    tail -c "$cap" "$file"
+  else
+    cat "$file"
+  fi
+}
+
 # up as another run entry on the same issue.md. $3+ are screenshot URLs.
 emit_vault_note() {
   local verdict="$1" pr_url="$2"
@@ -208,8 +246,8 @@ emit_vault_note() {
     --arg verdict "$verdict" \
     --arg screenshots "$screenshots_block" \
     --arg qa_final "$( [[ -f "$artifact_dir/qa-agent.final-message.txt" ]] && cat "$artifact_dir/qa-agent.final-message.txt" || true )" \
-    --arg qa_stdout "$( [[ -f "$artifact_dir/qa-agent.stdout.log" ]] && cat "$artifact_dir/qa-agent.stdout.log" || true )" \
-    --arg qa_stderr "$( [[ -f "$artifact_dir/qa-agent.stderr.log" ]] && cat "$artifact_dir/qa-agent.stderr.log" || true )" \
+    --arg qa_stdout "$(tail_capped "$artifact_dir/qa-agent.stdout.log")" \
+    --arg qa_stderr "$(tail_capped "$artifact_dir/qa-agent.stderr.log")" \
     '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch,
       progress_log:("QA verdict: " + $verdict + "\n" +
         (if $screenshots == "" then "" else "\nScreenshots:\n" + $screenshots end) +
@@ -291,10 +329,11 @@ verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.final-message.t
 printf 'QA verdict: %s\n' "$verdict"
 
 mapfile -t image_urls < <(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")
+report="$(strip_verdict_line "$artifact_dir/qa-agent.final-message.txt")"
 
 emit_vault_note "$verdict" "$pr_url" "${image_urls[@]}" || true
 
-comment_body="$(build_comment_body "$verdict" "$head_sha" "${image_urls[@]}")"
+comment_body="$(build_comment_body "$verdict" "$head_sha" "$report" "${image_urls[@]}")"
 gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment_body"
 
 if [[ "$verdict" == PASS ]]; then

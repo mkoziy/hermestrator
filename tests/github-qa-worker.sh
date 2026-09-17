@@ -29,12 +29,13 @@ printf 'no verdict line here\n' >"$log"
 # regardless of whatever partial final-message content happens to exist.
 [[ "$(parse_verdict 124 "$log")" == 'FAIL: QA run timed out' ]]
 
-body="$(build_comment_body PASS abc123)"
+body="$(build_comment_body PASS abc123 '')"
 grep -qF 'QA passed' <<<"$body"
 grep -qF 'abc123' <<<"$body"
-body="$(build_comment_body 'FAIL: broken button' abc123 'https://raw.githubusercontent.com/o/r/sha/1/a.png')"
+body="$(build_comment_body 'FAIL: broken button' abc123 '- checked login: failed' 'https://github.com/o/r/blob/sha/1/a.png')"
 grep -qF 'QA failed: broken button' <<<"$body"
-grep -qF 'raw.githubusercontent.com/o/r/sha/1/a.png' <<<"$body"
+grep -qF 'checked login: failed' <<<"$body"
+grep -qF 'github.com/o/r/blob/sha/1/a.png' <<<"$body"
 
 # --- full-script integration against a local git remote ----------------
 
@@ -208,7 +209,7 @@ PR_EXISTS=true
 VERDICT_LINE="QA_VERDICT: PASS"
 run_worker
 grep -qF 'QA passed' "$comment_log"
-grep -qF 'raw.githubusercontent.com' "$comment_log"
+grep -qF 'github.com/mkoziy/example/blob/' "$comment_log"
 grep -qF -- '--remove-label agent-qa-ready' "$edit_log"
 grep -qF -- '--remove-label agent-qa-failed' "$edit_log"
 grep -qF -- '--add-label agent-qa-passed' "$edit_log"
@@ -220,7 +221,7 @@ note_json="$test_root/artifacts/run-1/note.json"
 [[ "$(jq -r .issue_number "$note_json")" == 42 ]]
 [[ "$(jq -r .pr_url "$note_json")" == 'https://github.com/mkoziy/example/pull/9' ]]
 grep -qF 'QA verdict: PASS' <(jq -r .progress_log "$note_json")
-grep -qF 'raw.githubusercontent.com' <(jq -r .progress_log "$note_json")
+grep -qF 'github.com/mkoziy/example/blob/' <(jq -r .progress_log "$note_json")
 
 # Fail verdict: comment posted with reason, qa-failed label swap, note.json
 # status flips to failed.
