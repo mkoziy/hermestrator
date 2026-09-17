@@ -72,6 +72,21 @@ run_scheduled_workflows() {
   run_scheduled_workflow vault-note-recovery || true
 }
 
+# scripts/cleanup-run-artifacts.sh only removes a run's artifacts once its
+# vault note has been pushed (workflow-github-qa-worker.yaml,
+# workflow-github-ticket-worker.yaml) — a run whose vault-sync job fails
+# before that step (bad commit, push conflict, network) leaves its
+# RUN_ARTIFACTS_DIR/<run_id> behind forever, and every tick's own
+# HERMESTRATOR_LOG_DIR/<tick_id> is never cleaned by anything. Age these out
+# instead of deleting on sight, so a failed run's artifacts/logs are still
+# there to inspect for a few days before they're swept.
+export STALE_RUN_DATA_RETENTION_DAYS="${STALE_RUN_DATA_RETENTION_DAYS:-3}"
+prune_stale_run_data() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -mtime "+$STALE_RUN_DATA_RETENTION_DAYS" -exec rm -rf -- {} +
+}
+
 # Everything below actually runs the pod; skip it when sourced for tests.
 [[ "${EPHEMERAL_ENTRYPOINT_SOURCED_FOR_TEST:-}" == 1 ]] && return 0 2>/dev/null || true
 
@@ -101,6 +116,9 @@ chown --recursive worker:worker \
   "$SWAMP_WORKER_CACHE_DIR_CODING" "$SWAMP_WORKER_CACHE_DIR_QA" \
   "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$GH_CONFIG_DIR" "$RUN_ARTIFACTS_DIR" \
   "$HERMESTRATOR_LOG_DIR" /workspace/.swamp
+
+prune_stale_run_data "$RUN_ARTIFACTS_DIR"
+prune_stale_run_data "$HERMESTRATOR_LOG_DIR"
 
 if [[ -n "${OPENAI_API_KEY:-}" && -z "${CODEX_ACCESS_TOKEN:-}" ]]; then
   printf '%s' "$OPENAI_API_KEY" | gosu worker codex login --with-api-key
