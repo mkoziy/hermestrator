@@ -61,6 +61,7 @@ jobs:
               REPO: ${{ inputs.repo }}
               ISSUE_NUMBER: ${{ string(inputs.issue_number) }}
               AGENT: ${{ inputs.agent }}
+              PI_MODEL: opencode-go/mimo-v2.5
               QA_TIMEOUT_SECONDS: ${{ string(inputs.qa_timeout_seconds) }}
               QA_IDLE_TIMEOUT_SECONDS: ${{ string(inputs.qa_idle_timeout_seconds) }}
               WORKFLOW_RUN_ID: ${{ run.id }}

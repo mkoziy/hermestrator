@@ -8,6 +8,7 @@ set -Eeuo pipefail
 : "${REPO:?REPO is required}"
 : "${ISSUE_NUMBER:?ISSUE_NUMBER is required}"
 : "${AGENT:=pi}"
+: "${PI_MODEL:=opencode-go/mimo-v2.5}"
 # Hard wall-clock cap (safety net against a runaway agent) and an idle cap
 # (killed only once the agent has produced no new output for this long —
 # see run_qa_agent for why a fixed wall-clock timeout alone kills runs that
@@ -72,7 +73,7 @@ run_qa_agent() {
   local agent_bin="$1" prompt="$2" idle_timeout="$3" max_timeout="$4" stdout_log="$5" stderr_log="$6" final_msg="$7"
   case "$agent_bin" in
     codex) codex exec --json --output-last-message "$final_msg" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
-    pi) pi --print --mode json "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
+    pi) pi --print --mode json --model "$PI_MODEL" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     *) return 1 ;;
   esac
   local pid=$! start last_change last_size now size

@@ -119,8 +119,8 @@ EOF
 
 cat >"$fake_bin/pi" <<'EOF'
 #!/usr/bin/env bash
-# --print --mode json <prompt>
-shift; shift; shift
+# --print --mode json --model <model> <prompt>
+shift; shift; shift; shift; shift
 prompt="$1"
 dir="$(grep -o '/[^ ]*/screenshots' <<<"$prompt" | tail -n1)"
 [[ -n "$dir" && "${WRITE_SCREENSHOT:-true}" == true ]] && printf 'fake-png' >"$dir/step1.png"
@@ -144,6 +144,7 @@ chmod +x "$fake_bin"/*
 # not on elapsed time alone.
 
 source <(sed -n '/^run_qa_agent() {/,/^}/p' "$worker")
+PI_MODEL="opencode-go/mimo-v2.5"
 
 qa_dir="$test_root/qa-agent"
 mkdir -p "$qa_dir/screenshots"
