@@ -77,7 +77,7 @@ run_qa_agent() {
     # to make / slave: Permission denied") - same failure already fixed for
     # ralphex's codex profiles in acf010f. This call bypasses ralphex
     # entirely (see file header), so it needs the same override directly.
-    codex) codex exec --sandbox danger-full-access --ask-for-approval never \
+    codex) codex exec --sandbox danger-full-access \
       --json --output-last-message "$final_msg" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     pi) pi --print --mode json --model "$PI_MODEL" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     *) return 1 ;;
