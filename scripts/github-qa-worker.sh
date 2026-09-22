@@ -72,7 +72,13 @@ fail() {
 run_qa_agent() {
   local agent_bin="$1" prompt="$2" idle_timeout="$3" max_timeout="$4" stdout_log="$5" stderr_log="$6" final_msg="$7"
   case "$agent_bin" in
-    codex) codex exec --json --output-last-message "$final_msg" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
+    # codex's default sandbox (workspace-write) shells out to bubblewrap,
+    # which can't initialize in this unprivileged container ("bwrap: Failed
+    # to make / slave: Permission denied") - same failure already fixed for
+    # ralphex's codex profiles in acf010f. This call bypasses ralphex
+    # entirely (see file header), so it needs the same override directly.
+    codex) codex exec --sandbox danger-full-access --ask-for-approval never \
+      --json --output-last-message "$final_msg" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     pi) pi --print --mode json --model "$PI_MODEL" "$prompt" >"$stdout_log" 2>"$stderr_log" & ;;
     *) return 1 ;;
   esac
