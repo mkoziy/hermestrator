@@ -117,36 +117,6 @@ chown --recursive worker:worker \
   "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$GH_CONFIG_DIR" "$RUN_ARTIFACTS_DIR" \
   "$HERMESTRATOR_LOG_DIR" /workspace/.swamp
 
-# codex's default Responses WebSocket transport doesn't survive this
-# cluster's Tailscale/Headscale VPN-mesh egress path cleanly: the handshake
-# drops mid-stream, codex's reconnect attempts come back 401 (a known
-# upstream bug where a transient WS 401 isn't recovered even with a valid,
-# unexpired ChatGPT credential - https://github.com/openai/codex/issues/39578),
-# and codex exits instead of falling back to HTTP/SSE. Pin a WS-less custom
-# provider so codex only ever uses HTTP/SSE. Idempotent and re-applied every
-# tick since $CODEX_HOME is a persisted volume codex itself also writes to
-# (project trust entries, etc.) - never assume this survived a PVC wipe.
-codex_config="$CODEX_HOME/config.toml"
-if ! grep -q '^model_provider = "openai_https"' "$codex_config" 2>/dev/null; then
-  printf 'writing openai_https (no-websocket) codex provider to %s\n' "$codex_config" >&2
-  {
-    cat <<'EOF'
-model_provider = "openai_https"
-
-[model_providers.openai_https]
-name = "OpenAI HTTPS only"
-base_url = "https://api.openai.com/v1"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = false
-
-EOF
-    [[ -f "$codex_config" ]] && cat "$codex_config"
-  } >"$codex_config.new"
-  mv "$codex_config.new" "$codex_config"
-  chown worker:worker "$codex_config"
-fi
-
 prune_stale_run_data "$RUN_ARTIFACTS_DIR"
 prune_stale_run_data "$HERMESTRATOR_LOG_DIR"
 

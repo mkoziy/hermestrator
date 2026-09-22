@@ -245,22 +245,51 @@ fi
 ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sync_progress_artifact
-ralphex "${ralphex_args[@]}" \
-  >"$artifact_dir/ralphex.stdout.log" \
-  2>"$artifact_dir/ralphex.stderr.log" &
-ralphex_pid=$!
-elapsed_seconds=0
-while kill -0 "$ralphex_pid" 2>/dev/null; do
-  # Poll frequently enough to finish promptly, while rate-limiting best-effort
-  # progress pushes. A hard workflow timeout can otherwise skip EXIT cleanup.
-  sleep 10
-  elapsed_seconds=$((elapsed_seconds + 10))
-  if (( elapsed_seconds >= PROGRESS_PUSH_INTERVAL_SECONDS )); then
-    push_progress
-    elapsed_seconds=0
+
+# codex's Responses WebSocket occasionally reconnects into a transient 401
+# it never recovers from, even with a valid, unexpired ChatGPT session -
+# open upstream bug: https://github.com/openai/codex/issues/39578. There is
+# no config-level workaround: codex refuses to let a custom model_providers
+# entry override the built-in "openai" provider ID, and defining a
+# differently-named custom provider (e.g. to force HTTP/SSE only) drops the
+# ChatGPT-session request path entirely, replacing it with generic API-key
+# auth that a ChatGPT subscription's token has no org/project scopes for
+# (401 "Missing scopes: api.responses.write") - confirmed by hand against
+# this exact CODEX_HOME. A bare retry of the whole ralphex run reliably
+# recovers (a fresh invocation just gets a new WS connection), so retry only
+# this specific, identifiable failure signature; anything else still fails
+# the run immediately, unchanged.
+ralphex_max_attempts=3
+ralphex_attempt=1
+while true; do
+  ralphex "${ralphex_args[@]}" \
+    >"$artifact_dir/ralphex.stdout.log" \
+    2>"$artifact_dir/ralphex.stderr.log" &
+  ralphex_pid=$!
+  elapsed_seconds=0
+  while kill -0 "$ralphex_pid" 2>/dev/null; do
+    # Poll frequently enough to finish promptly, while rate-limiting best-effort
+    # progress pushes. A hard workflow timeout can otherwise skip EXIT cleanup.
+    sleep 10
+    elapsed_seconds=$((elapsed_seconds + 10))
+    if (( elapsed_seconds >= PROGRESS_PUSH_INTERVAL_SECONDS )); then
+      push_progress
+      elapsed_seconds=0
+    fi
+  done
+  ralphex_rc=0
+  wait "$ralphex_pid" || ralphex_rc=$?
+  [[ "$ralphex_rc" -eq 0 ]] && break
+  if (( ralphex_attempt < ralphex_max_attempts )) && \
+     grep -q 'Reconnecting\.\.\. 5/5' "$artifact_dir/ralphex.stderr.log" 2>/dev/null; then
+    ralphex_attempt=$((ralphex_attempt + 1))
+    printf 'ralphex hit the known codex WebSocket-reconnect 401 bug - retrying (attempt %s/%s)\n' \
+      "$ralphex_attempt" "$ralphex_max_attempts"
+    sleep 15
+    continue
   fi
+  exit "$ralphex_rc"
 done
-wait "$ralphex_pid"
 
 [[ "$(git branch --show-current)" == "$branch" ]] || fail "ralphex left the checkout on an unexpected branch"
 [[ "$branch" != "$BASE_BRANCH" ]] || fail "refusing to push the base branch"
