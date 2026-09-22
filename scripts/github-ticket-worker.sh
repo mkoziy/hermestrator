@@ -257,6 +257,12 @@ sync_progress_artifact
   printf '=== diag: env ===\n'; env | sort
   printf '=== diag: ulimits ===\n'; ulimit -a
   printf '=== diag: resolv.conf ===\n'; cat /etc/resolv.conf
+  printf '=== diag: CODEX_HOME listing (CODEX_HOME=%s) ===\n' "$CODEX_HOME"
+  ls -la "$CODEX_HOME" 2>&1
+  printf '=== diag: mountinfo grep codex ===\n'
+  grep -i codex /proc/self/mountinfo 2>&1
+  printf '=== diag: mountinfo grep workspace ===\n'
+  grep -i workspace /proc/self/mountinfo 2>&1
   printf '=== diag: codex doctor (full) ===\n'
   timeout 30 codex doctor 2>&1
   printf '=== diag: codex doctor exit=%s ===\n' "$?"
