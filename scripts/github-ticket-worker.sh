@@ -257,9 +257,20 @@ sync_progress_artifact
   printf '=== diag: env ===\n'; env | sort
   printf '=== diag: ulimits ===\n'; ulimit -a
   printf '=== diag: resolv.conf ===\n'; cat /etc/resolv.conf
-  printf '=== diag: route ===\n'; ip route 2>&1
-  printf '=== diag: codex doctor (provider/websocket) ===\n'
-  codex doctor 2>&1 | grep -i "provider\|websocket\|wire\|scope\|auth mode\|reachab"
+  printf '=== diag: codex doctor (full) ===\n'
+  timeout 30 codex doctor 2>&1
+  printf '=== diag: codex doctor exit=%s ===\n' "$?"
+  # The definitive test: does a TRIVIAL codex call succeed from inside this
+  # exact process (a true swamp command/shell dispatch child), moments
+  # before the real ralphex-driven call that always fails? Every prior test
+  # of this used a separate `kubectl exec` debug pod - a different process
+  # ancestor entirely - and always succeeded. This runs in the one place
+  # that's never been tested: the actual dispatched process itself.
+  printf '=== diag: trivial codex exec test (start %s) ===\n' "$(date -u +%H:%M:%S)"
+  echo "say only the word PONGDIAG and nothing else" | \
+    timeout 60 codex exec --model gpt-5.6-terra -c model_reasoning_effort=low \
+      --skip-git-repo-check --sandbox read-only --dangerously-bypass-approvals-and-sandbox 2>&1
+  printf '=== diag: trivial codex exec exit=%s (end %s) ===\n' "$?" "$(date -u +%H:%M:%S)"
 } >"$artifact_dir/diag.txt" 2>&1 || true
 
 # codex's Responses WebSocket occasionally reconnects into a transient 401
