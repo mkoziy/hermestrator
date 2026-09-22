@@ -246,6 +246,22 @@ ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sync_progress_artifact
 
+# TEMPORARY diagnostic dump for investigating the codex WS-reconnect 401
+# (see the retry comment below) - captures this process's OWN environment/
+# limits/routing before exec'ing into ralphex/codex, since a separate
+# `kubectl exec` can't read another process's /proc/<pid>/environ under
+# this kernel's Yama ptrace_scope even as the same uid. Remove once the
+# root cause is found.
+{
+  printf '=== diag: id ===\n'; id
+  printf '=== diag: env ===\n'; env | sort
+  printf '=== diag: ulimits ===\n'; ulimit -a
+  printf '=== diag: resolv.conf ===\n'; cat /etc/resolv.conf
+  printf '=== diag: route ===\n'; ip route 2>&1
+  printf '=== diag: codex doctor (provider/websocket) ===\n'
+  codex doctor 2>&1 | grep -i "provider\|websocket\|wire\|scope\|auth mode\|reachab"
+} >"$artifact_dir/diag.txt" 2>&1 || true
+
 # codex's Responses WebSocket occasionally reconnects into a transient 401
 # it never recovers from, even with a valid, unexpired ChatGPT session -
 # open upstream bug: https://github.com/openai/codex/issues/39578. There is
