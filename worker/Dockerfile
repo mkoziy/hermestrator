@@ -133,8 +133,20 @@ ARG AGENT_BROWSER_VERSION=0.37.1
 # package covers both architectures (and this image is already built for
 # both, see TARGETARCH above), so use that instead of the download and
 # point agent-browser at it via its config file.
+#
+# unzip and the libs below are root-only installs a per-repo agent-setup.sh
+# (running as the unprivileged `worker` user, see entrypoint.sh's `gosu
+# worker`) can never do for itself — every repo QAing an Android app needs
+# them regardless of which JDK/SDK/API-level/AVD it picks, so they belong
+# here once. The Android SDK itself (cmdline-tools, build-tools, platform,
+# system image, AVD) is NOT installed here: that's version-specific per
+# repo and goes in that repo's own scripts/agent-setup.sh, same tier as its
+# mise.toml. libgl1/libpulse0/etc. are what a `-no-window -gpu
+# swiftshader_indirect` headless Android emulator needs to boot without a
+# real GPU or KVM.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y chromium \
+    && apt-get install --no-install-recommends -y chromium unzip \
+      libgl1 libpulse0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 # --ignore-scripts (matches codex/pi above) skips agent-browser's own
@@ -168,8 +180,11 @@ FROM dev AS ephemeral
 
 ARG AGENT_BROWSER_VERSION=0.37.1
 
+# unzip + headless-emulator libs, see the same install in the qa stage above
+# for why these (and not the Android SDK itself) live in the shared image.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y chromium \
+    && apt-get install --no-install-recommends -y chromium unzip \
+      libgl1 libpulse0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
