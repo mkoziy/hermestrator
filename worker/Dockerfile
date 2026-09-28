@@ -47,7 +47,17 @@ RUN npm install --global --ignore-scripts \
       "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && npm cache clean --force
 
-RUN useradd --create-home --shell /bin/bash worker \
+
+# gid 104 matches the `kvm` group that owns /dev/kvm on the host node
+# (easy.box) once a Kubernetes device plugin grants the container that
+# device — see k3s-cluster's kvm-device-plugin. `gosu worker` (entrypoint.sh)
+# resets supplementary groups to the target user's own /etc/group entries,
+# discarding anything the pod's securityContext.supplementalGroups injects,
+# so group membership has to be baked into the image itself: this is why
+# the QA worker could open /dev/kvm as root but not as `worker`, even after
+# the cgroup-level access was fixed.
+RUN groupadd --gid 104 kvm \
+    && useradd --create-home --shell /bin/bash --groups kvm worker \
     && mkdir --parents /workspace /home/worker/.config /home/worker/.codex /home/worker/.pi/agent /home/worker/.swamp-worker /home/worker/.config/gh \
     && chown --recursive worker:worker /workspace /home/worker
 
