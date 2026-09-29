@@ -132,6 +132,22 @@ else
 fi
 printf '\n```\n' >>"$run_file"
 
+# QA runs (only) leave screenshots on the shared artifacts volume, at
+# RUN_ARTIFACTS_DIR/WORKFLOW_RUN_ID/screenshots — the dev flow never
+# populates that directory, so this is a no-op there.
+screenshots_src="${RUN_ARTIFACTS_DIR}/${WORKFLOW_RUN_ID}/screenshots"
+if [[ -d "$screenshots_src" ]] && find "$screenshots_src" -mindepth 1 -type f -print -quit | grep -q .; then
+  screenshots_dir_name="${run_ts}-screenshots"
+  mkdir -p "$dir/runs/$screenshots_dir_name"
+  cp "$screenshots_src"/* "$dir/runs/$screenshots_dir_name/"
+  {
+    printf '\n## Screenshots\n\n'
+    for f in "$dir/runs/$screenshots_dir_name"/*; do
+      printf '![[runs/%s/%s]]\n' "$screenshots_dir_name" "$(basename "$f")"
+    done
+  } >>"$run_file"
+fi
+
 # ticket.md is fully regenerated each run — pr_urls and the Runs list are
 # derived from runs/*.md on disk rather than parsed out of the old ticket.md,
 # so there is no incremental state to get out of sync.

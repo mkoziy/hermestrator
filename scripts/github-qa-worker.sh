@@ -144,55 +144,14 @@ strip_verdict_line() {
   grep -v '^QA_VERDICT: ' "$final_msg" || true
 }
 
-# Pushes every file in $screenshots_dir to the qa-screenshots branch under
-# <issue_number>/<workflow_run_id>/, creating the branch if this is the
-# repo's first QA run. Prints one blob-view URL per file, pinned to the
-# commit SHA so a later run's push can't invalidate it. Blob view (not
-# raw.githubusercontent.com) because the target repo is private and raw URLs
-# 404 without auth; blob view works for anyone with repo read access via
-# their normal browser session, at the cost of click-through instead of
-# inline rendering. No-op (prints nothing) when there are no screenshots.
-publish_screenshots() {
-  local src_dir="$1" repo="$2" issue_number="$3" run_id="$4"
-  local -a files=()
-  while IFS= read -r -d '' f; do files+=("$f"); done \
-    < <(find "$src_dir" -type f -print0 2>/dev/null | sort -z)
-  [[ "${#files[@]}" -gt 0 ]] || return 0
-
-  local dest_prefix="${issue_number}/${run_id}"
-  # FETCH_HEAD, not origin/qa-screenshots: the repo is a --single-branch
-  # clone, so its remote-tracking refspec never populates origin/<branch>
-  # for any branch but the one cloned — only FETCH_HEAD gets this fetch's
-  # result, regardless of remote ref name.
-  if git fetch origin qa-screenshots >/dev/null 2>&1; then
-    git checkout -B qa-screenshots FETCH_HEAD >/dev/null
-  else
-    git checkout --orphan qa-screenshots >/dev/null
-    git rm -rf . >/dev/null 2>&1 || true
-  fi
-  mkdir -p "$dest_prefix"
-  cp "${files[@]}" "$dest_prefix/"
-  git add "$dest_prefix"
-  git -c user.name="hermestrator-qa" -c user.email="qa-worker@hermestrator.local" \
-    commit -m "qa screenshots: issue #${issue_number} run ${run_id}" >/dev/null
-  git push origin qa-screenshots >/dev/null
-  local sha; sha="$(git rev-parse HEAD)"
-  local f
-  for f in "${files[@]}"; do
-    printf 'https://github.com/%s/blob/%s/%s/%s\n' \
-      "$repo" "$sha" "$dest_prefix" "$(basename "$f")"
-  done
-}
-
 # Builds the verdict comment body. $3 is the agent's report text (its final
 # message with the trailing QA_VERDICT line already stripped — may be
-# empty), $4+ are screenshot blob-view URLs (may be none). The report is
-# what future iterations (re-planning, re-review) actually have to work
-# from — the verdict line alone only says pass/fail, not what was tested or
-# why it failed.
+# empty). The report is what future iterations (re-planning, re-review)
+# actually have to work from — the verdict line alone only says pass/fail,
+# not what was tested or why it failed. Screenshots aren't linked here: they
+# go to the vault (see vault-write-note.sh), not a GitHub branch.
 build_comment_body() {
   local verdict="$1" commit_sha="$2" report="$3"
-  shift 3
   local status_line
   if [[ "$verdict" == PASS ]]; then
     status_line='QA passed'
@@ -203,18 +162,8 @@ build_comment_body() {
   if [[ -n "$report" ]]; then
     printf '\n%s\n' "$report"
   fi
-  if [[ "$#" -gt 0 ]]; then
-    printf '\n**Screenshots:**\n\n'
-    local url
-    for url in "$@"; do
-      printf -- '- [%s](%s)\n' "$(basename "$url")" "$url"
-    done
-  fi
 }
 
-# Writes note.json in the same schema scripts/github-ticket-worker.sh emits
-# (see its emit_vault_note) so scripts/vault-write-note.sh — and the vault's
-# per-issue runs/ timeline — need no QA-specific branch: a QA run just shows
 # A real QA pass's JSON event stream can run into hundreds of MB — embedding
 # it whole in the vault note blows past what the workflow's stdout-capture
 # can carry (NOTE_JSON_RAW ends up empty and downstream write-note silently
@@ -232,17 +181,16 @@ tail_capped() {
   fi
 }
 
-# up as another run entry on the same issue.md. $3+ are screenshot URLs.
+# Writes note.json in the same schema scripts/github-ticket-worker.sh emits,
+# so scripts/vault-write-note.sh needs no QA-specific branch: a QA run just
+# shows up as another run entry on the same issue's vault timeline.
+# vault-write-note.sh picks up this run's screenshots directly from
+# RUN_ARTIFACTS_DIR/WORKFLOW_RUN_ID/screenshots — they aren't threaded
+# through this note.
 emit_vault_note() {
   local verdict="$1" pr_url="$2"
-  shift 2
   local status
   [[ "$verdict" == PASS ]] && status=success || status=failed
-  local screenshots_block=""
-  local url
-  for url in "$@"; do
-    screenshots_block+="${url}"$'\n'
-  done
   jq -nc \
     --arg repo "$REPO" \
     --argjson issue_number "$ISSUE_NUMBER" \
@@ -254,13 +202,11 @@ emit_vault_note() {
     --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg branch "$branch" \
     --arg verdict "$verdict" \
-    --arg screenshots "$screenshots_block" \
     --arg qa_final "$( [[ -f "$artifact_dir/qa-agent.final-message.txt" ]] && cat "$artifact_dir/qa-agent.final-message.txt" || true )" \
     --arg qa_stdout "$(tail_capped "$artifact_dir/qa-agent.stdout.log")" \
     --arg qa_stderr "$(tail_capped "$artifact_dir/qa-agent.stderr.log")" \
     '{repo:$repo, issue_number:$issue_number, issue:$issue[0], pr_url:$pr_url, ralphex_config:$ralphex_config, status:$status, started_at:$started_at, completed_at:$completed_at, branch:$branch,
-      progress_log:("QA verdict: " + $verdict + "\n" +
-        (if $screenshots == "" then "" else "\nScreenshots:\n" + $screenshots end) +
+      progress_log:("QA verdict: " + $verdict +
         "\n--- qa-agent.final-message.txt ---\n" + $qa_final +
         "\n--- qa-agent.stdout.log (json events) ---\n" + $qa_stdout +
         "\n--- qa-agent.stderr.log ---\n" + $qa_stderr)}' \
@@ -338,19 +284,11 @@ set -e
 verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.final-message.txt")"
 printf 'QA verdict: %s\n' "$verdict"
 
-# $() rather than < <() process substitution: errexit inside
-# publish_screenshots must actually fail this script instead of dying
-# silently in an unwatched subshell (bash doesn't propagate set -e out of
-# process substitution, but it does out of command substitution).
-image_urls=()
-publish_out="$(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")" \
-  || fail "publish_screenshots failed for run $WORKFLOW_RUN_ID"
-[[ -n "$publish_out" ]] && mapfile -t image_urls <<<"$publish_out"
 report="$(strip_verdict_line "$artifact_dir/qa-agent.final-message.txt")"
 
-emit_vault_note "$verdict" "$pr_url" "${image_urls[@]}" || true
+emit_vault_note "$verdict" "$pr_url" || true
 
-comment_body="$(build_comment_body "$verdict" "$head_sha" "$report" "${image_urls[@]}")"
+comment_body="$(build_comment_body "$verdict" "$head_sha" "$report")"
 gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment_body"
 
 if [[ "$verdict" == PASS ]]; then

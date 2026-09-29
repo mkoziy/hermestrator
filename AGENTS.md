@@ -236,13 +236,18 @@ pair QAs the PR the dev flow opened:
   exact `QA_VERDICT: PASS` or `QA_VERDICT: FAIL: <reason>` line
   (`worker/qa/prompts/task.txt`) — a missing/garbage line is always
   parsed as a fail, never a silent pass.
-- Screenshots have no GitHub-native upload path from a PAT-authenticated
-  `gh`/API call, so `github-qa-worker.sh` pushes them to a dedicated,
-  long-lived `qa-screenshots` branch (created on first use) under
-  `<issue>/<run-id>/`, then embeds `raw.githubusercontent.com` URLs pinned
-  to that push's commit SHA in the verdict comment. That branch grows
-  forever by design (v1); add a retention job only if repo size actually
-  becomes a problem.
+- Screenshots go to the Obsidian vault, not GitHub: the QA agent writes PNGs
+  under `RUN_ARTIFACTS_DIR/WORKFLOW_RUN_ID/screenshots` (same shared volume
+  used for logs), and `vault-write-note.sh`'s `write-note` step — already
+  invoked with those two env vars by both worker workflows — copies them
+  into `<repo>/issue-<n>/runs/<run_ts>-screenshots/` next to that run's
+  note, embedding them with Obsidian `![[...]]` links. No-op when the
+  directory is empty (the dev flow never populates it). An earlier version
+  pushed screenshots to a dedicated `qa-screenshots` GitHub branch and
+  linked them from the verdict comment; that path silently stopped working
+  after the first-ever run (a `--single-branch` clone never populates
+  `origin/<branch>` for `git checkout -B ... origin/<branch>` on any branch
+  but the one cloned) and was dropped in favor of the vault.
 - Verdict comment posted, then `agent-qa-ready` → `agent-qa-passed` or
   `agent-qa-failed` (whichever verdict label isn't being added is removed
   first, so a re-run can't leave both present). `qa_failed → agent_ready`
