@@ -160,8 +160,12 @@ publish_screenshots() {
   [[ "${#files[@]}" -gt 0 ]] || return 0
 
   local dest_prefix="${issue_number}/${run_id}"
+  # FETCH_HEAD, not origin/qa-screenshots: the repo is a --single-branch
+  # clone, so its remote-tracking refspec never populates origin/<branch>
+  # for any branch but the one cloned — only FETCH_HEAD gets this fetch's
+  # result, regardless of remote ref name.
   if git fetch origin qa-screenshots >/dev/null 2>&1; then
-    git checkout -B qa-screenshots origin/qa-screenshots >/dev/null
+    git checkout -B qa-screenshots FETCH_HEAD >/dev/null
   else
     git checkout --orphan qa-screenshots >/dev/null
     git rm -rf . >/dev/null 2>&1 || true
@@ -334,7 +338,14 @@ set -e
 verdict="$(parse_verdict "$agent_status" "$artifact_dir/qa-agent.final-message.txt")"
 printf 'QA verdict: %s\n' "$verdict"
 
-mapfile -t image_urls < <(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")
+# $() rather than < <() process substitution: errexit inside
+# publish_screenshots must actually fail this script instead of dying
+# silently in an unwatched subshell (bash doesn't propagate set -e out of
+# process substitution, but it does out of command substitution).
+image_urls=()
+publish_out="$(publish_screenshots "$screenshots_dir" "$REPO" "$ISSUE_NUMBER" "$WORKFLOW_RUN_ID")" \
+  || fail "publish_screenshots failed for run $WORKFLOW_RUN_ID"
+[[ -n "$publish_out" ]] && mapfile -t image_urls <<<"$publish_out"
 report="$(strip_verdict_line "$artifact_dir/qa-agent.final-message.txt")"
 
 emit_vault_note "$verdict" "$pr_url" "${image_urls[@]}" || true
