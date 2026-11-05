@@ -1,80 +1,32 @@
 services:
-  orchestrator:
+  dagu:
     build:
       context: .
       dockerfile: worker/Dockerfile
       target: dev
-    entrypoint: ["swamp"]
-    command: ["serve", "--host", "0.0.0.0", "--port", "9090", "--trusted-hosts", "orchestrator,localhost"]
     ports:
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:8080:8080"
     environment:
       # The notes vault has its own credential. Do not alias it to an
       # owner-specific ticket-worker token.
       VAULT_GH_TOKEN: ${VAULT_GH_TOKEN:-}
       GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
       GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
-    volumes:
-      - .:/workspace
-      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
-
-  coding-worker:
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
-      target: dev
-    depends_on:
-      - orchestrator
-    environment:
-      SWAMP_ORCHESTRATOR_URL: ws://orchestrator:9090
-      SWAMP_WORKER_TOKEN: ${SWAMP_WORKER_TOKEN:-}
-      SWAMP_WORKER_CONCURRENCY: "1"
-      GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
-      GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
       CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
     volumes:
-      - .:/workspace:ro
-      - swamp_worker_cache:/home/worker/.swamp-worker
-      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
+      - dagu_home:/var/lib/dagu
+      - hermestrator_artifacts:/var/lib/hermestrator/artifacts
+      - vault_clone:/workspace/.vault-clone
       - codex_home:/home/worker/.codex
       - pi_agent_home:/home/worker/.pi/agent
     stop_grace_period: 5m
-    restart: on-failure
-
-  # Heavy (Chrome + agent tooling) and deliberately not a persistent daemon
-  # like coding-worker — it's meant to be started on a schedule, drain
-  # whatever pool:qa work is queued, and exit. See "Worker lifecycle:
-  # ephemeral, not persistent" in docs/plans/20260916-qa-agent-flow.md and
-  # docs/remote-worker.md. Run it with `docker compose run --rm qa-worker`
-  # (e.g. from a host cron entry), not `docker compose up -d`.
-  qa-worker:
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
-      target: qa
-    depends_on:
-      - orchestrator
-    environment:
-      SWAMP_ORCHESTRATOR_URL: ws://orchestrator:9090
-      SWAMP_WORKER_TOKEN: ${SWAMP_WORKER_TOKEN:-}
-      SWAMP_WORKER_CONCURRENCY: "1"
-      SWAMP_WORKER_IDLE_TIMEOUT: 2m
-      GH_TOKEN_MOONTECHS: ${GH_TOKEN_MOONTECHS:-}
-      GH_TOKEN_MKOZIY: ${GH_TOKEN_MKOZIY:-}
-      CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-    volumes:
-      - .:/workspace:ro
-      - swamp_worker_qa_cache:/home/worker/.swamp-worker
-      - swamp_worker_artifacts:/var/lib/swamp-worker-artifacts
-    stop_grace_period: 5m
+    restart: unless-stopped
 
 volumes:
-  swamp_worker_cache:
-  swamp_worker_qa_cache:
-  swamp_worker_artifacts:
+  dagu_home:
+  hermestrator_artifacts:
+  vault_clone:
   codex_home:
   pi_agent_home:

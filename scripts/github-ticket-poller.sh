@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Polls one GitHub repository for issues with a ready ralphex plan branch and
-# triggers the github-ticket-worker workflow for each. Invoked by the
-# github-ticket-poller Swamp workflow on a cron trigger.
+# enqueues a github-ticket-worker dagu run for each. Invoked by the
+# github-ticket-poller dagu DAG on a cron schedule.
 set -Eeuo pipefail
 
 : "${REPO:?REPO is required}"
 : "${BASE_BRANCH:=main}"
 : "${LABEL:=agent-ready}"
 : "${RALPHEX_CONFIG:=ralphex-codex}"
-: "${STALE_RUN_MINUTES:=45}"
+readonly worker_dag=github-ticket-worker
 
 [[ "$REPO" =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]] || { printf 'ERROR: repo must be owner/name\n' >&2; exit 1; }
 
@@ -23,15 +23,7 @@ esac
 
 command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
-command -v swamp >/dev/null || { printf 'ERROR: swamp is required\n' >&2; exit 1; }
-
-# A hard worker timeout can leave stale run-tracker records that retain a
-# command/shell lock. Reap only records Swamp itself considers stale before
-# deciding whether this issue has an active worker run. Workflow-run files are
-# intentionally left alone; the age-based guard below handles those separately.
-if ! swamp run doctor --fix >/dev/null; then
-  printf 'WARN: unable to reap stale Swamp run-tracker records\n' >&2
-fi
+command -v dagu >/dev/null || { printf 'ERROR: dagu is required\n' >&2; exit 1; }
 
 issues_json="$(gh issue list --repo "$REPO" --label "$LABEL" --state open --json number,labels)"
 if [[ "$(jq 'length' <<<"$issues_json")" -eq 0 ]]; then
@@ -50,7 +42,7 @@ while IFS=$'\t' read -r n issue_labels; do
     *,agent-codex,*) config="ralphex-codex" ;;
   esac
 
-  if ! gh api "repos/${REPO}/branches/${branch}" >/dev/null 2>&1; then
+  if ! branch_sha="$(gh api "repos/${REPO}/branches/${branch}" --jq .commit.sha 2>/dev/null)"; then
     printf 'Issue #%s: no %s branch yet, skipping\n' "$n" "$branch"
     continue
   fi
@@ -86,41 +78,20 @@ while IFS=$'\t' read -r n issue_labels; do
     printf 'Issue #%s: %s has an archived plan but no pull request yet, resuming\n' "$n" "$branch"
   fi
 
-  # Guard against retriggering an issue whose previous worker run is still
-  # in flight (or was never marked terminal) — a slow ralphex run that
-  # outlives one 15-minute poller tick would otherwise get a duplicate
-  # worker run stacked on top of it every tick, contending for the same
-  # command/shell model lock. Runs older than STALE_RUN_MINUTES are treated
-  # as terminal even if still reporting "running": a pod recycle mid-run can
-  # orphan a run's bookkeeping in a stuck non-terminal state that no CLI
-  # command reconciles, which would otherwise block this issue forever.
-  active_count="$(swamp workflow history search \
-    --input repo="$REPO" --input "issue_number=$n" --json 2>/dev/null \
-    | jq --argjson stale_secs "$((STALE_RUN_MINUTES * 60))" '
-        now as $now
-        | [.results[] | select(.workflowName == "github-ticket-worker"
-            and (.status | IN("completed","succeeded","failed","cancelled","error","timeout") | not)
-            and (($now - (.startedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) < $stale_secs))
-          ] | length' \
-      2>/dev/null)" || active_count=0
-  if [[ "$active_count" -gt 0 ]]; then
-    printf 'Issue #%s: a github-ticket-worker run is already active, skipping\n' "$n"
+  # Dedup: the dagu run id pins this issue to the current branch head. dagu
+  # rejects an id that was ever used (finished runs included), so the same
+  # branch state is never enqueued twice — a slow ralphex run that outlives
+  # one poller tick is skipped, and a new commit (ralphex progress push, new
+  # plan) yields a new id. A failed run with no new commit is therefore not
+  # retried automatically. Ids must be [A-Za-z0-9_-] and shorter than 64
+  # chars, so the repo is folded into a short hash.
+  run_id="gh-${n}-$(printf '%s' "$REPO" | sha256sum | cut -c1-8)-${branch_sha:0:12}"
+  if dagu status "$worker_dag" --run-id "$run_id" >/dev/null 2>&1; then
+    printf 'Issue #%s: run %s already exists for this branch head, skipping\n' "$n" "$run_id"
     continue
   fi
 
-  printf 'Issue #%s: plan ready on %s, triggering github-ticket-worker with %s\n' "$n" "$branch" "$config"
-  # `swamp workflow run` blocks until the triggered workflow completes (no
-  # async mode exists) — but this poller step's own timeout is far shorter
-  # than a real ralphex run, and the workflow it triggers executes
-  # server-side in the orchestrator regardless of whether this CLI call is
-  # still attached. Detach fully so this step returns immediately; the
-  # in-flight-run guard above already prevents duplicate triggers on the
-  # next tick.
-  setsid swamp workflow run github-ticket-worker \
-    --input repo="$REPO" \
-    --input issue_number="$n" \
-    --input base_branch="$BASE_BRANCH" \
-    --input ralphex_config="$config" \
-    >/dev/null 2>&1 &
-  disown
+  printf 'Issue #%s: plan ready on %s, enqueueing %s as %s with %s\n' "$n" "$branch" "$worker_dag" "$run_id" "$config"
+  dagu enqueue --run-id "$run_id" "$worker_dag" -- \
+    REPO="$REPO" ISSUE_NUMBER="$n" BASE_BRANCH="$BASE_BRANCH" RALPHEX_CONFIG="$config"
 done < <(jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' <<<"$issues_json")

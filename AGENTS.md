@@ -5,22 +5,27 @@ working in this repository.
 
 ## Start here
 
-This repo is managed with [swamp](https://github.com/swamp-club/swamp).
-**[CLAUDE.md](CLAUDE.md)** is the source of truth for swamp conventions
-(models, workflows, extensions, CEL expressions) — read it first. It is a
-swamp-managed file; don't hand-edit the marked section.
+The coding flow is orchestrated by [dagu](https://github.com/dagucloud/dagu):
+DAG definitions live in `dags/`, the container setup in `worker/` (see
+[docs/remote-worker.md](docs/remote-worker.md)). The QA flow is **not deployed**
+and still carries its old [swamp](https://github.com/swamp-club/swamp)
+workflows/models until it is migrated; **[CLAUDE.md](CLAUDE.md)** holds the
+swamp conventions that apply to that legacy part only. It is a swamp-managed
+file; don't hand-edit the marked section.
 
 ## What this repo does
 
-`workflows/workflow-github-ticket-poller.yaml` polls a GitHub repo for
-`agent-ready` issues with a plan already committed to `agent/issue-<N>`, and
-triggers `workflows/workflow-github-ticket-worker.yaml` to implement each one
-via ralphex and open a PR. See [README.md](README.md) for the full flow and
-[docs/remote-worker.md](docs/remote-worker.md) for the worker image.
+`dags/github-ticket-poller.yaml` polls GitHub repos for `agent-ready` issues
+with a plan already committed to `agent/issue-<N>`, and enqueues
+`dags/github-ticket-worker.yaml` for each one; the worker implements it via
+ralphex and opens a PR, then mirrors the run into the notes vault. See
+[README.md](README.md) for the full flow and
+[docs/remote-worker.md](docs/remote-worker.md) for the container.
 
 A second, independent flow QAs the PR the dev flow opened —
-`workflows/workflow-github-qa-poller.yaml` / `-worker.yaml`. See "QA flow"
-below and [docs/plans/20260916-qa-agent-flow.md](docs/plans/completed/20260916-qa-agent-flow.md).
+`workflows/workflow-github-qa-poller.yaml` / `-worker.yaml`. It is currently
+not deployed; see "QA flow" below and
+[docs/plans/20260916-qa-agent-flow.md](docs/plans/completed/20260916-qa-agent-flow.md).
 
 ## Shell scripts (`scripts/`)
 
@@ -35,37 +40,45 @@ New or edited scripts should match the existing style in
   optional ones with `: "${VAR:=default}"`.
 - A single `fail()` helper for user-facing errors; a `cleanup()` trap on
   `EXIT` for anything that needs teardown (temp worktrees, workspaces).
-- Check required CLI tools (`gh`, `jq`, `swamp`, ...) are on `PATH` before use.
+- Check required CLI tools (`gh`, `jq`, `dagu`, ...) are on `PATH` before use.
 
-## Workflows and models
+## DAGs
 
-Don't hand-write workflow YAML from scratch — use `swamp workflow create`
-and the `swamp` skill (see CLAUDE.md rule 9). Same for models: search for an
-existing type before writing a custom extension (CLAUDE.md rule 1).
+Coding-flow DAGs are plain dagu YAML in `dags/`. Gotchas verified against
+dagu 2.25:
+
+- No `name:` key — the DAG name is the filename. Check a change with
+  `dagu validate dags/<file>.yaml` (CI runs it inside the built image).
+- Steps get only an env allowlist. A variable a script reads must be set in the
+  DAG's `env:`/`params:` or listed in the image's `DAGU_ENV_PASSTHROUGH*`.
+- Run ids must match `[A-Za-z0-9_-]` and be shorter than 64 characters, and an
+  id is unique forever (finished runs included) — see the dedup note under
+  "Commits and PRs".
+- `action: dag.enqueue` cannot set a run id; anything that needs a
+  deterministic id calls `dagu enqueue --run-id` from a script.
+- A failing `handler_on.exit` fails the run even when every step succeeded.
+- Run `dagu` CLI commands as the `worker` user, never root.
+
+Swamp rules in CLAUDE.md (search before you build, `swamp workflow create`)
+apply only to the not-yet-migrated QA workflows.
 
 ## Docker / worker image
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (swamp, gh, mise,
-codex, pi — everything every target needs), then three targets built on
-top of it: `dev` (today's ralphex-based coding-worker/orchestrator, adds
-ralphex/gremlins), `qa` (browser-driven QA worker, built `FROM base` —
-adds chromium/agent-browser, deliberately not ralphex — see "QA flow"
-below), and `ephemeral` (built `FROM dev`, so it carries both ralphex and
-the browser QA tooling — the one image
-`worker/ephemeral-entrypoint.sh`/`docs/remote-worker.md`'s "Ephemeral
-all-in-one worker" needs). `qa` and `ephemeral` each install
-chromium/agent-browser independently rather than one building `FROM` the
-other — keeps `qa` lean (no ralphex dragged in) at the cost of a
-version/checksum bump needing two RUN blocks updated instead of one. Put a
-tool in `base` only if every target actually uses it; a version/checksum
-bump on a shared tool then happens once, not once per target. `SHELL
+codex, pi — everything every target needs), then two targets built on top of
+it: `dev` (the ralphex-based coding image, adds ralphex/gremlins and dagu —
+the one k3s/Compose run) and `qa` (browser-driven QA worker, built `FROM base`
+— adds chromium/agent-browser, deliberately not ralphex; not deployed, see "QA
+flow" below). Put a tool in `base` only if every target actually uses it; a
+version/checksum bump on a shared tool then happens once, not once per target.
+swamp stays in `base` only until the QA flow moves to dagu. `SHELL
 ["/bin/bash", "-o", "pipefail", "-c"]` does not carry across a new `FROM`
 even within the same file — any stage with a `RUN ... | cmd` pipe needs
 its own `SHELL` redeclaration, or hadolint's `DL4006` will catch the
 missing one.
 
 It pins exact versions and SHA-256 checksums for every downloaded binary
-(swamp, ralphex, gh, the Pi adapter script, mise). If you bump a version,
+(swamp, dagu, ralphex, gh, the Pi adapter script, mise). If you bump a version,
 update its pinned checksum in the same change — don't drop verification.
 Never bake credentials into the image; runtime secrets are injected via
 environment variables only (see the table in
@@ -80,16 +93,15 @@ tool version for every repo the worker runs.
 
 ## CI
 
-`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa,
-ephemeral]`: each lints the shared Dockerfile with hadolint, builds its own
-`--target`, runs a target-specific smoke check inside the container (`dev`:
-`swamp version`, `ralphex --version`, etc.; `qa`: `swamp version`,
-`agent-browser --version`, `chromium --version`, etc. — no `ralphex
---version`, it isn't installed there; `ephemeral`: everything `dev` and `qa`
-each check, plus `bash -n /usr/local/bin/ephemeral-entrypoint`), then pushes
-to GHCR with a `qa-`/`ephemeral-`-prefixed tag for `qa`/`ephemeral` and the
-existing untouched tag scheme for `dev`. Keep all three targets buildable
-and all three smoke checks passing for any Dockerfile change.
+`.github/workflows/build-and-push.yml` is a matrix over `[dev, qa]`: each
+lints the shared Dockerfile with hadolint, builds its own `--target`, runs a
+target-specific smoke check inside the container (`dev`: `swamp version`,
+`dagu version`, `dagu validate` on both DAGs, `ralphex --version`, etc.; `qa`:
+`swamp version`, `agent-browser --version`, `chromium --version`, etc. — no
+`ralphex --version`, it isn't installed there), then pushes to GHCR with a
+`qa-`-prefixed tag for `qa` and the existing untouched tag scheme for `dev`.
+Keep both targets buildable and both smoke checks passing for any Dockerfile
+change.
 
 ## GitHub tokens
 
@@ -99,10 +111,10 @@ Fine-grained PATs are scoped to a single GitHub owner — there is no generic
 The notes vault is a separate GitHub repository and uses its own
 `VAULT_GH_TOKEN`; do not alias it to an owner token. Its fine-grained PAT must
 be scoped to the vault's owner and grant the repository contents read/write.
-`worker/entrypoint.sh` runs `gh auth setup-git --hostname github.com --force`
-unconditionally at container start (not gated on any specific token env var
-existing) so the credential helper is wired up regardless of which owner's
-token a given run ends up exporting.
+`worker/dagu-entrypoint.sh` logs `gh` in with `VAULT_GH_TOKEN` and runs
+`gh auth setup-git --hostname github.com --force` at container start, so the
+vault `git pull`/`push` has a credential helper regardless of which owner's
+token a given ticket run ends up exporting.
 
 Onboarding a new owner:
 
@@ -118,28 +130,22 @@ Onboarding a new owner:
    distinctly-named `GH_TOKEN_<OWNER>` env var. The `*)` fallback arm fails
    loudly on an unmapped owner — never silently fall through to some other
    owner's token.
-3. Set that `GH_TOKEN_<OWNER>` var wherever the pod's other secrets already
-   live — `docker-compose.yml`'s `orchestrator`, `coding-worker`, *and*
-   `qa-worker` services for local dev (both poller jobs run unlabeled, i.e.
-   on the orchestrator; the dev worker runs on `pool: coding`, the QA
-   worker on `pool: qa`), the equivalent k3s Secret/env for a cluster
-   deployment. All three need it: the pollers read issues with it, the dev
-   worker pushes commits and opens the PR with it, the QA worker reads the
-   PR and comments the verdict with it. If multiple roles happen to run in
-   the same container, set it once there — the scripts don't care how many
-   containers are involved.
+3. Set that `GH_TOKEN_<OWNER>` var wherever the container's other secrets
+   already live — `docker-compose.yml`'s `dagu` service for local dev, the
+   equivalent k3s Secret/env for a cluster deployment. The image's
+   `DAGU_ENV_PASSTHROUGH_PREFIXES=GH_TOKEN_` already forwards any
+   `GH_TOKEN_*` variable to the steps, so no passthrough change is needed.
+   The poller reads issues with it and the worker pushes commits and opens the
+   PR with it. (The not-yet-migrated QA scripts need it too, wherever they
+   run.)
 
-The orchestrator additionally needs `VAULT_GH_TOKEN` for `vault-repo`; it is
-not used by either ticket script and must be injected separately from the
-owner tokens.
+`VAULT_GH_TOKEN` is not used by any ticket script; the entrypoint consumes it
+for the vault checkout and then unsets it. Inject it separately from the owner
+tokens.
 
-No workflow YAML or vault involved — this is a plain env var, injected the
-same way as `CODEX_ACCESS_TOKEN`, `OPENAI_API_KEY`, etc. (see the table in
-[docs/remote-worker.md](docs/remote-worker.md)). Swamp's `local_encryption`
-vault type was tried and reverted here: its auto-generated decryption key
-lives under `.swamp/` (gitignored, host-local), so it isn't available
-wherever the orchestrator actually runs unless manually provisioned —
-plain env vars avoid that key-distribution problem entirely.
+These are plain env vars, injected the same way as `CODEX_ACCESS_TOKEN`,
+`OPENAI_API_KEY`, etc. (see the table in
+[docs/remote-worker.md](docs/remote-worker.md)).
 
 ## Repo setup script
 
@@ -192,7 +198,11 @@ that repo (not to hermestrator) with this prompt:
 > - No comments beyond one line if something is genuinely non-obvious; this
 >   is a small infra script, not documentation.
 
-## QA flow
+## QA flow (not deployed)
+
+> QA was removed from k3s and Compose when the coding flow moved to dagu. The
+> text below describes the swamp-based design that stays in the repo as the
+> source for the later QA migration.
 
 Independent of the dev flow above (implement → PR), a second poller/worker
 pair QAs the PR the dev flow opened:
@@ -285,28 +295,15 @@ pair QAs the PR the dev flow opened:
   `ralphex-pi`, `agent-codex` → `ralphex-codex`, neither → the workflow's
   `ralphex_config` default (project-wide). If an issue somehow carries both,
   `agent-pi` wins.
-- The poller workflows (`workflow-github-ticket-poller.yaml`,
-  `-files-nest.yaml`) run on their own `command/shell` model
-  (`github_ticket_poller_shell`), deliberately separate from the worker's
-  (`github_ticket_worker_shell`). A poller step synchronously calls `swamp
-  workflow run github-ticket-worker` from inside its own model-method
-  execution — if it shared the worker's model, that call would deadlock
-  waiting for a lock its own outer execution already holds. Don't merge them
-  back onto one model.
-- `github-ticket-poller.sh` invokes `swamp workflow run github-ticket-worker`
-  without `--server` — as a plain subprocess of the poller's own model-method
-  execution, that call has no connection to the `swamp serve` instance its
-  own workflow is running under. The `server_url` workflow input (env
-  `SWAMP_SERVE_URL`, which `swamp workflow run` reads without a `--server`
-  flag) supplies it; default `ws://127.0.0.1:9090` assumes the poller runs
-  in the same pod/container as the orchestrator. Without it, the triggered
-  worker run fails instantly: "no worker dispatcher is active".
-- Before triggering, `github-ticket-poller.sh` checks
-  `swamp workflow history search --input repo=... --input issue_number=...`
-  for any non-terminal `github-ticket-worker` run on that issue and skips if
-  one exists. Without this, a ralphex run slower than the 15-minute cron
-  interval gets a duplicate worker run stacked on top of it every tick,
-  contending for the same `command/shell` model lock and failing both.
+- The poller (`scripts/github-ticket-poller.sh`, run by
+  `dags/github-ticket-poller.yaml`) enqueues the worker with
+  `dagu enqueue --run-id gh-<issue>-<8-char repo hash>-<12-char branch head
+  sha>`. dagu rejects an id it has ever seen, so the same branch state is
+  never enqueued twice — a ralphex run slower than the 15-minute cron
+  interval can't get a duplicate stacked on top of it. A new commit on the
+  branch (ralphex progress push, a follow-up plan) yields a new id. A failed
+  run with no new commit is therefore not retried automatically — push a new
+  commit to the `agent/issue-<N>` branch to retrigger it.
 - The post-ralphex archive step in `github-ticket-worker.sh` only `git mv`s
   the plan into `docs/plans/archive/` if it's still at its original path.
   Some plans instruct ralphex to move themselves elsewhere (e.g.

@@ -1,0 +1,24 @@
+description: >-
+  Implements one open GitHub issue with ralphex and opens or reuses its pull
+  request. Requires branch agent/issue-<ISSUE_NUMBER> on origin with a ralphex
+  plan committed to docs/plans/. Normally enqueued by github-ticket-poller;
+  the exit handler mirrors the run into the Obsidian vault whether or not
+  implementation succeeded.
+queue: coding
+working_dir: /workspace
+timeout_sec: 7200
+params:
+  - REPO: ""
+  - ISSUE_NUMBER: ""
+  - BASE_BRANCH: main
+  - RALPHEX_CONFIG: ralphex-codex
+env:
+  - WORKFLOW_RUN_ID: ${DAG_RUN_ID}
+  - RUN_ARTIFACTS_DIR: /var/lib/hermestrator/artifacts
+  - VAULT_DIR: .vault-clone
+steps:
+  - name: implement
+    command: scripts/github-ticket-worker.sh
+handler_on:
+  exit:
+    command: scripts/vault-sync.sh

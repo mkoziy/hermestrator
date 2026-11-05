@@ -1,0 +1,24 @@
+description: >-
+  Every 15 minutes, scans each listed repo for open agent-ready issues whose
+  agent/issue-<N> branch already has a committed ralphex plan, and enqueues
+  github-ticket-worker for each. One step per repo so a failing repo doesn't
+  block the others; add a repo by copying a step.
+schedule: "*/15 * * * *"
+working_dir: /workspace
+timeout_sec: 300
+steps:
+  - name: weird-reader
+    command: scripts/github-ticket-poller.sh
+    env:
+      - REPO: moontechs/weird-reader
+      - RALPHEX_CONFIG: ralphex-codex
+  - name: files-nest
+    command: scripts/github-ticket-poller.sh
+    env:
+      - REPO: moontechs/files-nest
+      - RALPHEX_CONFIG: ralphex-pi
+  - name: streamberg
+    command: scripts/github-ticket-poller.sh
+    env:
+      - REPO: mkoziy/streamberg
+      - RALPHEX_CONFIG: ralphex-pi

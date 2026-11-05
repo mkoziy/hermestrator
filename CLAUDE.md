@@ -43,8 +43,18 @@ consumption, run `swamp help [<command>...]` — e.g. `swamp help` returns
 the full tree, and `swamp help model method run` scopes to a subtree.
 <!-- END swamp managed section -->
 
+## Coding flow runs on dagu, not swamp
+
+The swamp rules above apply only to what is left under `workflows/` and
+`models/` (the not-deployed QA flow, to be migrated). The ticket poller/worker
+live in `dags/` as [dagu](https://github.com/dagucloud/dagu) DAGs: for the
+coding flow, "workflow", "automate", "nightly job" mean a dagu DAG, not a swamp
+workflow, and rules 1, 2, 4, 6, 10 and 11 do not apply to it. Conventions and
+gotchas are in `AGENTS.md` ("DAGs"); the container is described in
+`docs/remote-worker.md`.
+
 ## Operational notes
 
-- **A pod recycle mid-workflow-run orphans state that no swamp command reconciles.** Workflow-run status lives in two on-disk files per run: `.swamp/workflow-runs/<workflowId>/workflow-run-<runId>.yaml` and a sibling `.swamp/workflow-runs/<workflowId>/.runs-index.json` (the latter is what `swamp workflow history search` actually reads). Both are cached in `swamp serve`'s memory and only reloaded on process restart. `swamp run doctor --fix` only reaps swamp's internal run-tracking store — it touches neither file. If a pod dies mid-run, both files can stay stuck at `status: running` forever, with no CLI command to reconcile them (recovery requires manually editing both files and restarting the pod).
-- `scripts/github-ticket-poller.sh`'s in-flight-run guard has a `STALE_RUN_MINUTES` (default 45) fallback specifically to survive this: any run reporting a non-terminal status but older than that ceiling is treated as terminal, so a future orphaned run self-heals on the next poller tick instead of permanently blocking that issue.
-- **Per-owner GitHub tokens are plain `GH_TOKEN_<OWNER>` env vars, not a swamp vault.** Fine-grained PATs are scoped to a single owner, so there is no generic `GH_TOKEN` — every owner polled (`GH_TOKEN_MOONTECHS`, `GH_TOKEN_MKOZIY`, ...) gets its own. See `AGENTS.md`'s "GitHub tokens" section for the onboarding steps. A `local_encryption` vault was tried first and reverted: its auto-generated decryption key lives under `.swamp/` (gitignored, host-local), so it doesn't travel to wherever the orchestrator actually runs (e.g. a k3s pod) unless manually provisioned — plain env vars avoid that key-distribution problem.
+- **Per-owner GitHub tokens are plain `GH_TOKEN_<OWNER>` env vars.** Fine-grained PATs are scoped to a single owner, so there is no generic `GH_TOKEN` — every owner polled (`GH_TOKEN_MOONTECHS`, `GH_TOKEN_MKOZIY`, ...) gets its own. See `AGENTS.md`'s "GitHub tokens" section for the onboarding steps. The image's `DAGU_ENV_PASSTHROUGH_PREFIXES=GH_TOKEN_` forwards them to DAG steps.
+- **Run `dagu` CLI commands as the `worker` user** (`docker exec -u worker ...`). The server drops to `worker`; a command run as root creates root-owned dirs under `/var/lib/dagu/data` and silently breaks the queue.
+- **Run history lives in dagu** (`/var/lib/dagu`, UI on port 8080). An orphaned run after a restart is marked failed by dagu's zombie detection (~80 s after the container is back); nothing needs manual reconciling.

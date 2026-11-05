@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual GitHub ticket worker. Invoked by the github-ticket-worker Swamp workflow.
+# Manual GitHub ticket worker. Invoked by the github-ticket-worker dagu DAG.
 set -Eeuo pipefail
 
 : "${REPO:?REPO is required}"

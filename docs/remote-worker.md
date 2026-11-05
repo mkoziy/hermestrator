@@ -1,29 +1,23 @@
-# Remote ticket worker
+# Coding orchestrator (dagu)
 
-`swamp serve` remains the orchestrator. The ticket workflow's implementation
-step has placement `pool: coding`, so it only runs on a remote worker that
-advertises `SWAMP_WORKER_LABELS=pool=coding`. The image defaults to one dispatch
-slot (`SWAMP_WORKER_CONCURRENCY=1`); do not increase it while ralphex owns a
-mutable checkout for each run.
+A single container runs `dagu start-all` (scheduler, queue, web UI, REST API) and
+executes the coding flow locally — there are no separate remote workers. The
+`github-ticket-poller` DAG (`dags/`) polls on a cron schedule and enqueues
+`github-ticket-worker` runs onto the `coding` queue, which
+`worker/dagu-config.yaml` caps at `max_concurrency: 1`: ralphex owns a mutable
+checkout for each run, so do not raise it.
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
-Codex CLI, Pi coding agent, the `worker` user), then three targets built on
-top of it — `dev` (this section — adds ralphex/gremlins, builds
-`orchestrator`/`coding-worker`), `qa` (built `FROM base`, adds
-chromium/agent-browser; see "QA ticket worker" below — deliberately does
-*not* carry ralphex, so the standalone QA image stays lean), and
-`ephemeral` (built `FROM dev`, so it carries both ralphex/gremlins and
-chromium/agent-browser — see "Ephemeral all-in-one worker" further down,
-which needs everything in one image). `qa` and `ephemeral` each install
-chromium/agent-browser independently rather than one building `FROM` the
-other, so a version bump there is the only place with two RUN blocks to
-touch, but `qa` never drags in ralphex it doesn't use. Build with `docker
-build --target dev`, `--target qa`, or `--target ephemeral`;
-`docker-compose.yml` sets `build.target` per service.
+Codex CLI, Pi coding agent, the `worker` user), then two targets built on top
+of it — `dev` (this document — adds ralphex/gremlins and dagu, and is the
+image k3s/Compose run) and `qa` (built `FROM base`, adds chromium/agent-browser;
+**not deployed**, see "QA ticket worker" below). Swamp stays in `base` only
+because `qa` still needs it until QA moves to dagu. Build with `docker build
+--target dev` or `--target qa`.
 
 ## Image contents
 
-Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, ralphex, Codex
+Build [worker/Dockerfile](../worker/Dockerfile). It pins Swamp, dagu, ralphex, Codex
 CLI, Pi coding agent, and go-gremlins; includes git, GitHub CLI, jq, SSH client,
 and the `gremlins` mutation-testing command on `PATH` for both agents, plus
 ralphex configuration under `/home/worker/.config`:
@@ -57,35 +51,38 @@ environment file. They are never image build arguments or `Dockerfile` values.
 
 | Variable | Required when | Purpose |
 | --- | --- | --- |
-| `SWAMP_ORCHESTRATOR_URL` | always, worker only | WebSocket URL of `swamp serve` |
-| `SWAMP_WORKER_TOKEN` | always, worker only | worker enrollment token |
-| `SWAMP_SERVER_TOKEN` | if server token auth is enabled | worker connection authentication |
-| `GH_TOKEN_<OWNER>` | one per GitHub owner polled | fine-grained PATs are scoped to a single owner, so there is no generic `GH_TOKEN` — each owner (e.g. `GH_TOKEN_MOONTECHS` for `moontechs/*`, `GH_TOKEN_MKOZIY` for `mkoziy/*`) needs its own token, set on both the orchestrator and the coding worker — see `scripts/github-ticket-poller.sh`/`scripts/github-ticket-worker.sh` |
-| `VAULT_GH_TOKEN` | orchestrator when vault sync is configured | separate fine-grained PAT for the notes-vault repository; it must not reuse an owner-specific ticket-worker token |
+| `GH_TOKEN_<OWNER>` | one per GitHub owner polled | fine-grained PATs are scoped to a single owner, so there is no generic `GH_TOKEN` — each owner (e.g. `GH_TOKEN_MOONTECHS` for `moontechs/*`, `GH_TOKEN_MKOZIY` for `mkoziy/*`) needs its own token — see `scripts/github-ticket-poller.sh`/`scripts/github-ticket-worker.sh` |
+| `VAULT_GH_TOKEN` | always | separate fine-grained PAT for the notes-vault repository; it must not reuse an owner-specific ticket-worker token. The entrypoint logs `gh` in with it and unsets it, so steps never see it |
 | `CODEX_ACCESS_TOKEN` | automatic subscription-backed Codex auth | ChatGPT Business or Enterprise Codex access token, injected from a secret manager |
 | `OPENAI_API_KEY` | API-billed `ralphex-codex`, or Codex review | alternative Codex auth; entrypoint logs in with stdin |
 | `OPENCODE_API_KEY` | `ralphex-pi` | Pi `opencode-go` provider auth |
 
-Optional volumes are `/home/worker/.swamp-worker` (required in practice: keeps
-the worker identity bound to its enrollment token), `/home/worker/.codex`, and
-`/home/worker/.pi/agent`. The latter two retain tool configuration/session state;
-they are not required for API-key authentication. Do not mount a personal Codex
-or Pi auth directory by default, because its stored auth can override runtime
-environment credentials.
+dagu hands DAG steps only an env allowlist (`PATH`, `HOME`, `DAGU_*`, ...), so a
+variable the scripts need must be listed in the image's
+`DAGU_ENV_PASSTHROUGH` / `DAGU_ENV_PASSTHROUGH_PREFIXES` (`GH_TOKEN_` covers
+every owner). A new secret that is set on the container but missing from that
+list silently never reaches the scripts.
 
-The GitHub ticket worker also requires a writable artifact volume mounted at
-`/var/lib/swamp-worker-artifacts` in both the coding worker and the
-orchestrator. It preserves ralphex stdout, stderr, and progress across a hard
-worker timeout so the orchestrator-side vault-sync job can record them. The
-included Compose deployment provisions this named volume; non-Compose
-deployments must provide an equivalent shared writable mount at the same path.
-The coding-worker entrypoint initializes the mount and assigns it to the
-unprivileged `worker` user before starting the worker process. A run's
-artifacts are removed only after its vault note is successfully pushed; if
-vault synchronization fails, they are retained for diagnosis and retry.
-The note writer runs even when its best-effort vault pull fails, preserving the
-note in the local checkout for a later commit and push rather than dropping the
-run's record before a transient Git failure recovers.
+State that must survive a restart lives on volumes:
+
+| Mount | Holds |
+| --- | --- |
+| `/var/lib/dagu` | run history, logs, queue, `config.yaml` (rewritten from the image on every start) |
+| `/var/lib/hermestrator/artifacts` | per-run ralphex stdout/stderr/progress and `note.json`, kept until the vault note is pushed |
+| `/workspace/.vault-clone` | Git checkout of the notes vault (cloned by the entrypoint when empty) |
+| `/home/worker/.codex`, `/home/worker/.pi/agent` | optional tool config/session state; not required for API-key auth |
+
+Do not mount a personal Codex or Pi auth directory by default, because its
+stored auth can override runtime environment credentials.
+
+Run any `dagu` CLI command as the `worker` user (`docker exec -u worker ...`).
+The server drops to `worker`; a command run as root creates root-owned
+directories under `/var/lib/dagu/data` and silently breaks the queue.
+
+A run's artifacts are removed only after its vault note is pushed. The worker
+DAG's `handler_on.exit` runs `scripts/vault-sync.sh` (pull, write note, commit,
+push, cleanup) whether implementation succeeded or not; if any of those steps
+fails the run is marked failed and the artifacts stay for diagnosis.
 
 ## Fully unattended Codex authentication
 
@@ -109,6 +106,11 @@ interactive subscription login, seed the dedicated `pi_agent_home` volume once
 with that provider's login; do not assume it is compatible with OpenCode Go.
 
 ## QA ticket worker
+
+> **Not deployed.** QA was removed from k3s and the Compose stack while the coding
+> flow moved to dagu; the `qa` image target, `workflows/workflow-github-qa-*.yaml`
+> and `scripts/github-qa-*.sh` are kept as the source for the later QA migration
+> and still assume a Swamp orchestrator.
 
 The `qa` target (`docker build --target qa -f worker/Dockerfile .`) builds a
 separate image for `github-qa-worker` (see
@@ -135,180 +137,11 @@ cycle fits a "don't edit code, just observe and verdict" task), so it reuses
 the same Codex/Pi runtime auth as `dev` — `CODEX_ACCESS_TOKEN`/
 `OPENAI_API_KEY`/`OPENCODE_API_KEY` from the table above, nothing QA-specific.
 
-### Ephemeral QA worker scheduling
-
-Unlike `coding-worker` (always-on daemon), `qa-worker` is heavy (Chrome +
-agent tooling) and only needs to run while QA work is queued. `swamp worker
-connect` supports draining and exiting instead of running forever:
-`SWAMP_WORKER_IDLE_TIMEOUT` (drain and exit after being idle for a
-duration) or `SWAMP_WORKER_MAX_DISPATCHES` (exit after N dispatches). The
-`github-qa-poller` workflow still triggers `github-qa-worker` on its own
-schedule regardless of whether a `pool:qa` worker happens to be connected —
-if none is, the run just queues at the orchestrator until one connects.
-
-**Local/Compose**: `docker-compose.yml`'s `qa-worker` service sets
-`SWAMP_WORKER_IDLE_TIMEOUT: 2m` and has no `restart:` policy — run it from a
-host cron entry, not `docker compose up -d`:
-
-```bash
-# e.g. */15 * * * * in host crontab
-docker compose run --rm qa-worker
-```
-
-**k3s**: this repo doesn't manage or apply Kubernetes manifests — the
-orchestrator's own k3s deployment already lives outside it. The following
-is a reference `CronJob` to adapt, not something this repo applies:
-
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: hermestrator-qa-worker
-spec:
-  schedule: "*/15 * * * *"
-  concurrencyPolicy: Forbid # one drain-and-exit run at a time is enough
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: qa-worker
-              image: <your-registry>/hermestrator-worker:qa-<tag>
-              env:
-                - name: SWAMP_ORCHESTRATOR_URL
-                  value: ws://<orchestrator-service>:9090
-                - name: SWAMP_WORKER_IDLE_TIMEOUT
-                  value: 2m
-                - name: SWAMP_WORKER_TOKEN
-                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: token } }
-                - name: GH_TOKEN_MOONTECHS
-                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-moontechs } }
-                - name: GH_TOKEN_MKOZIY
-                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: gh-token-mkoziy } }
-                - name: CODEX_ACCESS_TOKEN
-                  valueFrom: { secretKeyRef: { name: hermestrator-qa-worker, key: codex-access-token } }
-```
-
-### Ephemeral all-in-one worker (orchestrator + coding + qa in one pod)
-
-The pattern above still needs a standing `orchestrator` (`swamp serve`)
-Deployment for `qa-worker` to dial into, plus a Service so a separate
-CronJob pod can reach it — a persistent process just to host a WebSocket
-port. `worker/ephemeral-entrypoint.sh` (image entrypoint
-`/usr/local/bin/ephemeral-entrypoint`, copied into every target but only
-meant to be run from the `ephemeral` target — the one image that carries
-both ralphex and the QA tooling) collapses orchestrator + coding-worker +
-qa-worker into a single container that:
-
-1. starts `swamp serve --host 127.0.0.1 --port 9090` in the background,
-   logging to `$RUN_ARTIFACTS_DIR/logs/<tick>/serve.log`;
-2. bootstraps the vault Git checkout (`$VAULT_DIR`, default
-   `.swamp/vault-clone`) via `swamp model method run vault-repo clone` if
-   it isn't already there — a no-op once the volume holding it has one;
-3. fires every schedule-triggered workflow exactly once
-   (`run_scheduled_workflows` — an explicit list, not auto-discovered:
-   `swamp workflow run <name>` doesn't apply a workflow's own
-   `trigger.inputs`, so there's nothing to introspect that would actually
-   run correctly; `swamp serve`'s own scheduler only ticks while the
-   process stays up, which a pod that lives for a couple of minutes every
-   15 defeats). `tests/ephemeral-entrypoint.sh` cross-checks this list
-   against `workflows/*.yaml` so an onboarded poller can't silently go
-   unrun, or run with a stale/missing required input;
-4. runs `coding-worker` (`pool=coding`) and `qa-worker` (`pool=qa`)
-   concurrently, both with `SWAMP_WORKER_IDLE_TIMEOUT` set and each logging
-   to its own `$RUN_ARTIFACTS_DIR/logs/<tick>/*-worker.log`, so each drains
-   whatever it was just handed and exits;
-5. once both have exited, stops `swamp serve` and exits non-zero if either
-   worker failed *or* any scheduled workflow from step 3 failed — a failed
-   run stays visible as a failed Job instead of looking identical to a
-   clean tick.
-
-No Service, no Ingress, no TLS: the orchestrator only ever listens on
-`127.0.0.1` inside its own pod, same as `coding-worker` does in the
-always-on Deployment today. This trades the always-on orchestrator's low
-idle footprint for zero resident containers at all — the tradeoff only
-makes sense once nothing else needs to reach the orchestrator between runs
-(nothing does today; see `AGENTS.md`).
-
-**State that must survive the pod exiting, and therefore live on a volume,
-not the container filesystem**: `/workspace/.swamp` (workflow/run history
-*and* the vault Git checkout at `.swamp/vault-clone` — without this
-persisting, every tick re-clones the vault and starts run history from
-empty) and `$RUN_ARTIFACTS_DIR` (retained ticket/QA notes pending a vault
-write, plus the `logs/` tree above). Mount the same two volumes the
-always-on Deployment already uses for `hermestrator-orchestrator-state`
-(→ `/workspace/.swamp`) and `hermestrator-worker-artifacts`
-(→ `/var/lib/swamp-worker-artifacts`) — a `ReadWriteOnce` local-path PVC
-only binds to one node/pod at a time, so stop the Deployment before the
-CronJob starts using them, or give the CronJob its own PVCs seeded from a
-one-time `swamp model method run vault-repo clone`.
-
-Needs both a coding and a QA worker token (`swamp worker token create
-coding`/`... create qa`), plus `VAULT_GH_TOKEN` for the orchestrator's own
-moontechs-vault auth:
-
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: hermestrator-ephemeral
-spec:
-  schedule: "*/15 * * * *"
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: hermestrator
-              image: <your-registry>/hermestrator-worker:ephemeral-<tag>
-              command: ["/usr/local/bin/ephemeral-entrypoint"]
-              env:
-                - name: SWAMP_WORKER_IDLE_TIMEOUT
-                  value: 2m
-                - name: VAULT_GH_TOKEN
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: vault-gh-token } }
-                - name: SWAMP_WORKER_TOKEN_CODING
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-coding } }
-                - name: SWAMP_WORKER_TOKEN_QA
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: token-qa } }
-                - name: GH_TOKEN_MOONTECHS
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-moontechs } }
-                - name: GH_TOKEN_MKOZIY
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: gh-token-mkoziy } }
-                - name: CODEX_ACCESS_TOKEN
-                  valueFrom: { secretKeyRef: { name: hermestrator-ephemeral, key: codex-access-token } }
-              volumeMounts:
-                - name: orchestrator-state
-                  mountPath: /workspace/.swamp
-                - name: worker-artifacts
-                  mountPath: /var/lib/swamp-worker-artifacts
-          volumes:
-            - name: orchestrator-state
-              persistentVolumeClaim: { claimName: hermestrator-orchestrator-state }
-            - name: worker-artifacts
-              persistentVolumeClaim: { claimName: hermestrator-worker-artifacts }
-```
-
 ## Local Docker development
 
-Build and start the orchestrator:
+Export the credentials, then build and start the stack:
 
 ```bash
-docker compose up -d --build orchestrator
-```
-
-Create a one-time enrollment token, copy the complete `coding.<secret>` value,
-then start the dedicated worker. Export a repository-capable GitHub token, plus
-the provider key for the profile you intend to use.
-
-```bash
-docker compose exec orchestrator swamp worker token create coding \
-  --duration 24h --server ws://localhost:9090
-
-export SWAMP_WORKER_TOKEN='coding.<secret>'
 export GH_TOKEN_MOONTECHS='github-token-for-moontechs-owned-repos'
 export GH_TOKEN_MKOZIY='github-token-for-mkoziy-owned-repos'
 export VAULT_GH_TOKEN='github-token-for-notes-vault'
@@ -316,21 +149,28 @@ export CODEX_ACCESS_TOKEN='worker-access-token' # automatic Codex login
 # export OPENAI_API_KEY='openai-api-key' # API-billed alternative
 # export OPENCODE_API_KEY='opencode-api-key' # for ralphex-pi
 
-docker compose up -d --build coding-worker
+docker compose up -d --build dagu
 ```
 
-Confirm the worker is enrolled and run the existing workflow through the server:
+The UI is on http://127.0.0.1:8080 (first visit asks you to create the admin
+account — dagu's default `auth.mode` is `builtin`). The poller runs every 15
+minutes; to run one issue right away:
 
 ```bash
-docker compose exec orchestrator swamp worker list --server ws://localhost:9090
-
-docker compose exec orchestrator swamp workflow run github-ticket-worker \
-  --server ws://localhost:9090 \
-  --input '{"repo":"OWNER/REPO","issue_number":123,"ralphex_config":"ralphex-codex"}'
+docker compose exec -u worker dagu dagu enqueue github-ticket-worker -- \
+  REPO=OWNER/REPO ISSUE_NUMBER=123 BASE_BRANCH=main RALPHEX_CONFIG=ralphex-codex
 ```
 
-The final command has real GitHub side effects; use a disposable test issue and
-repository. To exercise Pi, replace `ralphex-codex` with `ralphex-pi` and export
-`OPENCODE_API_KEY`. Stop the local stack with `docker compose down`; retain named
-volumes unless you deliberately want to revoke the worker identity and discard
+That command has real GitHub side effects; use a disposable test issue and
+repository. To exercise Pi, use `RALPHEX_CONFIG=ralphex-pi` and export
+`OPENCODE_API_KEY`. Stop with `docker compose down`; retain the named volumes
+unless you deliberately want to discard run history, the vault checkout and
 agent state.
+
+## Kubernetes (k3s)
+
+Run the `dev` image as a single-replica `Deployment` (strategy `Recreate`: the
+volumes are `ReadWriteOnce`) with the env from the table above supplied from a
+`Secret`, and a PVC for each volume in the mount table. Keep it at one replica —
+dagu's scheduler lock and the single `coding` queue assume one instance. Expose
+port 8080 only through an authenticated route or `kubectl port-forward`.

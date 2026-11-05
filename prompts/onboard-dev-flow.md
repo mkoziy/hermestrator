@@ -34,7 +34,7 @@ README/AGENTS.md) around this, not around your own local machine:
   package the base image doesn't already have, that's a hard blocker to flag
   to the human (see §5), not something `agent-setup.sh` can paper over.
 - Already on `PATH`/preinstalled: `bash`, `git`, `gh`, `jq`, `curl`,
-  `python3`, `node` 22, `ssh` client, `mise`, `swamp`, the `codex` and `pi`
+  `python3`, `node` 22, `ssh` client, `mise`, the `codex` and `pi`
   CLIs, plus `ralphex`/`gremlins` (dev image only).
 - Anything else — a specific Node/Python/Go/Ruby/Java version, a linter, a
   package manager — gets pinned in this repo's own `mise.toml` and installed
@@ -91,11 +91,10 @@ This repo also needs to be *registered* with hermestrator's poller, which
 lives in a different repo you don't have access to. Report back to the human
 that they still need to, in the `hermestrator` repo:
 
-1. Add a per-repo poller workflow (copy
-   `workflows/workflow-github-ticket-poller-files-nest.yaml`, point `trigger.inputs.repo`
-   at this repo, pick a `ralphex_config` default).
+1. Add a poll step for this repo to `dags/github-ticket-poller.yaml` (copy an
+   existing step, set its `REPO` env to this repo and pick a `RALPHEX_CONFIG`).
 2. Make sure a `GH_TOKEN_<OWNER>` env var (uppercased GitHub owner, e.g.
-   `GH_TOKEN_MOONTECHS`) exists wherever the coding-worker pod's secrets live —
+   `GH_TOKEN_MOONTECHS`) exists wherever the dagu container's secrets live —
    one fine-grained PAT per owner, scoped at minimum to contents+issues+PRs
    on this repo.
 

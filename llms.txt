@@ -1,6 +1,6 @@
 # hermestrator
 
-> Automated GitHub ticket implementation on top of [swamp](https://github.com/swamp-club/swamp)
+> Automated GitHub ticket implementation on top of [dagu](https://github.com/dagucloud/dagu)
 > and [ralphex](https://github.com/umputun/ralphex). A poller finds issues in
 > *other* repositories that are labeled `agent-ready` and already carry a
 > committed plan, then a worker runs a coding agent (Codex or Pi) against that

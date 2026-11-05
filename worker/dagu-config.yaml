@@ -1,0 +1,9 @@
+# Copied to $DAGU_HOME/config.yaml by worker/dagu-entrypoint.sh on every start.
+# Paths (DAGU_DAGS_DIR, DAGU_DATA_DIR, DAGU_LOG_DIR), the step-env allowlist
+# (DAGU_ENV_PASSTHROUGH*) and DAGU_SKIP_EXAMPLES are set as ENV in the Dockerfile.
+coordinator:
+  enabled: false # single host: no distributed workers
+queues:
+  config:
+    - name: coding
+      max_concurrency: 1 # ralphex owns a mutable checkout per run

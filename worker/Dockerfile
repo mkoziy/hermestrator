@@ -62,7 +62,6 @@ RUN groupadd --gid 104 kvm \
     && chown --recursive worker:worker /workspace /home/worker
 
 COPY --chmod=0755 worker/entrypoint.sh /usr/local/bin/ticket-worker-entrypoint
-COPY --chmod=0755 worker/ephemeral-entrypoint.sh /usr/local/bin/ephemeral-entrypoint
 
 ENV HOME=/home/worker \
     CODEX_HOME=/home/worker/.codex \
@@ -97,10 +96,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG RALPHEX_VERSION=1.6.1
 ARG GREMLINS_VERSION=0.6.0
 ARG RALPHEX_PI_WRAPPER_SHA256=663b0cd6393fc7caad991527be362efa7e316cdf2460fb1410f95a9925573d4a
+ARG DAGU_VERSION=2.25.4
 
 RUN case "$TARGETARCH" in \
-      amd64) ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538 ;; \
-      arm64) ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c ;; \
+      amd64) ralphex_arch=amd64; ralphex_sha=47755c3baa8a45843308e59f069c83ca21ff0a7969cc1a31fb4c0a68fa7c4f5c; gremlins_arch=amd64; gremlins_sha=b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538; dagu_sha=ee56656ffbf88fb01f47f4bf06b7f4a37619f7149d95434d199f1246d4a1e608 ;; \
+      arm64) ralphex_arch=arm64; ralphex_sha=bd073dca5a538c2263f57ff8ed2b1e18e1628047ec64aa8d1724982e2c06078b; gremlins_arch=arm64; gremlins_sha=686542674e54559afb7e86d6994d342c19a856cfd970c315748989537936664c; dagu_sha=41c7c71440943f3625ed0f026a5cc23840fd13ce18fa65c3cdacbf04591a22ea ;; \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --silent --show-error \
@@ -114,7 +114,13 @@ RUN case "$TARGETARCH" in \
       --output /tmp/gremlins.tar.gz \
     && echo "${gremlins_sha}  /tmp/gremlins.tar.gz" | sha256sum --check - \
     && tar --extract --gzip --file /tmp/gremlins.tar.gz --directory /usr/local/bin gremlins \
-    && rm /tmp/gremlins.tar.gz
+    && rm /tmp/gremlins.tar.gz \
+    && curl --fail --location --silent --show-error \
+      "https://github.com/dagucloud/dagu/releases/download/v${DAGU_VERSION}/dagu_${DAGU_VERSION}_linux_${TARGETARCH}.tar.gz" \
+      --output /tmp/dagu.tar.gz \
+    && echo "${dagu_sha}  /tmp/dagu.tar.gz" | sha256sum --check - \
+    && tar --extract --gzip --file /tmp/dagu.tar.gz --directory /usr/local/bin dagu \
+    && rm /tmp/dagu.tar.gz
 
 COPY --chown=worker:worker worker/ralphex-codex/ /home/worker/.config/ralphex-codex/
 COPY --chown=worker:worker worker/ralphex-pi/ /home/worker/.config/ralphex-pi/
@@ -131,7 +137,20 @@ RUN curl --fail --location --silent --show-error \
     && chmod 0755 /home/worker/.config/ralphex-pi/scripts/*.sh \
     && chown --recursive worker:worker /home/worker/.config
 
-ENV SWAMP_WORKER_LABELS=pool=coding
+COPY --chmod=0755 worker/dagu-entrypoint.sh /usr/local/bin/dagu-entrypoint
+COPY worker/dagu-config.yaml /usr/local/share/dagu/config.yaml
+
+# dagu hands steps only an env allowlist (PATH/HOME/... plus DAGU_*): list what
+# the ticket scripts need on top — per-owner GitHub tokens (prefix), agent
+# credentials, and the tool-state dirs the entrypoint points at.
+ENV DAGU_HOME=/var/lib/dagu \
+    DAGU_DAGS_DIR=/workspace/dags \
+    DAGU_SKIP_EXAMPLES=true \
+    DAGU_ENV_PASSTHROUGH_PREFIXES=GH_TOKEN_ \
+    DAGU_ENV_PASSTHROUGH=CODEX_ACCESS_TOKEN,OPENAI_API_KEY,OPENCODE_API_KEY,CODEX_HOME,PI_CODING_AGENT_DIR,GH_CONFIG_DIR
+
+ENTRYPOINT ["/usr/local/bin/dagu-entrypoint"]
+CMD ["dagu", "start-all", "--host", "0.0.0.0"]
 
 # --- qa: browser-driven QA worker, invokes codex/pi directly (no ralphex) ---
 FROM base AS qa
@@ -176,38 +195,4 @@ RUN mkdir -p /home/worker/.config/agent-browser \
 
 ENV SWAMP_WORKER_LABELS=pool=qa \
     QA_PROMPT_DIR=/home/worker/.config/qa \
-    AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json
-
-# --- ephemeral: all-in-one orchestrator+coding-worker+qa-worker used by
-# worker/ephemeral-entrypoint.sh (see docs/remote-worker.md "Ephemeral
-# all-in-one worker"). Built FROM dev (not base, unlike qa) so it carries
-# both ralphex/gremlins and the browser QA tooling — duplicates qa's
-# chromium/agent-browser install rather than building qa FROM dev, so the
-# standalone qa-worker image (used by the always-on Deployment pattern)
-# stays lean and matches "adds ralphex/gremlins" vs "adds chromium/
-# agent-browser" as genuinely separate, non-overlapping target additions. ---
-FROM dev AS ephemeral
-
-ARG AGENT_BROWSER_VERSION=0.37.1
-
-# unzip + headless-emulator libs, see the same install in the qa stage above
-# for why these (and not the Android SDK itself) live in the shared image.
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y chromium unzip \
-      libgl1 libpulse0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libasound2 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
-    && npm cache clean --force \
-    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-* \
-    && chown --recursive worker:worker /home/worker/.npm
-
-COPY --chown=worker:worker worker/qa/prompts/ /home/worker/.config/qa/
-COPY --chown=worker:worker worker/qa/skills/ /home/worker/.config/qa/skills/
-
-RUN mkdir -p /home/worker/.config/agent-browser \
-    && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
-    && chown --recursive worker:worker /home/worker/.config
-
-ENV QA_PROMPT_DIR=/home/worker/.config/qa \
     AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json

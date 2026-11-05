@@ -9,14 +9,15 @@ cleanup() { rm -rf "$test_root"; }
 trap cleanup EXIT
 
 # The worker checkout is read-only; the artifact handoff must use the shared
-# named volume, mounted at the same absolute path in both containers. The
-# coding-worker entrypoint initializes its root-owned fresh volume for `worker`.
-[[ "$(rg -F -c -- 'RUN_ARTIFACTS_DIR: /var/lib/swamp-worker-artifacts' \
-  "$repo_root/workflows/workflow-github-ticket-worker.yaml")" == '3' ]]
-[[ "$(rg -F -c -- 'swamp_worker_artifacts:/var/lib/swamp-worker-artifacts' \
-  "$repo_root/docker-compose.yml")" == '3' ]]
-rg -F -- 'chown --recursive worker:worker' "$repo_root/worker/entrypoint.sh" | \
-  rg -F -- '"$RUN_ARTIFACTS_DIR"' >/dev/null
+# named volume, mounted at the same absolute path the DAG's RUN_ARTIFACTS_DIR
+# points at. The dagu entrypoint initializes its root-owned fresh volume for
+# `worker`.
+[[ "$(rg -F -c -- 'RUN_ARTIFACTS_DIR: /var/lib/hermestrator/artifacts' \
+  "$repo_root/dags/github-ticket-worker.yaml")" == '1' ]]
+[[ "$(rg -F -c -- 'hermestrator_artifacts:/var/lib/hermestrator/artifacts' \
+  "$repo_root/docker-compose.yml")" == '1' ]]
+rg -F -- 'chown --recursive worker:worker' "$repo_root/worker/dagu-entrypoint.sh" | \
+  rg -F -- '"$artifacts_dir"' >/dev/null
 rg -F -- 'name: vault-note-recovery' "$repo_root/workflows/workflow-vault-note-recovery.yaml" >/dev/null
 rg -U -- 'name: write-notes[\s\S]*?step: vault-pull[\s\S]*?type: always' \
   "$repo_root/workflows/workflow-vault-note-recovery.yaml" >/dev/null
