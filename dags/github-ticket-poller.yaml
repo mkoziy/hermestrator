@@ -8,17 +8,17 @@ working_dir: /workspace
 timeout_sec: 300
 steps:
   - name: weird-reader
-    command: scripts/github-ticket-poller.sh
+    run: scripts/github-ticket-poller.sh
     env:
       - REPO: moontechs/weird-reader
       - RALPHEX_CONFIG: ralphex-codex
   - name: files-nest
-    command: scripts/github-ticket-poller.sh
+    run: scripts/github-ticket-poller.sh
     env:
       - REPO: moontechs/files-nest
       - RALPHEX_CONFIG: ralphex-pi
   - name: streamberg
-    command: scripts/github-ticket-poller.sh
+    run: scripts/github-ticket-poller.sh
     env:
       - REPO: mkoziy/streamberg
       - RALPHEX_CONFIG: ralphex-pi

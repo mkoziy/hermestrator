@@ -18,7 +18,7 @@ env:
   - VAULT_DIR: .vault-clone
 steps:
   - name: implement
-    command: scripts/github-ticket-worker.sh
+    run: scripts/github-ticket-worker.sh
 handler_on:
   exit:
-    command: scripts/vault-sync.sh
+    run: scripts/vault-sync.sh

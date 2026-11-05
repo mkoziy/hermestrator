@@ -6,4 +6,4 @@ schedule: "0 4 * * *"
 timeout_sec: 600
 steps:
   - name: prune
-    command: find /tmp -maxdepth 1 -name 'github-ticket-worker.*' -mtime +3 -exec rm -rf -- {} +
+    run: find /tmp -maxdepth 1 -name 'github-ticket-worker.*' -mtime +3 -exec rm -rf -- {} +
