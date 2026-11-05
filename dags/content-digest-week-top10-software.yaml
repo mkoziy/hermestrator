@@ -2,7 +2,7 @@ description: >-
   Runs a content-factory week_top10/software digest Issue and waits for it to finish
   (mirrors the schedule formerly kept in the app's Settings).
 schedule:
-  - "CRON_TZ=Europe/Berlin 30 11 * * 6"
+  - "CRON_TZ=Europe/Berlin 30 13 * * 6"
 queue: content
 timeout_sec: 3600
 params:
