@@ -58,6 +58,11 @@ dagu 2.25:
   deterministic id calls `dagu enqueue --run-id` from a script.
 - A failing `handler_on.exit` fails the run even when every step succeeded.
 - Run `dagu` CLI commands as the `worker` user, never root.
+- `dags/content-digest-*.yaml` (one per format/topic, `schedule:` list with
+  `CRON_TZ=Europe/Berlin`, the container is UTC) start a content-factory digest
+  Issue through `scripts/content-digest.sh` and wait for `completed`. The
+  app's own Settings schedules must stay disabled, or each slot runs twice.
+  Queue `content` is declared in `worker/dagu-config.yaml`.
 
 Swamp rules in CLAUDE.md (search before you build, `swamp workflow create`)
 apply only to the not-yet-migrated QA workflows.

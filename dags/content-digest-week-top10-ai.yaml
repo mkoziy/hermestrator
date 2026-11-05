@@ -1,0 +1,15 @@
+description: >-
+  Runs a content-factory week_top10/ai digest Issue and waits for it to finish
+  (mirrors the schedule formerly kept in the app's Settings).
+schedule:
+  - "CRON_TZ=Europe/Berlin 0 11 * * 6"
+queue: content
+timeout_sec: 3600
+params:
+  - FORMAT: week_top10
+  - TOPIC: ai
+env:
+  - RUN_ID: ${DAG_RUN_ID}
+steps:
+  - name: run-issue
+    run: scripts/content-digest.sh

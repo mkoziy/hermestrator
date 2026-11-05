@@ -7,3 +7,5 @@ queues:
   config:
     - name: coding
       max_concurrency: 1 # ralphex owns a mutable checkout per run
+    - name: content
+      max_concurrency: 2 # content-factory runs 4 activities process-wide; more only queues there
