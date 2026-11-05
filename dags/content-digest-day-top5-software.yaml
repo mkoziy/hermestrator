@@ -4,6 +4,7 @@ description: >-
 schedule:
   - "CRON_TZ=Europe/Berlin 30 10 * * *"
   - "CRON_TZ=Europe/Berlin 30 17 * * *"
+working_dir: /workspace
 queue: content
 timeout_sec: 3600
 params:
