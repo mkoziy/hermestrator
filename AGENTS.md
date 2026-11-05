@@ -207,11 +207,9 @@ that repo (not to hermestrator) with this prompt:
 Independent of the dev flow above (implement → PR), a second poller/worker
 pair QAs the PR the dev flow opened:
 
-- **Trigger**: `scripts/github-ticket-worker.sh`'s `mark_ready_for_qa`
-  helper (called from all three of its PR-ready exit paths — reuse an
-  existing open PR, reuse a concurrently-created PR, a newly created PR —
-  don't add a fourth call site that bypasses it) removes `agent-ready` and
-  any stale `agent-qa-failed`, and adds `agent-qa-ready`.
+- **Trigger**: a human adds `agent-qa-ready` to the issue. Nothing in the dev
+  flow sets it — `scripts/github-ticket-worker.sh` changes no labels at all,
+  and marking a ticket ready for QA stays a manual step on purpose.
 - **`workflows/workflow-github-qa-poller.yaml`** is one workflow covering
   every polled repo (`repos` input, comma-separated) — deliberately *not*
   one file per repo like the dev flow's `-files-nest.yaml`/etc., so the
@@ -285,9 +283,11 @@ pair QAs the PR the dev flow opened:
   remove that convention without updating `scripts/github-ticket-worker.sh`
   and `scripts/github-ticket-poller.sh` together, since the poller depends
   on it to detect a "plan committed" state.
-- After a successful run, the worker moves the processed plan to
-  `docs/plans/archive/` and removes the `agent-ready` label. A follow-up on
-  the same issue is just: commit a new `docs/plans/*.md` file to the same
+- After a successful run ralphex itself moves the processed plan into
+  `docs/plans/completed/` and commits it; the worker then pushes the branch and
+  opens or updates the PR. The worker changes no labels: on a later tick the
+  poller removes `agent-ready` once the branch has no unarchived plan and a PR
+  exists. A follow-up on the same issue is just: commit a new `docs/plans/*.md` file to the same
   `agent/issue-<N>` branch and re-add `agent-ready` — the poller re-triggers
   the worker, which pushes into the still-open PR or opens a new one if the
   previous PR was closed/merged.
@@ -304,10 +304,8 @@ pair QAs the PR the dev flow opened:
   branch (ralphex progress push, a follow-up plan) yields a new id. A failed
   run with no new commit is therefore not retried automatically — push a new
   commit to the `agent/issue-<N>` branch to retrigger it.
-- The post-ralphex archive step in `github-ticket-worker.sh` only `git mv`s
-  the plan into `docs/plans/archive/` if it's still at its original path.
-  Some plans instruct ralphex to move themselves elsewhere (e.g.
-  `docs/plans/completed/`) as one of their own tasks — if ralphex already did
-  that and committed it, the original path is gone and `git mv` on it would
-  fail with a fatal "bad source" error (exit 128), killing an otherwise
-  fully-successful run right before push/PR.
+- The worker does not archive plans itself. ralphex runs with the default
+  `move_plan_on_completion = true`, and `github-ticket-worker.sh` treats a plan
+  still sitting at its original path after a full run as a hard failure rather
+  than silently moving it — otherwise a re-added `agent-ready` with no new plan
+  would re-trigger the issue forever.

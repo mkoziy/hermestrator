@@ -55,8 +55,9 @@ worker: clone target repo @ agent/issue-N into a fresh /tmp workspace
         → ralphex <plan-file> --base-ref <default-branch> --branch agent/issue-N
         → ralphex commits, archives the plan to docs/plans/completed/ or
           docs/plans/archive/, and moves on
-        → push agent/issue-N, open or update the PR, remove agent-ready,
-          add agent-qa-ready
+        → push agent/issue-N, open or update the PR (the worker changes no
+          labels; the poller removes agent-ready on a later tick once the PR
+          exists, and agent-qa-ready is added by hand)
         │
         ▼
 qa poller (cron, ~15m): finds agent-qa-ready issues with an open PR

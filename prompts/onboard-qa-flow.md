@@ -22,11 +22,10 @@ All three must exist — `gh issue edit` fails if a label doesn't already
 exist repo-wide, so create these up front (`gh label create <name> --repo
 <owner/name> ...`, skip any that already exist):
 
-- `agent-qa-ready` — PR is ready to be QA'd (added automatically by the dev
-  worker when it finishes; you're just making sure the label exists)
+- `agent-qa-ready` — PR is ready to be QA'd (added by hand; the dev worker
+  never sets it — you're just making sure the label exists)
 - `agent-qa-passed` — QA verdict: pass
-- `agent-qa-failed` — QA verdict: fail (a subsequent dev-worker run flips this
-  back to `agent-ready` for a retry)
+- `agent-qa-failed` — QA verdict: fail
 
 `agent-pi`/`agent-codex` (same labels as the dev flow, same routing rule —
 `agent-pi` wins if both present) also control which agent QAs the issue; only
