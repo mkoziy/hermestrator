@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           image="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
-          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; dagu version; dagu validate /workspace/dags/github-ticket-poller.yaml; dagu validate /workspace/dags/github-ticket-worker.yaml; ralphex --version; codex --version; pi --version; gremlins --version; unzip -v >/dev/null; agent-browser --version; chromium --version; gh --version; git --version; jq --version; node --version; mise --version'
+          docker run --rm --entrypoint sh "$image" -eu -c 'swamp version; dagu version; dagu validate /workspace/dags/github-ticket-poller.yaml; dagu validate /workspace/dags/github-ticket-worker.yaml; dagu validate /workspace/dags/workspace-cleanup.yaml; ralphex --version; codex --version; pi --version; gremlins --version; unzip -v >/dev/null; agent-browser --version; chromium --version; gh --version; git --version; jq --version; node --version; mise --version'
 
       - name: Validate image (qa)
         if: matrix.target == 'qa'

@@ -71,10 +71,16 @@ State that must survive a restart lives on volumes:
 | `/var/lib/dagu` | run history, logs, queue, `config.yaml` (rewritten from the image on every start) |
 | `/var/lib/hermestrator/artifacts` | per-run ralphex stdout/stderr/progress and `note.json`, kept until the vault note is pushed |
 | `/workspace/.vault-clone` | Git checkout of the notes vault (cloned by the entrypoint when empty) |
+| `/home/worker/.local/share/mise`, `/home/worker/.android-sdk`, `/home/worker/.bun`, `/home/worker/.cache` | optional but recommended tool cache: what each repo's `agent-setup.sh` installs (the Android SDK alone is ~6 GB). Shared across all repos and runs; without a volume it is re-downloaded after every restart |
 | `/home/worker/.codex`, `/home/worker/.pi/agent` | optional tool config/session state; not required for API-key auth |
 
 Do not mount a personal Codex or Pi auth directory by default, because its
 stored auth can override runtime environment credentials.
+
+Failed runs keep their isolated workspace in `/tmp/github-ticket-worker.*` for
+diagnosis; the `workspace-cleanup` DAG removes those older than 3 days every
+night. Set an `ephemeral-storage` limit on the container so a runaway
+install can't fill the node.
 
 Run any `dagu` CLI command as the `worker` user (`docker exec -u worker ...`).
 The server drops to `worker`; a command run as root creates root-owned

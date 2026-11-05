@@ -1,0 +1,9 @@
+description: >-
+  Daily: removes the isolated workspaces github-ticket-worker.sh preserves in
+  /tmp after a failed run ("Workspace preserved for diagnosis") once they are
+  older than 3 days, so failures don't fill the container's ephemeral storage.
+schedule: "0 4 * * *"
+timeout_sec: 600
+steps:
+  - name: prune
+    command: find /tmp -maxdepth 1 -name 'github-ticket-worker.*' -mtime +3 -exec rm -rf -- {} +

@@ -234,9 +234,12 @@ fi
 ralphex_started=true
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sync_progress_artifact
+# tee keeps the artifact files (the vault note reads them after a hard
+# timeout) and also streams ralphex's output into this step's stdout/stderr,
+# so it is visible live in the dagu UI. `$!` is still ralphex's own pid.
 ralphex "${ralphex_args[@]}" \
-  >"$artifact_dir/ralphex.stdout.log" \
-  2>"$artifact_dir/ralphex.stderr.log" &
+  > >(tee "$artifact_dir/ralphex.stdout.log") \
+  2> >(tee "$artifact_dir/ralphex.stderr.log" >&2) &
 ralphex_pid=$!
 elapsed_seconds=0
 while kill -0 "$ralphex_pid" 2>/dev/null; do

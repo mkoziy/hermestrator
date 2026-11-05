@@ -27,6 +27,17 @@ chown --recursive worker:worker "$DAGU_HOME" "$CODEX_HOME" "$PI_CODING_AGENT_DIR
 
 install --owner=worker --group=worker --mode=0644 /usr/local/share/dagu/config.yaml "$DAGU_HOME/config.yaml"
 
+# Per-repo tool installs (mise, the Android SDK, bun) are mounted from a PVC so
+# they survive restarts. Kubelet creates mount points and their parents as
+# root, so hand them to `worker`; chown -R only a still-root-owned (fresh)
+# directory, not a multi-GB SDK on every start.
+mkdir --parents /home/worker/.local/share
+chown worker:worker /home/worker/.local /home/worker/.local/share
+for d in /home/worker/.local/share/mise /home/worker/.android-sdk /home/worker/.bun /home/worker/.cache; do
+  mkdir --parents "$d"
+  [[ "$(stat -c %U "$d")" == worker ]] || chown --recursive worker:worker "$d"
+done
+
 if [[ -n "${OPENAI_API_KEY:-}" && -z "${CODEX_ACCESS_TOKEN:-}" ]]; then
   printf '%s' "$OPENAI_API_KEY" | gosu worker codex login --with-api-key
 fi
