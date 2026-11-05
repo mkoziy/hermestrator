@@ -3,6 +3,8 @@ description: >-
   agent/issue-<N> branch already has a committed ralphex plan, and enqueues
   github-ticket-worker for each. One step per repo so a failing repo doesn't
   block the others; add a repo by copying a step.
+labels:
+  - workspace: tickets
 schedule: "*/15 * * * *"
 working_dir: /workspace
 timeout_sec: 300

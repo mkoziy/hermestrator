@@ -1,6 +1,8 @@
 description: >-
   Runs a content-factory trending_top5/software digest Issue and waits for it to finish
   on the schedule below.
+labels:
+  - workspace: content-factory
 schedule:
   - "CRON_TZ=Europe/Berlin 30 11 * * *"
   - "CRON_TZ=Europe/Berlin 30 18 * * *"

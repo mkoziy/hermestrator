@@ -58,6 +58,7 @@ dagu 2.25:
   deterministic id calls `dagu enqueue --run-id` from a script.
 - A failing `handler_on.exit` fails the run even when every step succeeded.
 - Run `dagu` CLI commands as the `worker` user, never root.
+- DAGs carry a `workspace` label: `content-factory` for content-digest-*, `tickets` for the coding flow (poller, worker, cleanup). Keep it on new DAGs.
 - `dags/content-digest-*.yaml` (one per format/topic, `schedule:` list with
   `CRON_TZ=Europe/Berlin`, the container is UTC) start a content-factory digest
   Issue through `scripts/content-digest.sh` and wait for `completed`. The

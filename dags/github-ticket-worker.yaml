@@ -4,6 +4,8 @@ description: >-
   plan committed to docs/plans/. Normally enqueued by github-ticket-poller;
   the exit handler mirrors the run into the Obsidian vault whether or not
   implementation succeeded.
+labels:
+  - workspace: tickets
 queue: coding
 working_dir: /workspace
 timeout_sec: 7200
