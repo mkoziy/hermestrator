@@ -1,6 +1,6 @@
 description: >-
   Runs a content-factory day_top5/software digest Issue and waits for it to finish
-  (mirrors the schedule formerly kept in the app's Settings).
+  on the schedule below.
 schedule:
   - "CRON_TZ=Europe/Berlin 30 10 * * *"
   - "CRON_TZ=Europe/Berlin 30 17 * * *"

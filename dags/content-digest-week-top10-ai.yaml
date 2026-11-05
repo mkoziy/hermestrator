@@ -1,6 +1,6 @@
 description: >-
   Runs a content-factory week_top10/ai digest Issue and waits for it to finish
-  (mirrors the schedule formerly kept in the app's Settings).
+  on the schedule below.
 schedule:
   - "CRON_TZ=Europe/Berlin 0 13 * * 6"
 queue: content
