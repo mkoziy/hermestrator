@@ -122,6 +122,26 @@ RUN case "$TARGETARCH" in \
     && tar --extract --gzip --file /tmp/dagu.tar.gz --directory /usr/local/bin dagu \
     && rm /tmp/dagu.tar.gz
 
+# The coding runs used to execute in the all-in-one `ephemeral` image, so repos
+# onboarded against it rely on what it carried: unzip and the headless-emulator
+# libs a per-repo agent-setup.sh can't install itself (it runs as the
+# unprivileged `worker`), plus Chromium and agent-browser for browser-driven
+# checks. Same install as the `qa` stage below, see the notes there.
+ARG AGENT_BROWSER_VERSION=0.37.1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y chromium unzip \
+      libgl1 libpulse0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global --ignore-scripts "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && npm cache clean --force \
+    && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-* \
+    && chown --recursive worker:worker /home/worker/.npm \
+    && mkdir -p /home/worker/.config/agent-browser \
+    && printf '{"executablePath":"/usr/bin/chromium"}\n' >/home/worker/.config/agent-browser/config.json \
+    && chown --recursive worker:worker /home/worker/.config
+
 COPY --chown=worker:worker worker/ralphex-codex/ /home/worker/.config/ralphex-codex/
 COPY --chown=worker:worker worker/ralphex-pi/ /home/worker/.config/ralphex-pi/
 COPY --chown=worker:worker worker/ralphex-common/agents/ /home/worker/.config/ralphex-codex/agents/
@@ -143,11 +163,12 @@ COPY worker/dagu-config.yaml /usr/local/share/dagu/config.yaml
 # dagu hands steps only an env allowlist (PATH/HOME/... plus DAGU_*): list what
 # the ticket scripts need on top — per-owner GitHub tokens (prefix), agent
 # credentials, and the tool-state dirs the entrypoint points at.
-ENV DAGU_HOME=/var/lib/dagu \
+ENV AGENT_BROWSER_CONFIG=/home/worker/.config/agent-browser/config.json \
+    DAGU_HOME=/var/lib/dagu \
     DAGU_DAGS_DIR=/workspace/dags \
     DAGU_SKIP_EXAMPLES=true \
     DAGU_ENV_PASSTHROUGH_PREFIXES=GH_TOKEN_ \
-    DAGU_ENV_PASSTHROUGH=CODEX_ACCESS_TOKEN,OPENAI_API_KEY,OPENCODE_API_KEY,CODEX_HOME,PI_CODING_AGENT_DIR,GH_CONFIG_DIR
+    DAGU_ENV_PASSTHROUGH=CODEX_ACCESS_TOKEN,OPENAI_API_KEY,OPENCODE_API_KEY,CODEX_HOME,PI_CODING_AGENT_DIR,GH_CONFIG_DIR,AGENT_BROWSER_CONFIG
 
 ENTRYPOINT ["/usr/local/bin/dagu-entrypoint"]
 CMD ["dagu", "start-all", "--host", "0.0.0.0"]

@@ -23,6 +23,7 @@ rg -U -- 'name: write-notes[\s\S]*?step: vault-pull[\s\S]*?type: always' \
   "$repo_root/workflows/workflow-vault-note-recovery.yaml" >/dev/null
 
 mkdir -p "$test_root/artifacts/run-123" "$test_root/vault"
+export GH_TOKEN_OWNER=test-owner-token
 gh() {
   printf '%s\n' '{"number":7,"title":"Test issue","body":"body","state":"OPEN","labels":[],"url":"https://example.test/issues/7","comments":[]}'
 }

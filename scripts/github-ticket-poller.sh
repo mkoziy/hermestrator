@@ -25,6 +25,12 @@ command -v gh >/dev/null || { printf 'ERROR: gh is required\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 command -v dagu >/dev/null || { printf 'ERROR: dagu is required\n' >&2; exit 1; }
 
+# A cron-started DAG run exports DAGU_DAG_DEFINITION_ID (the poller's own
+# name), and `dagu enqueue` inherits it: the enqueued worker run would be
+# recorded under the poller instead of github-ticket-worker, where the
+# `dagu status` dedup check below can never find it.
+unset DAGU_DAG_DEFINITION_ID
+
 issues_json="$(gh issue list --repo "$REPO" --label "$LABEL" --state open --json number,labels)"
 if [[ "$(jq 'length' <<<"$issues_json")" -eq 0 ]]; then
   printf 'No open %s issues on %s\n' "$LABEL" "$REPO"

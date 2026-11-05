@@ -66,8 +66,8 @@ apply only to the not-yet-migrated QA workflows.
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (swamp, gh, mise,
 codex, pi — everything every target needs), then two targets built on top of
-it: `dev` (the ralphex-based coding image, adds ralphex/gremlins and dagu —
-the one k3s/Compose run) and `qa` (browser-driven QA worker, built `FROM base`
+it: `dev` (the ralphex-based coding image, adds ralphex/gremlins, dagu, and
+Chromium/agent-browser/`unzip` + emulator libs — the one k3s/Compose run) and `qa` (browser-driven QA worker, built `FROM base`
 — adds chromium/agent-browser, deliberately not ralphex; not deployed, see "QA
 flow" below). Put a tool in `base` only if every target actually uses it; a
 version/checksum bump on a shared tool then happens once, not once per target.

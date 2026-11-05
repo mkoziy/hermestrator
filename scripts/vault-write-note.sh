@@ -83,7 +83,12 @@ elif [[ -z "$note_line" ]]; then
     artifact_log_file="$(mktemp "${TMPDIR:-/tmp}/vault-write-note-progress.XXXXXX")"
     printf 'Worker output was not preserved and no progress artifact was available.' >"$artifact_log_file"
   fi
-  issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+  # The ambient gh login is the vault token, which only sees the vault's owner;
+  # read the issue with the repo owner's own GH_TOKEN_<OWNER> like the ticket
+  # scripts do.
+  owner_token_var="GH_TOKEN_$(printf '%s' "${REPO%%/*}" | tr 'a-z.-' 'A-Z__')"
+  : "${!owner_token_var:?$owner_token_var is required to read $REPO}"
+  issue_json="$(GH_TOKEN="${!owner_token_var}" gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json number,title,body,state,labels,url,comments)"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   json="$(jq -nc \

@@ -9,8 +9,9 @@ checkout for each run, so do not raise it.
 
 `worker/Dockerfile` is multi-stage: a shared `base` stage (Swamp, gh, mise,
 Codex CLI, Pi coding agent, the `worker` user), then two targets built on top
-of it — `dev` (this document — adds ralphex/gremlins and dagu, and is the
-image k3s/Compose run) and `qa` (built `FROM base`, adds chromium/agent-browser;
+of it — `dev` (this document — adds ralphex/gremlins, dagu, and Chromium +
+agent-browser + `unzip` + the headless-emulator libs that repo `agent-setup.sh`
+scripts rely on; it is the image k3s/Compose run) and `qa` (built `FROM base`, adds chromium/agent-browser;
 **not deployed**, see "QA ticket worker" below). Swamp stays in `base` only
 because `qa` still needs it until QA moves to dagu. Build with `docker build
 --target dev` or `--target qa`.

@@ -36,6 +36,9 @@ GH
 
 cat >"$fake_bin/dagu" <<'DAGU'
 #!/usr/bin/env bash
+# A cron-started run exports this; if it reaches `dagu enqueue`, the worker run
+# is recorded under the poller and the status-based dedup never finds it.
+[[ -z "${DAGU_DAG_DEFINITION_ID:-}" ]] || { echo "DAGU_DAG_DEFINITION_ID leaked into dagu" >&2; exit 99; }
 case "$1" in
   status) grep -qxF "$4" "$EXISTING_RUN_IDS" ;;
   enqueue) printf '%s\n' "$*" >>"$ENQUEUE_LOG" ;;
@@ -52,7 +55,7 @@ SHA
 chmod +x "$fake_bin"/*
 
 run_poller() {
-  PATH="$fake_bin:$PATH" GH_TOKEN_MOONTECHS=x REPO=moontechs/app RALPHEX_CONFIG=ralphex-codex \
+  PATH="$fake_bin:$PATH" DAGU_DAG_DEFINITION_ID=github-ticket-poller GH_TOKEN_MOONTECHS=x REPO=moontechs/app RALPHEX_CONFIG=ralphex-codex \
     GH_ISSUES_JSON="$test_root/issues.json" EXISTING_RUN_IDS="$test_root/existing" \
     ENQUEUE_LOG="$test_root/enqueue.log" "$poller" >"$test_root/out.log" 2>&1 \
     || { cat "$test_root/out.log" >&2; fail "poller exited non-zero"; }
