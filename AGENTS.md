@@ -62,8 +62,10 @@ dagu 2.25:
 - `dags/content-digest-*.yaml` (one per format/topic, `schedule:` list with
   `CRON_TZ=Europe/Berlin`, the container is UTC) start a content-factory digest
   Issue through `scripts/content-digest.sh` and wait for `completed`. The
-  app (v1.0.0+) has no built-in schedules; Dagu is the only trigger. A retry
-  after `failed` is a manual `POST /api/digests/{id}/retry`, never from a DAG.
+  app (v1.0.0+) has no built-in schedules; Dagu is the only trigger. A failed
+  Issue is retried only by a human pressing Retry in Dagu: the script then
+  calls `POST /api/digests/{id}/retry` (same idempotency key returns the old
+  Issue). Never retried automatically.
   Queue `content` is declared in `worker/dagu-config.yaml`.
 
 Swamp rules in CLAUDE.md (search before you build, `swamp workflow create`)

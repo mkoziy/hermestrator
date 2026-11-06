@@ -29,6 +29,14 @@ issue="$(cf -m 400 -X POST "$cf_url/api/digests" -H "X-CSRF-Token: $csrf" -H 'Co
 id="$(jq -er '.data.issue.id' <<<"$issue")"
 printf 'Issue %s (%s/%s) started\n' "$id" "$FORMAT" "$TOPIC"
 
+# A manual dagu Retry reuses the key, so the app returns the old, already
+# failed Issue: ask the app to retry it (fresh sources) instead of re-polling.
+case "$(jq -r '.data.issue.state' <<<"$issue")" in
+  failed | completed_with_failures)
+    cf -m 400 -X POST "$cf_url/api/digests/$id/retry" -H "X-CSRF-Token: $csrf" -o /dev/null
+    printf 'Issue %s was %s, retry requested\n' "$id" "$(jq -r '.data.issue.state' <<<"$issue")" ;;
+esac
+
 last=""
 while :; do
   body="$(cf -m 30 "$cf_url/api/digests/$id")"
