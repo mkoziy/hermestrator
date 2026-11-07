@@ -16,7 +16,12 @@ command -v jq >/dev/null || { printf 'ERROR: jq is required\n' >&2; exit 1; }
 
 jar="$(mktemp)"
 trap 'rm -f "$jar"' EXIT
-cf() { curl -fsS -H "Host: $cf_host" -b "$jar" -c "$jar" "$@"; }
+# On 4xx/5xx the app's error body goes to stderr (dagu shows it), not into the caller's $(...).
+cf() {
+  local out
+  out="$(curl --fail-with-body -sS -H "Host: $cf_host" -b "$jar" -c "$jar" "$@")" || { printf '%s\n' "$out" >&2; return 1; }
+  printf '%s' "$out"
+}
 
 cf -m 30 -o /dev/null "$cf_url/healthz" # any GET sets the csrf cookie
 csrf="$(awk '$6 == "csrf" { print $7 }' "$jar")"
