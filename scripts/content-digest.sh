@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Starts one content-factory digest Issue and waits for its terminal state.
 # Invoked by the content-digest-* dagu DAGs. Only `completed` is success.
+# A failed Target Run keeps the Issue `running` (the other languages wait at the
+# Site Group barrier, and the topic's sites stay busy), so it fails this run at
+# once; a manual Dagu Retry then retries the failed Target Runs. Never automatic.
 # The app has no auth (VPN-only): CSRF double-submit, same as its SPA.
 set -Eeuo pipefail
 
@@ -40,6 +43,11 @@ case "$(jq -r '.data.issue.state' <<<"$issue")" in
   failed | completed_with_failures)
     cf -m 400 -X POST "$cf_url/api/digests/$id/retry" -H "X-CSRF-Token: $csrf" -o /dev/null
     printf 'Issue %s was %s, retry requested\n' "$id" "$(jq -r '.data.issue.state' <<<"$issue")" ;;
+  running)
+    while read -r run; do
+      cf -m 400 -X POST "$cf_url/api/target-runs/$run/retry" -H "X-CSRF-Token: $csrf" -o /dev/null
+      printf 'Target run %s was failed, retry requested\n' "$run"
+    done < <(cf -m 30 "$cf_url/api/digests/$id" | jq -r '.data.targets[]? | select(.state == "failed") | .runs[-1].id') ;;
 esac
 
 last=""
@@ -54,6 +62,11 @@ while :; do
       jq -r '(.data.attempts[]? | select(.diagnostic != "") | "attempt \(.number): \(.diagnostic)"),
              (.data.targets[]? | select(.diagnostic != "") | "\(.language): \(.diagnostic)")' <<<"$body" >&2
       exit 1 ;;
+    running)
+      jq -e '[.data.targets[]? | select(.state == "failed")] | length == 0' <<<"$body" >/dev/null || {
+        jq -r '.data.targets[] | select(.state == "failed") | "\(.language): \(.diagnostic) (retry: Dagu Retry, or POST /api/target-runs/\(.runs[-1].id)/retry)"' <<<"$body" >&2
+        exit 1
+      } ;;
   esac
   sleep "$poll_seconds"
 done

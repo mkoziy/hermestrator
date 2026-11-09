@@ -65,7 +65,9 @@ dagu 2.25:
   app (v1.0.0+) has no built-in schedules; Dagu is the only trigger. A failed
   Issue is retried only by a human pressing Retry in Dagu: the script then
   calls `POST /api/digests/{id}/retry` (same idempotency key returns the old
-  Issue). Never retried automatically.
+  Issue); if the Issue is still `running` it retries the `failed` Target Runs
+  via `POST /api/target-runs/{id}/retry` instead. While polling, a `failed`
+  Target Run fails the DAG run at once. Never retried automatically.
   Queue `content` is declared in `worker/dagu-config.yaml`.
 - **A digest Issue stuck `running` = one failed Target Run.** Publication is
   gated per Site Group (ADR-0020): if one language fails (e.g. `read OpenRouter
@@ -75,7 +77,8 @@ dagu 2.25:
   sites is already used by a Digest that hasn't finished`, and
   `POST /api/digests/{id}/retry` is also 422 (Issue retry exists only for
   failed/completed_with_failures). The Dagu run that was polling may have died
-  independently (e.g. `curl: (7)` during an app rollout). Fix: find the
+  independently (e.g. `curl: (7)` during an app rollout). The script now fails
+  fast on a failed target and Dagu Retry retries it. By hand: find the
   `failed` target in `GET /api/digests/{id}` and `POST
   /api/target-runs/{target_run_id}/retry` (CSRF as in `content-digest.sh`);
   the Issue then completes. Retry is 422 for `running` targets, so don't
