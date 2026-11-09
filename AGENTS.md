@@ -67,19 +67,20 @@ dagu 2.25:
   calls `POST /api/digests/{id}/retry` (same idempotency key returns the old
   Issue). Never retried automatically.
   Queue `content` is declared in `worker/dagu-config.yaml`.
-- **Content-factory restart mid-Issue orphans the Issue.** Restarting or
-  redeploying the app (k3s bump) while an Issue is `running` kills its
-  workflow but leaves the state `running` forever (no crash recovery;
-  `updated_at` stops moving). It then holds its Target Site Profiles, so every
-  new start of the same topic fails with `422 One of the target sites is
-  already used by a Digest that hasn't finished`, and
-  `POST /api/digests/{id}/retry` is also 422 (retry only exists for
-  failed/completed_with_failures). The Dagu run that was polling dies with
-  `curl: (7) Failed to connect`. Symptoms look like "the DAG is broken";
-  it isn't. Before bumping content-factory in `k3s-cluster`, check
-  `GET /api/digests` for `running` Issues and wait for them. Don't re-trigger
-  the DAG by hand against a `running` Issue: each manual run is a new
-  idempotency key and just 422s.
+- **A digest Issue stuck `running` = one failed Target Run.** Publication is
+  gated per Site Group (ADR-0020): if one language fails (e.g. `read OpenRouter
+  response: context deadline exceeded`), the others finish generating but wait
+  for it, so the Issue stays `running` and holds its Target Site Profiles.
+  Every new start of the same topic then fails with `422 One of the target
+  sites is already used by a Digest that hasn't finished`, and
+  `POST /api/digests/{id}/retry` is also 422 (Issue retry exists only for
+  failed/completed_with_failures). The Dagu run that was polling may have died
+  independently (e.g. `curl: (7)` during an app rollout). Fix: find the
+  `failed` target in `GET /api/digests/{id}` and `POST
+  /api/target-runs/{target_run_id}/retry` (CSRF as in `content-digest.sh`);
+  the Issue then completes. Retry is 422 for `running` targets, so don't
+  conclude the Issue is dead because they look idle. Don't re-trigger the DAG
+  by hand meanwhile: each manual run is a new idempotency key and just 422s.
 
 Swamp rules in CLAUDE.md (search before you build, `swamp workflow create`)
 apply only to the not-yet-migrated QA workflows.
