@@ -1,0 +1,18 @@
+description: >-
+  Runs a content-factory trending_top10/software digest Issue and waits for it to finish
+  on the schedule below.
+labels:
+  - workspace: content-factory
+schedule:
+  - "CRON_TZ=Europe/Berlin 30 14 * * 6"
+working_dir: /workspace
+queue: content
+timeout_sec: 3600
+params:
+  - FORMAT: trending_top10
+  - TOPIC: software
+env:
+  - RUN_ID: ${DAG_RUN_ID}
+steps:
+  - name: run-issue
+    run: scripts/content-digest.sh
